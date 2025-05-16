@@ -69,12 +69,8 @@ import { CellLockManager } from '@jupyterlab/notebook/lib/collab/locks';
 
 // Import UI components
 import { TrustedComponent } from './trusted';
-// These components will be created in separate files
-// import { CollaborationBarComponent } from './components/collaborationBar';
-// import { UserPresenceComponent } from './components/userPresence';
-// import { CommentSystemComponent } from './components/commentSystem';
-// import { HistoryViewerComponent } from './components/historyViewer';
-// import { PermissionsDialogComponent } from './components/permissionsDialog';
+// Import collaboration UI components
+import { historyViewerPlugin } from './historyViewerPlugin';
 
 /**
  * The class for kernel status errors.
@@ -1340,7 +1336,8 @@ const plugins: JupyterFrontEndPlugin<any>[] = [
   commentManager,
   versionHistory,
   cellLocking,
-  collaborationUI
+  collaborationUI,
+  historyViewerPlugin
 ];
 
 export default plugins;
