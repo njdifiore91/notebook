@@ -4,7 +4,11 @@
   },
   "plugins": ["plugins/markdown", "jsdoc_plugin.js"],
   "source": {
-    "include": ["../notebook/static/notebook/js/notebook.js"]
+    "include": [
+      "../notebook/static/notebook/js/notebook.js",
+      "../packages/notebook/src/collab/*.ts",
+      "../packages/notebook-extension/src/components/*.tsx"
+    ]
   },
   "tags": {
     "allowUnknownTags": true
