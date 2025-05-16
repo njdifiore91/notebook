@@ -1,0 +1,377 @@
+/*
+ * History Viewer component styles
+ */
+
+.jp-HistoryViewer {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+  background-color: var(--jp-layout-color1);
+  color: var(--jp-ui-font-color1);
+}
+
+.jp-HistoryViewer-container {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+  padding: 10px;
+}
+
+/* Loading and error states */
+.jp-HistoryViewer-loading {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  width: 100%;
+  gap: 10px;
+}
+
+.jp-HistoryViewer-error {
+  margin: 10px 0;
+}
+
+/* Toolbar */
+.jp-HistoryViewer-toolbar {
+  display: flex;
+  justify-content: space-between;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--jp-border-color2);
+  margin-bottom: 10px;
+}
+
+.jp-HistoryViewer-toolbarLeft,
+.jp-HistoryViewer-toolbarRight {
+  display: flex;
+  gap: 8px;
+}
+
+/* Filters */
+.jp-HistoryViewer-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 15px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--jp-border-color2);
+}
+
+/* Main content */
+.jp-HistoryViewer-content {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+  gap: 20px;
+}
+
+/* Version list */
+.jp-HistoryViewer-versionList {
+  flex: 0 0 300px;
+  overflow-y: auto;
+  border-right: 1px solid var(--jp-border-color2);
+  padding-right: 10px;
+}
+
+.jp-HistoryViewer-versions {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.jp-HistoryViewer-versionItem {
+  border: 1px solid var(--jp-border-color2);
+  border-radius: 4px;
+  padding: 10px;
+  cursor: pointer;
+  transition: background-color 0.2s ease;
+}
+
+.jp-HistoryViewer-versionItem:hover {
+  background-color: var(--jp-layout-color2);
+}
+
+.jp-HistoryViewer-versionItem.jp-mod-selected {
+  background-color: var(--jp-brand-color1);
+  color: white;
+}
+
+.jp-HistoryViewer-versionItem.jp-mod-compare {
+  border: 2px solid var(--jp-brand-color2);
+}
+
+.jp-HistoryViewer-versionHeader {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 5px;
+}
+
+.jp-HistoryViewer-versionInfo {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.jp-HistoryViewer-versionNumber {
+  font-weight: bold;
+}
+
+.jp-HistoryViewer-versionDate {
+  font-size: 0.9em;
+  color: var(--jp-ui-font-color2);
+}
+
+.jp-HistoryViewer-versionItem.jp-mod-selected .jp-HistoryViewer-versionDate {
+  color: var(--jp-ui-inverse-font-color2);
+}
+
+.jp-HistoryViewer-checkpointTag {
+  background-color: var(--jp-success-color1);
+  color: white;
+}
+
+.jp-HistoryViewer-versionUser {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.jp-HistoryViewer-userAvatar {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: white;
+  font-weight: bold;
+}
+
+.jp-HistoryViewer-userName {
+  font-size: 0.9em;
+}
+
+.jp-HistoryViewer-versionDescription {
+  margin: 5px 0;
+  font-size: 0.95em;
+}
+
+.jp-HistoryViewer-versionActions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 5px;
+}
+
+/* Diff view */
+.jp-HistoryViewer-diffView {
+  flex: 1;
+  overflow-y: auto;
+  padding-left: 10px;
+}
+
+.jp-HistoryViewer-diffInfo {
+  font-size: 0.9em;
+  color: var(--jp-ui-font-color2);
+  margin-left: 10px;
+}
+
+.jp-HistoryViewer-diffSummary {
+  margin-bottom: 15px;
+  padding: 10px;
+  background-color: var(--jp-layout-color2);
+  border-radius: 4px;
+}
+
+.jp-HistoryViewer-cellFilters {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 15px;
+}
+
+.jp-HistoryViewer-cellFilters button.jp-mod-selected {
+  background-color: var(--jp-brand-color1);
+  color: white;
+}
+
+.jp-HistoryViewer-metadataChanges {
+  margin-bottom: 15px;
+}
+
+.jp-HistoryViewer-metadataTable {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.jp-HistoryViewer-metadataTable th,
+.jp-HistoryViewer-metadataTable td {
+  padding: 8px;
+  text-align: left;
+  border-bottom: 1px solid var(--jp-border-color2);
+}
+
+.jp-HistoryViewer-metadataTable th {
+  background-color: var(--jp-layout-color2);
+}
+
+.jp-HistoryViewer-cellChanges {
+  display: flex;
+  flex-direction: column;
+  gap: 15px;
+}
+
+/* Cell diff */
+.jp-HistoryViewer-cellDiff {
+  border: 1px solid var(--jp-border-color2);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.jp-HistoryViewer-cellDiff.jp-HistoryViewer-added {
+  border-left: 4px solid var(--jp-success-color1);
+}
+
+.jp-HistoryViewer-cellDiff.jp-HistoryViewer-removed {
+  border-left: 4px solid var(--jp-error-color1);
+}
+
+.jp-HistoryViewer-cellDiff.jp-HistoryViewer-modified {
+  border-left: 4px solid var(--jp-warn-color1);
+}
+
+.jp-HistoryViewer-cellDiffHeader {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px;
+  background-color: var(--jp-layout-color2);
+  cursor: pointer;
+}
+
+.jp-HistoryViewer-cellDiffInfo {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.jp-HistoryViewer-cellType {
+  font-weight: bold;
+}
+
+.jp-HistoryViewer-timestamp {
+  font-size: 0.9em;
+  color: var(--jp-ui-font-color2);
+}
+
+.jp-HistoryViewer-addedTag {
+  background-color: var(--jp-success-color1);
+  color: white;
+}
+
+.jp-HistoryViewer-removedTag {
+  background-color: var(--jp-error-color1);
+  color: white;
+}
+
+.jp-HistoryViewer-modifiedTag {
+  background-color: var(--jp-warn-color1);
+  color: white;
+}
+
+.jp-HistoryViewer-cellDiffContent {
+  padding: 10px;
+}
+
+.jp-HistoryViewer-cellDiffCode {
+  background-color: var(--jp-layout-color2);
+  padding: 10px;
+  border-radius: 4px;
+  overflow-x: auto;
+  font-family: var(--jp-code-font-family);
+  font-size: var(--jp-code-font-size);
+  line-height: var(--jp-code-line-height);
+  white-space: pre;
+}
+
+.jp-HistoryViewer-cellDiffSplit {
+  display: flex;
+  gap: 20px;
+}
+
+.jp-HistoryViewer-cellDiffPrev,
+.jp-HistoryViewer-cellDiffCurrent {
+  flex: 1;
+}
+
+.jp-HistoryViewer-outputChanges,
+.jp-HistoryViewer-cellMetadataChanges {
+  margin-top: 15px;
+  padding-top: 15px;
+  border-top: 1px solid var(--jp-border-color2);
+}
+
+/* Buttons */
+.jp-HistoryViewer-buttons {
+  display: flex;
+  gap: 8px;
+  margin-top: 15px;
+  justify-content: flex-end;
+}
+
+/* Responsive adjustments */
+@media (max-width: 900px) {
+  .jp-HistoryViewer-content {
+    flex-direction: column;
+  }
+
+  .jp-HistoryViewer-versionList {
+    flex: 0 0 auto;
+    max-height: 300px;
+    border-right: none;
+    border-bottom: 1px solid var(--jp-border-color2);
+    padding-right: 0;
+    padding-bottom: 10px;
+    margin-bottom: 10px;
+  }
+
+  .jp-HistoryViewer-diffView {
+    padding-left: 0;
+  }
+
+  .jp-HistoryViewer-cellDiffSplit {
+    flex-direction: column;
+    gap: 10px;
+  }
+}
+
+/* History Viewer Toolbar Button */
+.jp-HistoryViewer-toolbarButton {
+  background-color: var(--jp-layout-color1);
+  border: none;
+  cursor: pointer;
+  padding: 0 6px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 2px;
+}
+
+.jp-HistoryViewer-toolbarButton:hover {
+  background-color: var(--jp-layout-color2);
+}
+
+.jp-HistoryViewerIcon {
+  /* Use a background SVG for the history icon */
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' width='16' height='16' fill='%23616161'%3E%3Cpath d='M13 3a9 9 0 0 0-9 9H1l3.89 3.89.07.14L9 12H6c0-3.87 3.13-7 7-7s7 3.13 7 7-3.13 7-7 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42A8.954 8.954 0 0 0 13 21a9 9 0 0 0 0-18zm-1 5v5l4.28 2.54.72-1.21-3.5-2.08V8H12z'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: center;
+  background-size: 16px;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+}

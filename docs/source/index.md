@@ -4,7 +4,7 @@ Welcome to the **Jupyter Notebook** documentation site. **Jupyter Notebook**
 is a simplified notebook authoring application, and is a part of [Project
 Jupyter](https://docs.jupyter.org/en/latest/), a large umbrella project
 centered around the goal of providing tools (and [standards](https://docs.jupyter.org/en/latest/#sub-project-documentation))
-for interactive computing with [computational notebooks](https://docs.jupyter.org/en/latest/#what-is-a-notebook).
+for interactive computing with [computational notebooks](https://docs.jupyter.org/en/latest/#what-is-a-notebook). Jupyter Notebook v7 introduces real-time collaborative editing as a key feature, enabling multiple users to work on the same notebook simultaneously.
 
 A [computational notebook](https://docs.jupyter.org/en/latest/#what-is-a-notebook)
 is a shareable document that combines computer
@@ -12,12 +12,14 @@ code, plain language descriptions, data, rich visualizations like 3D models,
 charts, graphs and figures, and interactive controls. A notebook, along with
 an editor like **Jupyter Notebook**, provides a fast interactive environment for
 prototyping and explaining code, exploring and visualizing data, and sharing
-ideas with others.
+ideas with others. With collaborative editing capabilities, multiple users can now work together on the same notebook in real-time, enhancing team productivity and knowledge sharing.
 
 **Jupyter Notebook** is a sibling to other notebook authoring applications under
 the Project Jupyter umbrella, like [JupyterLab](https://jupyterlab.readthedocs.io/en/stable/)
 and [Jupyter Desktop](https://github.com/jupyterlab/jupyterlab-desktop).
 Jupyter Notebook offers a lightweight, simplified experience compared to JupyterLab.
+
+Jupyter Notebook v7 features comprehensive real-time collaborative editing powered by the Yjs framework. This enables multiple users to simultaneously edit notebook documents with user presence awareness, cursor/selection synchronization, cell-level locking to prevent conflicts, change history tracking, fine-grained access control, and an integrated comment and review system.
 
 Read more about how to use **Jupyter Notebook** on this site, in the [User
 Documentation](notebook.md).
@@ -35,6 +37,7 @@ Documentation](notebook.md).
 user-documentation
 configuration
 migrate_to_notebook7
+collaborative_editing
 contributor
 changelog
 ```

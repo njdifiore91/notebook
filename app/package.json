@@ -122,7 +122,9 @@
     "@lumino/widgets": "~2.7.1",
     "react": "~18.2.0",
     "react-dom": "~18.2.0",
-    "yjs": "~13.6.8"
+    "yjs": "~13.6.8",
+    "y-websocket": "~3.0.0",
+    "y-protocols": "~1.0.6"
   },
   "dependencies": {
     "@jupyter-notebook/application": "^7.5.0-alpha.0",
@@ -188,7 +190,9 @@
     "@lumino/coreutils": "~2.2.1",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
-    "yjs": "^13.5.40"
+    "yjs": "^13.6.8",
+    "y-websocket": "^3.0.0",
+    "y-protocols": "^1.0.6"
   },
   "devDependencies": {
     "@jupyterlab/builder": "~4.5.0-alpha.0",
@@ -349,7 +353,10 @@
           "@jupyterlab/notebook-extension:search",
           "@jupyterlab/notebook-extension:toc",
           "@jupyterlab/notebook-extension:tools",
-          "@jupyterlab/notebook-extension:update-raw-mimetype"
+          "@jupyterlab/notebook-extension:update-raw-mimetype",
+          "@jupyterlab/notebook-extension:collaboration-provider",
+          "@jupyterlab/notebook-extension:presence-tracker",
+          "@jupyterlab/notebook-extension:cell-locking"
         ],
         "@jupyterlab/toc-extension": [
           "@jupyterlab/toc-extension:registry",
@@ -358,6 +365,14 @@
         "@jupyterlab/tooltip-extension": [
           "@jupyterlab/tooltip-extension:manager",
           "@jupyterlab/tooltip-extension:notebooks"
+        ],
+        "@jupyter-notebook/collaboration-extension": [
+          "@jupyter-notebook/collaboration-extension:provider",
+          "@jupyter-notebook/collaboration-extension:awareness",
+          "@jupyter-notebook/collaboration-extension:permissions",
+          "@jupyter-notebook/collaboration-extension:comments",
+          "@jupyter-notebook/collaboration-extension:history",
+          "@jupyter-notebook/collaboration-extension:locks"
         ]
       },
       "/consoles": {
@@ -432,7 +447,9 @@
       "@lumino/widgets",
       "react",
       "react-dom",
-      "yjs"
+      "yjs",
+      "y-websocket",
+      "y-protocols"
     ]
   }
 }

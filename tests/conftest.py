@@ -5,6 +5,8 @@ import os.path as osp
 import pathlib
 import shutil
 import sys
+import asyncio
+from typing import Dict, List, Optional, Any, Callable, Awaitable
 
 if sys.version_info < (3, 10):
     from importlib_resources import files
@@ -12,10 +14,14 @@ else:
     from importlib.resources import files
 
 import pytest
+import y_py as ypy
+from tornado.websocket import WebSocketClientConnection
+from tornado.httpclient import AsyncHTTPClient
 
 from notebook.app import JupyterNotebookApp
+from notebook.collab.handlers import YjsDocumentProvider
 
-pytest_plugins = ["jupyter_server.pytest_plugin"]
+pytest_plugins = ["jupyter_server.pytest_plugin", "pytest_asyncio"]
 
 
 def mkdir(tmp_path, *parts):
@@ -137,3 +143,214 @@ def notebookapp(jp_serverapp, make_notebook_app):
     app._link_jupyter_server_extension(jp_serverapp)
     app.initialize()
     return app
+
+
+class CollabWebSocketClient:
+    """A WebSocket client for testing collaboration features."""
+
+    def __init__(self, serverapp, user_id="test-user", roles=None):
+        """Initialize the WebSocket client.
+        
+        Parameters
+        ----------
+        serverapp : JupyterServerApp
+            The Jupyter server application instance
+        user_id : str, optional
+            The user ID to use for this client, by default "test-user"
+        roles : list, optional
+            The roles to assign to this user, by default None
+        """
+        self.serverapp = serverapp
+        self.user_id = user_id
+        self.roles = roles or ["editor"]
+        self.connection = None
+        self.messages = []
+        self.connected = False
+        self.http_client = AsyncHTTPClient()
+        self.base_url = self.serverapp.web_app.settings["base_url"]
+        self.token = self.serverapp.web_app.settings["token"]
+
+    async def connect(self, doc_id="test-doc"):
+        """Connect to the WebSocket server.
+        
+        Parameters
+        ----------
+        doc_id : str, optional
+            The document ID to connect to, by default "test-doc"
+            
+        Returns
+        -------
+        bool
+            True if connection was successful, False otherwise
+        """
+        url = f"ws://localhost:{self.serverapp.port}{self.base_url}collab/api/yjs/{doc_id}?token={self.token}&user_id={self.user_id}"
+        self.connection = await self.serverapp.http_server.websocket_connect(url)
+        self.connected = True
+        
+        # Start message listener
+        asyncio.create_task(self._listen_for_messages())
+        return True
+
+    async def disconnect(self):
+        """Disconnect from the WebSocket server."""
+        if self.connection:
+            self.connection.close()
+            self.connected = False
+            self.connection = None
+
+    async def send_message(self, message):
+        """Send a message to the WebSocket server.
+        
+        Parameters
+        ----------
+        message : bytes or str
+            The message to send
+        """
+        if not self.connected:
+            raise RuntimeError("Not connected to WebSocket server")
+        
+        if isinstance(message, str):
+            message = message.encode("utf-8")
+            
+        await self.connection.write_message(message, binary=True)
+
+    async def _listen_for_messages(self):
+        """Listen for messages from the WebSocket server."""
+        while self.connected:
+            try:
+                msg = await self.connection.read_message()
+                if msg is None:
+                    # Connection closed
+                    self.connected = False
+                    break
+                self.messages.append(msg)
+            except Exception as e:
+                print(f"Error reading message: {e}")
+                self.connected = False
+                break
+
+    def get_messages(self):
+        """Get all received messages.
+        
+        Returns
+        -------
+        list
+            List of received messages
+        """
+        return self.messages
+
+    def clear_messages(self):
+        """Clear the message buffer."""
+        self.messages = []
+
+
+@pytest.fixture
+async def yjs_doc_provider(jp_serverapp):
+    """Create a Yjs document provider for testing.
+    
+    Returns
+    -------
+    YjsDocumentProvider
+        A Yjs document provider instance
+    """
+    provider = YjsDocumentProvider(doc_id="test-doc")
+    provider.initialize(jp_serverapp)
+    try:
+        yield provider
+    finally:
+        await provider.destroy()
+
+
+@pytest.fixture
+def awareness_state():
+    """Create an awareness state for testing user presence functionality.
+    
+    Returns
+    -------
+    dict
+        A dictionary representing the awareness state
+    """
+    # Create a Y.Doc to hold the awareness state
+    ydoc = ypy.YDoc()
+    
+    # Create an awareness map
+    awareness = {
+        "clients": {},
+        "user_ids": {}
+    }
+    
+    # Add some test users
+    awareness["clients"]["client1"] = {
+        "user": {
+            "id": "user1",
+            "name": "Test User 1",
+            "color": "#ff0000"
+        },
+        "cursor": {
+            "cellId": "cell1",
+            "position": 10
+        },
+        "selection": {
+            "cellId": "cell1",
+            "start": 5,
+            "end": 15
+        },
+        "status": "active"
+    }
+    
+    awareness["clients"]["client2"] = {
+        "user": {
+            "id": "user2",
+            "name": "Test User 2",
+            "color": "#00ff00"
+        },
+        "cursor": {
+            "cellId": "cell2",
+            "position": 5
+        },
+        "selection": None,
+        "status": "idle"
+    }
+    
+    awareness["user_ids"]["user1"] = "client1"
+    awareness["user_ids"]["user2"] = "client2"
+    
+    return awareness
+
+
+@pytest.fixture
+async def multi_client_websocket_simulation(jp_serverapp):
+    """Create a simulation of multiple clients for collaboration testing.
+    
+    Returns
+    -------
+    callable
+        A function that creates a new client with the given user ID
+    """
+    clients = []
+    
+    async def create_client(user_id="test-user", roles=None):
+        """Create a new client with the given user ID.
+        
+        Parameters
+        ----------
+        user_id : str, optional
+            The user ID to use for this client, by default "test-user"
+        roles : list, optional
+            The roles to assign to this user, by default None
+            
+        Returns
+        -------
+        CollabWebSocketClient
+            A WebSocket client instance
+        """
+        client = CollabWebSocketClient(jp_serverapp, user_id=user_id, roles=roles)
+        await client.connect()
+        clients.append(client)
+        return client
+    
+    yield create_client
+    
+    # Clean up all clients after the test
+    for client in clients:
+        await client.disconnect()

@@ -1,6 +1,6 @@
 {
   "name": "@jupyter-notebook/notebook-extension",
-  "version": "7.5.0-alpha.0",
+  "version": "7.6.0-alpha.0",
   "description": "Jupyter Notebook - Notebook Extension",
   "homepage": "https://github.com/jupyter/notebook",
   "bugs": {
@@ -49,7 +49,10 @@
     "@lumino/polling": "^2.1.4",
     "@lumino/widgets": "^2.7.1",
     "react": "^18.2.0",
-    "react-dom": "^18.2.0"
+    "react-dom": "^18.2.0",
+    "y-protocols/awareness": ">=1.0.6",
+    "y-websocket": ">=3.0.0",
+    "yjs": "^13.x"
   },
   "devDependencies": {
     "rimraf": "^3.0.2",

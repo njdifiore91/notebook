@@ -26,6 +26,17 @@
     page_config_full.update(baseUrl=base_url, wsUrl=ws_url) %} {# Sentinel value
     to say that we are on the tree page #} {% set _ =
     page_config_full.update(notebookPage='notebooks') %}
+    
+    {# Collaboration features configuration #}
+    {% set _ = page_config_full.update(collaborationEnabled=collaboration_enabled|default(false)) %}
+    {% if collaboration_enabled|default(false) %}
+      {% set _ = page_config_full.update(collaborationWsUrl=collaboration_ws_url) %}
+      {% set _ = page_config_full.update(collaborationProviderOptions=collaboration_provider_options|default({})) %}
+      {% set _ = page_config_full.update(userAwareness=user_awareness|default({})) %}
+      {% set _ = page_config_full.update(permissionModel=permission_model|default({})) %}
+      {% set _ = page_config_full.update(commentSystem=comment_system|default({})) %}
+      {% set _ = page_config_full.update(cellLocking=cell_locking|default({})) %}
+    {% endif %}
 
     <script id="jupyter-config-data" type="application/json">
       {{ page_config_full | tojson }}

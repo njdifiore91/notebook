@@ -7,6 +7,11 @@ import { PageConfig, URLExt } from '@jupyterlab/coreutils';
 
 import { PluginRegistry } from '@lumino/coreutils';
 
+// Import Yjs and related modules for collaborative editing
+import * as Y from 'yjs';
+import { WebsocketProvider } from 'y-websocket';
+import { Awareness } from 'y-protocols/awareness';
+
 require('./style.js');
 require('./extraStyle.js');
 
@@ -43,6 +48,47 @@ async function createModule(scope, module) {
       `Failed to create module: package: ${scope}; module: ${module}`
     );
     throw e;
+  }
+}
+
+/**
+ * Initialize the Yjs document and providers for collaborative editing
+ * @param {string} docId - The document identifier
+ * @param {Object} options - Configuration options
+ * @returns {Object} - The initialized collaboration objects
+ */
+async function initializeCollaboration(docId, options = {}) {
+  try {
+    // Initialize the Yjs document
+    const yjsDoc = new Y.Doc();
+    
+    // Get the WebSocket URL from options or use default
+    const websocketUrl = options.websocketUrl || 
+                        (window.location.protocol === 'https:' ? 'wss://' : 'ws://') + 
+                        window.location.host + '/collaboration';
+    
+    // Initialize the WebSocket provider for real-time synchronization
+    const websocketProvider = new WebsocketProvider(websocketUrl, docId, yjsDoc, {
+      connect: true,
+      params: options.params || {}
+    });
+    
+    // Get awareness instance from the provider
+    const awareness = websocketProvider.awareness;
+    
+    // Set initial awareness state if user info is provided
+    if (options.user) {
+      awareness.setLocalStateField('user', {
+        name: options.user.name || 'Anonymous',
+        color: options.user.color || '#' + Math.floor(Math.random() * 16777215).toString(16),
+        clientId: yjsDoc.clientID
+      });
+    }
+    
+    return { yjsDoc, websocketProvider, awareness };
+  } catch (error) {
+    console.error('Failed to initialize collaboration:', error);
+    throw error;
   }
 }
 
@@ -222,12 +268,84 @@ async function main() {
   pluginRegistry.registerPlugins(mods);
   const IServiceManager = require('@jupyterlab/services').IServiceManager;
   const serviceManager = await pluginRegistry.resolveRequiredService(IServiceManager);
+  
+  // Initialize Yjs collaborative editing if enabled
+  const collaborationEnabled = (PageConfig.getOption('collaborationEnabled') || '').toLowerCase() === 'true';
+  let yjsDoc = null;
+  let websocketProvider = null;
+  let awareness = null;
+  
+  if (collaborationEnabled) {
+    try {
+      // Get the document ID from the URL or generate a unique one
+      const docId = PageConfig.getOption('docId') || window.location.pathname.split('/').pop() || 'unnamed-document';
+      
+      // Initialize the Yjs document
+      yjsDoc = new Y.Doc();
+      
+      // Get the WebSocket URL from configuration or use default
+      const websocketUrl = PageConfig.getOption('collaborationWsUrl') || 
+                          (window.location.protocol === 'https:' ? 'wss://' : 'ws://') + 
+                          window.location.host + '/collaboration';
+      
+      // Initialize the WebSocket provider for real-time synchronization
+      websocketProvider = new WebsocketProvider(websocketUrl, docId, yjsDoc, {
+        connect: true,
+        params: {
+          // Add authentication token if available
+          token: PageConfig.getToken() || ''
+        }
+      });
+      
+      // Initialize awareness for user presence tracking
+      awareness = websocketProvider.awareness;
+      
+      // Set initial awareness state with user information
+      const username = PageConfig.getOption('username') || 'Anonymous';
+      awareness.setLocalStateField('user', {
+        name: username,
+        color: '#' + Math.floor(Math.random() * 16777215).toString(16), // Random color
+        clientId: yjsDoc.clientID
+      });
+      
+      // Handle connection status changes
+      websocketProvider.on('status', event => {
+        console.log('Collaboration status:', event.status);
+        // Dispatch a custom event that UI components can listen to
+        window.dispatchEvent(new CustomEvent('collaboration-status-change', { 
+          detail: { status: event.status } 
+        }));
+      });
+      
+      // Log when document sync is complete
+      websocketProvider.on('sync', isSynced => {
+        console.log('Document synchronized:', isSynced);
+        window.dispatchEvent(new CustomEvent('collaboration-sync', { 
+          detail: { synced: isSynced } 
+        }));
+      });
+      
+      console.log('Collaborative editing initialized with document ID:', docId);
+    } catch (error) {
+      console.error('Failed to initialize collaborative editing:', error);
+      // Dispatch error event for UI components to handle
+      window.dispatchEvent(new CustomEvent('collaboration-error', { 
+        detail: { error: error.message } 
+      }));
+    }
+  }
 
   const app = new NotebookApp({
     pluginRegistry,
     serviceManager,
     mimeExtensions,
-    availablePlugins
+    availablePlugins,
+    // Pass collaborative editing components to the application if enabled
+    collaboration: collaborationEnabled ? {
+      yjsDoc,
+      websocketProvider,
+      awareness
+    } : null
   });
 
   // Expose global app instance when in dev mode or when toggled explicitly.
@@ -236,9 +354,53 @@ async function main() {
 
   if (exposeAppInBrowser) {
     window.jupyterapp = app;
+    
+    // Also expose collaboration objects when in dev mode for debugging
+    if (collaborationEnabled) {
+      window.yjsDoc = yjsDoc;
+      window.websocketProvider = websocketProvider;
+      window.awareness = awareness;
+    }
   }
 
   await app.start();
+  
+  // Register event handlers for collaboration error recovery
+  if (collaborationEnabled && websocketProvider) {
+    // Handle WebSocket connection errors
+    websocketProvider.on('connection-error', error => {
+      console.error('Collaboration connection error:', error);
+      // Attempt to reconnect after a delay
+      setTimeout(() => {
+        if (websocketProvider) {
+          console.log('Attempting to reconnect collaborative session...');
+          websocketProvider.connect();
+        }
+      }, 5000); // 5 second delay before reconnection attempt
+    });
+    
+    // Handle WebSocket connection close
+    websocketProvider.on('connection-close', event => {
+      console.log('Collaboration connection closed:', event.code, event.reason);
+      // Only attempt to reconnect for abnormal closures
+      if (event.code !== 1000) { // 1000 is normal closure
+        setTimeout(() => {
+          if (websocketProvider) {
+            console.log('Attempting to reconnect collaborative session...');
+            websocketProvider.connect();
+          }
+        }, 5000); // 5 second delay before reconnection attempt
+      }
+    });
+    
+    // Handle window beforeunload to clean up awareness state
+    window.addEventListener('beforeunload', () => {
+      if (awareness) {
+        // Clear local awareness state to signal to other users that we're leaving
+        awareness.setLocalState(null);
+      }
+    });
+  }
 }
 
 window.addEventListener('load', main);

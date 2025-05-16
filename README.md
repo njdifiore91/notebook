@@ -25,10 +25,25 @@ The newest major version of Notebook is based on:
 
 - JupyterLab components for the frontend
 - Jupyter Server for the Python server
+- Real-time collaborative editing capabilities
 
-This represents a significant change to the `jupyter/notebook` code base.
+This represents a significant change to the `jupyter/notebook` code base, with collaborative features being a key differentiator from previous versions.
 
 To learn more about Notebook v7: https://jupyter.org/enhancement-proposals/79-notebook-v7/notebook-v7.html
+
+### Real-time Collaborative Editing
+
+Notebook v7 introduces comprehensive real-time collaborative editing capabilities powered by the Yjs Conflict-free Replicated Data Type (CRDT) framework, enabling multiple users to simultaneously work on the same notebook. Key collaborative features include:
+
+- **Real-time synchronization** of notebook content (code cells, markdown cells, outputs) across all connected users
+- **User presence awareness** showing who is currently viewing or editing the notebook
+- **Cursor/selection synchronization** to visualize where other users are working in real-time
+- **Cell-level locking mechanism** to prevent editing conflicts between collaborators
+- **Change history and versioning** for tracking individual contributions and reverting changes when needed
+- **Permissions system** with fine-grained access control (view-only, edit, admin roles)
+- **Comment and review system** for discussing specific cells without modifying content
+
+These collaborative features transform Jupyter Notebook from a single-user tool into a powerful platform for team-based data science, education, and research.
 
 ### Classic Notebook v6
 

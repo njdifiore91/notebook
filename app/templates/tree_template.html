@@ -26,6 +26,11 @@
     page_config_full.update(baseUrl=base_url, wsUrl=ws_url) %} {# Sentinel value
     to say that we are on the tree page #} {% set _ =
     page_config_full.update(notebookPage='tree') %}
+    
+    {# Collaboration features configuration #} {% set _ =
+    page_config_full.update(collaborationEnabled=collaboration_enabled|default(false)) %} {% set _ =
+    page_config_full.update(collaborationSessionDiscovery=collaboration_session_discovery|default({})) %} {% set _ =
+    page_config_full.update(permissionModel=permission_model|default({})) %}
 
     <script id="jupyter-config-data" type="application/json">
       {{ page_config_full | tojson }}
