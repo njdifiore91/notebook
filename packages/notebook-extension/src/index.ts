@@ -37,7 +37,44 @@ import { Poll } from '@lumino/polling';
 
 import { Widget } from '@lumino/widgets';
 
+// Import collaboration interfaces
+import {
+  ICollaborationProvider,
+  YjsNotebookProvider
+} from '@jupyterlab/notebook/lib/collab/provider';
+
+import {
+  IPresenceTracker,
+  PresenceTracker,
+  UserStatus
+} from '@jupyterlab/notebook/lib/collab/awareness';
+
+import {
+  IPermissionManager,
+  PermissionManager,
+  DocumentRole
+} from '@jupyterlab/notebook/lib/collab/permissions';
+
+import {
+  ICommentManager,
+  CommentManager
+} from '@jupyterlab/notebook/lib/collab/comments';
+
+import {
+  IVersionHistory,
+  HistoryTracker
+} from '@jupyterlab/notebook/lib/collab/history';
+
+import { CellLockManager } from '@jupyterlab/notebook/lib/collab/locks';
+
+// Import UI components
 import { TrustedComponent } from './trusted';
+// These components will be created in separate files
+// import { CollaborationBarComponent } from './components/collaborationBar';
+// import { UserPresenceComponent } from './components/userPresence';
+// import { CommentSystemComponent } from './components/commentSystem';
+// import { HistoryViewerComponent } from './components/historyViewer';
+// import { PermissionsDialogComponent } from './components/permissionsDialog';
 
 /**
  * The class for kernel status errors.
@@ -82,6 +119,56 @@ namespace CommandIDs {
    * A command to toggle full width of the notebook
    */
   export const toggleFullWidth = 'notebook:toggle-full-width';
+
+  /**
+   * A command to toggle collaboration mode
+   */
+  export const toggleCollaboration = 'notebook:toggle-collaboration';
+
+  /**
+   * A command to show the collaboration panel
+   */
+  export const showCollaborationPanel = 'notebook:show-collaboration-panel';
+
+  /**
+   * A command to create a version checkpoint
+   */
+  export const createVersionCheckpoint = 'notebook:create-version-checkpoint';
+
+  /**
+   * A command to show version history
+   */
+  export const showVersionHistory = 'notebook:show-version-history';
+
+  /**
+   * A command to restore a previous version
+   */
+  export const restoreVersion = 'notebook:restore-version';
+
+  /**
+   * A command to manage permissions
+   */
+  export const managePermissions = 'notebook:manage-permissions';
+
+  /**
+   * A command to lock a cell
+   */
+  export const lockCell = 'notebook:lock-cell';
+
+  /**
+   * A command to unlock a cell
+   */
+  export const unlockCell = 'notebook:unlock-cell';
+
+  /**
+   * A command to add a comment to a cell
+   */
+  export const addComment = 'notebook:add-comment';
+
+  /**
+   * A command to show comments for a cell
+   */
+  export const showComments = 'notebook:show-comments';
 }
 
 /**
@@ -678,6 +765,560 @@ const editNotebookMetadata: JupyterFrontEndPlugin<void> = {
 };
 
 /**
+ * A plugin that provides the collaboration provider for notebooks.
+ */
+const collaborationProvider: JupyterFrontEndPlugin<ICollaborationProvider> = {
+  id: '@jupyter-notebook/notebook-extension:collaboration-provider',
+  description: 'A plugin that provides the collaboration provider for notebooks.',
+  autoStart: true,
+  provides: ICollaborationProvider,
+  requires: [ISettingRegistry, ITranslator],
+  optional: [INotebookShell],
+  activate: (
+    app: JupyterFrontEnd,
+    settingRegistry: ISettingRegistry,
+    translator: ITranslator,
+    notebookShell: INotebookShell | null
+  ): ICollaborationProvider => {
+    const trans = translator.load('notebook');
+    console.log(trans.__('Activating Jupyter Notebook Collaboration Provider'));
+
+    // Create the collaboration provider
+    const provider = new YjsNotebookProvider();
+
+    // Load settings
+    settingRegistry
+      .load(collaborationProvider.id)
+      .then(settings => {
+        console.log('Loaded collaboration settings:', settings.composite);
+        // Apply settings to the provider
+      })
+      .catch(error => {
+        console.error('Failed to load collaboration settings:', error);
+      });
+
+    return provider;
+  }
+};
+
+/**
+ * A plugin that provides user presence tracking for collaborative notebooks.
+ */
+const presenceTracker: JupyterFrontEndPlugin<IPresenceTracker> = {
+  id: '@jupyter-notebook/notebook-extension:presence-tracker',
+  description: 'A plugin that provides user presence tracking for collaborative notebooks.',
+  autoStart: true,
+  provides: IPresenceTracker,
+  requires: [ICollaborationProvider, ITranslator],
+  optional: [INotebookShell],
+  activate: (
+    app: JupyterFrontEnd,
+    collaborationProvider: ICollaborationProvider,
+    translator: ITranslator,
+    notebookShell: INotebookShell | null
+  ): IPresenceTracker => {
+    const trans = translator.load('notebook');
+    console.log(trans.__('Activating Jupyter Notebook Presence Tracker'));
+
+    // Create the presence tracker
+    const tracker = new PresenceTracker(collaborationProvider.ydoc);
+
+    // Set up user information
+    // In a real implementation, this would get user info from JupyterHub
+    const userName = 'User ' + Math.floor(Math.random() * 1000);
+    const userColor = '#' + Math.floor(Math.random() * 16777215).toString(16);
+
+    tracker.setLocalState({
+      userId: collaborationProvider.ydoc.clientID.toString(),
+      displayName: userName,
+      status: UserStatus.Active,
+      color: userColor,
+      lastActivity: Date.now()
+    });
+
+    // Set up activity tracking
+    const trackActivity = () => {
+      tracker.markActive();
+    };
+
+    // Track user activity
+    document.addEventListener('mousemove', trackActivity, { passive: true });
+    document.addEventListener('keydown', trackActivity, { passive: true });
+
+    // Clean up when the app is disposed
+    app.disposed.connect(() => {
+      document.removeEventListener('mousemove', trackActivity);
+      document.removeEventListener('keydown', trackActivity);
+      tracker.destroy();
+    });
+
+    return tracker;
+  }
+};
+
+/**
+ * A plugin that provides permission management for collaborative notebooks.
+ */
+const permissionManager: JupyterFrontEndPlugin<IPermissionManager> = {
+  id: '@jupyter-notebook/notebook-extension:permission-manager',
+  description: 'A plugin that provides permission management for collaborative notebooks.',
+  autoStart: true,
+  provides: IPermissionManager,
+  requires: [ICollaborationProvider, ITranslator],
+  optional: [INotebookShell],
+  activate: (
+    app: JupyterFrontEnd,
+    collaborationProvider: ICollaborationProvider,
+    translator: ITranslator,
+    notebookShell: INotebookShell | null
+  ): IPermissionManager => {
+    const trans = translator.load('notebook');
+    console.log(trans.__('Activating Jupyter Notebook Permission Manager'));
+
+    // Create the permission manager
+    const manager = new PermissionManager({
+      // In a real implementation, this would get user info from JupyterHub
+      currentUserId: collaborationProvider.ydoc.clientID.toString(),
+      currentUserDisplayName: 'User ' + Math.floor(Math.random() * 1000),
+      defaultRole: DocumentRole.Editor
+    });
+
+    // Clean up when the app is disposed
+    app.disposed.connect(() => {
+      manager.disconnectNotebook();
+    });
+
+    return manager;
+  }
+};
+
+/**
+ * A plugin that provides comment management for collaborative notebooks.
+ */
+const commentManager: JupyterFrontEndPlugin<ICommentManager> = {
+  id: '@jupyter-notebook/notebook-extension:comment-manager',
+  description: 'A plugin that provides comment management for collaborative notebooks.',
+  autoStart: true,
+  provides: ICommentManager,
+  requires: [ICollaborationProvider, ITranslator],
+  optional: [INotebookShell],
+  activate: (
+    app: JupyterFrontEnd,
+    collaborationProvider: ICollaborationProvider,
+    translator: ITranslator,
+    notebookShell: INotebookShell | null
+  ): ICommentManager => {
+    const trans = translator.load('notebook');
+    console.log(trans.__('Activating Jupyter Notebook Comment Manager'));
+
+    // Create the comment manager
+    const manager = new CommentManager({
+      ydoc: collaborationProvider.ydoc,
+      currentUser: {
+        // In a real implementation, this would get user info from JupyterHub
+        id: collaborationProvider.ydoc.clientID.toString(),
+        name: 'User ' + Math.floor(Math.random() * 1000)
+      }
+    });
+
+    // Clean up when the app is disposed
+    app.disposed.connect(() => {
+      manager.dispose();
+    });
+
+    return manager;
+  }
+};
+
+/**
+ * A plugin that provides version history tracking for collaborative notebooks.
+ */
+const versionHistory: JupyterFrontEndPlugin<IVersionHistory> = {
+  id: '@jupyter-notebook/notebook-extension:version-history',
+  description: 'A plugin that provides version history tracking for collaborative notebooks.',
+  autoStart: true,
+  provides: IVersionHistory,
+  requires: [ICollaborationProvider, ITranslator],
+  optional: [INotebookShell],
+  activate: (
+    app: JupyterFrontEnd,
+    collaborationProvider: ICollaborationProvider,
+    translator: ITranslator,
+    notebookShell: INotebookShell | null
+  ): IVersionHistory => {
+    const trans = translator.load('notebook');
+    console.log(trans.__('Activating Jupyter Notebook Version History'));
+
+    // Create the history tracker
+    const tracker = new HistoryTracker({
+      currentUser: {
+        // In a real implementation, this would get user info from JupyterHub
+        id: collaborationProvider.ydoc.clientID.toString(),
+        name: 'User ' + Math.floor(Math.random() * 1000)
+      },
+      autoSnapshot: true,
+      snapshotInterval: 60000 // 1 minute
+    });
+
+    // Clean up when the app is disposed
+    app.disposed.connect(() => {
+      tracker.disconnectDocument(null);
+    });
+
+    return tracker;
+  }
+};
+
+/**
+ * A plugin that provides cell locking for collaborative notebooks.
+ */
+const cellLocking: JupyterFrontEndPlugin<void> = {
+  id: '@jupyter-notebook/notebook-extension:cell-locking',
+  description: 'A plugin that provides cell locking for collaborative notebooks.',
+  autoStart: true,
+  requires: [ICollaborationProvider, IPermissionManager, INotebookTracker, ITranslator],
+  optional: [INotebookShell],
+  activate: (
+    app: JupyterFrontEnd,
+    collaborationProvider: ICollaborationProvider,
+    permissionManager: IPermissionManager,
+    notebookTracker: INotebookTracker,
+    translator: ITranslator,
+    notebookShell: INotebookShell | null
+  ): void => {
+    const trans = translator.load('notebook');
+    console.log(trans.__('Activating Jupyter Notebook Cell Locking'));
+
+    // Create a map to store lock managers for each notebook
+    const lockManagers = new Map<string, CellLockManager>();
+
+    // Function to create a lock manager for a notebook
+    const createLockManager = (panel: NotebookPanel) => {
+      if (!panel.model || !panel.model.isCollaborative) {
+        return null;
+      }
+
+      const lockManager = new CellLockManager({
+        doc: collaborationProvider.ydoc,
+        permissionManager: permissionManager
+      });
+
+      // Store the lock manager
+      lockManagers.set(panel.id, lockManager);
+
+      // Set up lock event handling
+      lockManager.onLockEvent(event => {
+        console.log('Lock event:', event);
+        // Update UI to reflect lock state
+      });
+
+      return lockManager;
+    };
+
+    // Track notebook changes
+    notebookTracker.widgetAdded.connect((sender, panel) => {
+      // Create a lock manager for this notebook
+      const lockManager = createLockManager(panel);
+
+      // Clean up when the panel is disposed
+      panel.disposed.connect(() => {
+        const manager = lockManagers.get(panel.id);
+        if (manager) {
+          manager.dispose();
+          lockManagers.delete(panel.id);
+        }
+      });
+    });
+
+    // Add commands for locking/unlocking cells
+    app.commands.addCommand(CommandIDs.lockCell, {
+      label: trans.__('Lock Cell'),
+      execute: () => {
+        const panel = notebookTracker.currentWidget;
+        if (!panel) {
+          return;
+        }
+
+        const activeCell = panel.content.activeCell;
+        if (!activeCell) {
+          return;
+        }
+
+        const lockManager = lockManagers.get(panel.id);
+        if (!lockManager) {
+          return;
+        }
+
+        lockManager.acquireLock(
+          activeCell.model.id,
+          permissionManager.currentUserId,
+          permissionManager.currentUserDisplayName
+        );
+      },
+      isEnabled: () => {
+        const panel = notebookTracker.currentWidget;
+        if (!panel || !panel.model || !panel.model.isCollaborative) {
+          return false;
+        }
+        return true;
+      }
+    });
+
+    app.commands.addCommand(CommandIDs.unlockCell, {
+      label: trans.__('Unlock Cell'),
+      execute: () => {
+        const panel = notebookTracker.currentWidget;
+        if (!panel) {
+          return;
+        }
+
+        const activeCell = panel.content.activeCell;
+        if (!activeCell) {
+          return;
+        }
+
+        const lockManager = lockManagers.get(panel.id);
+        if (!lockManager) {
+          return;
+        }
+
+        lockManager.releaseLock(
+          activeCell.model.id,
+          permissionManager.currentUserId
+        );
+      },
+      isEnabled: () => {
+        const panel = notebookTracker.currentWidget;
+        if (!panel || !panel.model || !panel.model.isCollaborative) {
+          return false;
+        }
+
+        const activeCell = panel.content.activeCell;
+        if (!activeCell) {
+          return false;
+        }
+
+        const lockManager = lockManagers.get(panel.id);
+        if (!lockManager) {
+          return false;
+        }
+
+        return lockManager.isLockedByUser(
+          activeCell.model.id,
+          permissionManager.currentUserId
+        );
+      }
+    });
+  }
+};
+
+/**
+ * A plugin that adds collaboration UI components to the notebook.
+ */
+const collaborationUI: JupyterFrontEndPlugin<void> = {
+  id: '@jupyter-notebook/notebook-extension:collaboration-ui',
+  description: 'A plugin that adds collaboration UI components to the notebook.',
+  autoStart: true,
+  requires: [
+    ICollaborationProvider,
+    IPresenceTracker,
+    IPermissionManager,
+    ICommentManager,
+    IVersionHistory,
+    INotebookTracker,
+    ITranslator
+  ],
+  optional: [INotebookShell, ICommandPalette],
+  activate: (
+    app: JupyterFrontEnd,
+    collaborationProvider: ICollaborationProvider,
+    presenceTracker: IPresenceTracker,
+    permissionManager: IPermissionManager,
+    commentManager: ICommentManager,
+    versionHistory: IVersionHistory,
+    notebookTracker: INotebookTracker,
+    translator: ITranslator,
+    notebookShell: INotebookShell | null,
+    palette: ICommandPalette | null
+  ): void => {
+    const trans = translator.load('notebook');
+    console.log(trans.__('Activating Jupyter Notebook Collaboration UI'));
+
+    // Add commands for collaboration features
+    app.commands.addCommand(CommandIDs.toggleCollaboration, {
+      label: trans.__('Toggle Collaboration Mode'),
+      execute: () => {
+        const panel = notebookTracker.currentWidget;
+        if (!panel) {
+          return;
+        }
+
+        // Toggle collaboration mode
+        // This would need to be implemented in the notebook model
+        console.log('Toggling collaboration mode');
+      },
+      isEnabled: () => notebookTracker.currentWidget !== null
+    });
+
+    app.commands.addCommand(CommandIDs.showCollaborationPanel, {
+      label: trans.__('Show Collaboration Panel'),
+      execute: () => {
+        // Show the collaboration panel
+        console.log('Showing collaboration panel');
+      },
+      isEnabled: () => {
+        const panel = notebookTracker.currentWidget;
+        return panel !== null && panel.model?.isCollaborative === true;
+      }
+    });
+
+    app.commands.addCommand(CommandIDs.createVersionCheckpoint, {
+      label: trans.__('Create Version Checkpoint'),
+      execute: async () => {
+        // Create a version checkpoint
+        const panel = notebookTracker.currentWidget;
+        if (!panel || !panel.model || !panel.model.isCollaborative) {
+          return;
+        }
+
+        await versionHistory.createVersion(
+          'Manual checkpoint',
+          true,
+          { source: 'user' }
+        );
+        console.log('Created version checkpoint');
+      },
+      isEnabled: () => {
+        const panel = notebookTracker.currentWidget;
+        return panel !== null && panel.model?.isCollaborative === true;
+      }
+    });
+
+    app.commands.addCommand(CommandIDs.showVersionHistory, {
+      label: trans.__('Show Version History'),
+      execute: () => {
+        // Show version history
+        console.log('Showing version history');
+      },
+      isEnabled: () => {
+        const panel = notebookTracker.currentWidget;
+        return panel !== null && panel.model?.isCollaborative === true;
+      }
+    });
+
+    app.commands.addCommand(CommandIDs.managePermissions, {
+      label: trans.__('Manage Collaboration Permissions'),
+      execute: () => {
+        // Show permissions dialog
+        console.log('Managing permissions');
+      },
+      isEnabled: () => {
+        const panel = notebookTracker.currentWidget;
+        if (!panel || !panel.model || !panel.model.isCollaborative) {
+          return false;
+        }
+        return permissionManager.isAdmin;
+      }
+    });
+
+    app.commands.addCommand(CommandIDs.addComment, {
+      label: trans.__('Add Comment to Cell'),
+      execute: () => {
+        const panel = notebookTracker.currentWidget;
+        if (!panel) {
+          return;
+        }
+
+        const activeCell = panel.content.activeCell;
+        if (!activeCell) {
+          return;
+        }
+
+        // Create a new comment thread for this cell
+        const thread = commentManager.createThread(activeCell.model.id);
+        commentManager.addComment(thread.id, 'New comment');
+        console.log('Added comment to cell');
+      },
+      isEnabled: () => {
+        const panel = notebookTracker.currentWidget;
+        if (!panel || !panel.model || !panel.model.isCollaborative) {
+          return false;
+        }
+        return panel.content.activeCell !== null && permissionManager.canComment;
+      }
+    });
+
+    app.commands.addCommand(CommandIDs.showComments, {
+      label: trans.__('Show Cell Comments'),
+      execute: () => {
+        const panel = notebookTracker.currentWidget;
+        if (!panel) {
+          return;
+        }
+
+        const activeCell = panel.content.activeCell;
+        if (!activeCell) {
+          return;
+        }
+
+        // Show comments for this cell
+        const threads = commentManager.getThreadsForCell(activeCell.model.id);
+        console.log('Cell comments:', threads);
+      },
+      isEnabled: () => {
+        const panel = notebookTracker.currentWidget;
+        if (!panel || !panel.model || !panel.model.isCollaborative) {
+          return false;
+        }
+        return panel.content.activeCell !== null;
+      }
+    });
+
+    // Add commands to palette
+    if (palette) {
+      const category = 'Notebook Collaboration';
+      palette.addItem({ command: CommandIDs.toggleCollaboration, category });
+      palette.addItem({ command: CommandIDs.showCollaborationPanel, category });
+      palette.addItem({ command: CommandIDs.createVersionCheckpoint, category });
+      palette.addItem({ command: CommandIDs.showVersionHistory, category });
+      palette.addItem({ command: CommandIDs.managePermissions, category });
+      palette.addItem({ command: CommandIDs.lockCell, category });
+      palette.addItem({ command: CommandIDs.unlockCell, category });
+      palette.addItem({ command: CommandIDs.addComment, category });
+      palette.addItem({ command: CommandIDs.showComments, category });
+    }
+
+    // Connect to notebook tracker to add UI components when a notebook is opened
+    notebookTracker.widgetAdded.connect((sender, panel) => {
+      // When a notebook is opened, connect it to the collaboration provider
+      panel.sessionContext.ready.then(() => {
+        if (panel.model && collaborationProvider) {
+          // Connect the notebook model to the collaboration provider
+          collaborationProvider.connectDocument(panel.model);
+          
+          // Connect the notebook model to other collaboration services
+          permissionManager.connectNotebook(panel.model);
+          versionHistory.connectDocument(panel.model);
+
+          // Add UI components for collaboration
+          // These would be implemented in separate files
+          // addCollaborationUI(panel, collaborationProvider, presenceTracker, permissionManager, commentManager, versionHistory);
+        }
+      });
+
+      // Clean up when the panel is disposed
+      panel.disposed.connect(() => {
+        if (panel.model && collaborationProvider) {
+          collaborationProvider.disconnectDocument(panel.model);
+          permissionManager.disconnectNotebook();
+          versionHistory.disconnectDocument(panel.model);
+        }
+      });
+    });
+  }
+};
+
+/**
  * Export the plugins as default.
  */
 const plugins: JupyterFrontEndPlugin<any>[] = [
@@ -692,6 +1333,14 @@ const plugins: JupyterFrontEndPlugin<any>[] = [
   scrollOutput,
   tabIcon,
   trusted,
+  // Add collaboration plugins
+  collaborationProvider,
+  presenceTracker,
+  permissionManager,
+  commentManager,
+  versionHistory,
+  cellLocking,
+  collaborationUI
 ];
 
 export default plugins;
