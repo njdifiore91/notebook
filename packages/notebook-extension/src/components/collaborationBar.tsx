@@ -4,14 +4,15 @@
 import React, { useEffect, useState } from 'react';
 import { ReactWidget } from '@jupyterlab/apputils';
 import { ICollaborationProvider, ConnectionStatus } from '@jupyterlab/notebook/lib/collab/provider';
-import { IPresenceTracker, IUserAwarenessState, UserStatus } from '@jupyterlab/notebook/lib/collab/awareness';
+import { IPresenceTracker, UserStatus, IUserAwarenessState } from '@jupyterlab/notebook/lib/collab/awareness';
+import { ITranslator, nullTranslator } from '@jupyterlab/translation';
 import { NotebookPanel } from '@jupyterlab/notebook';
-import { CommandRegistry } from '@lumino/commands';
+import { CommandRegistry } from '@jupyterlab/commands';
 
 /**
  * Props for the CollaborationBar component.
  */
-export interface ICollaborationBarProps {
+interface ICollaborationBarProps {
   /**
    * The collaboration provider instance.
    */
@@ -23,29 +24,35 @@ export interface ICollaborationBarProps {
   presenceTracker: IPresenceTracker;
 
   /**
-   * The notebook panel containing the notebook.
+   * The notebook panel instance.
    */
   notebookPanel: NotebookPanel;
 
   /**
-   * The command registry for executing commands.
+   * The command registry.
    */
   commands: CommandRegistry;
+
+  /**
+   * The translator instance.
+   */
+  translator?: ITranslator;
 }
 
 /**
- * A component that displays the collaboration status bar for Jupyter Notebook.
- * 
- * This component shows active collaborators, connection status, and provides
- * buttons for accessing collaboration features like permissions management,
- * comment viewing, and version history.
+ * A React component for displaying collaboration status and controls.
  */
-export const CollaborationBar: React.FC<ICollaborationBarProps> = ({
-  collaborationProvider,
-  presenceTracker,
-  notebookPanel,
-  commands
-}) => {
+export function CollaborationBar(props: ICollaborationBarProps): JSX.Element {
+  const {
+    collaborationProvider,
+    presenceTracker,
+    notebookPanel,
+    commands,
+    translator = nullTranslator
+  } = props;
+
+  const trans = translator.load('notebook');
+
   // State for connection status
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>(
     collaborationProvider.connectionStatus
@@ -56,544 +63,448 @@ export const CollaborationBar: React.FC<ICollaborationBarProps> = ({
     new Map()
   );
 
-  // State for showing the user list dropdown
-  const [showUserList, setShowUserList] = useState(false);
-
-  // Handle connection status changes
+  // Update connection status when it changes
   useEffect(() => {
-    const onConnectionStatusChanged = (status: ConnectionStatus) => {
+    const onConnectionStatusChanged = (sender: any, status: ConnectionStatus) => {
       setConnectionStatus(status);
     };
 
-    collaborationProvider.connectionStatusChanged.connect(onConnectionStatusChanged);
+    collaborationProvider.connectionStatusChanged.connect(
+      onConnectionStatusChanged
+    );
 
     return () => {
-      collaborationProvider.connectionStatusChanged.disconnect(onConnectionStatusChanged);
+      collaborationProvider.connectionStatusChanged.disconnect(
+        onConnectionStatusChanged
+      );
     };
   }, [collaborationProvider]);
 
-  // Handle awareness changes
+  // Update active users when awareness changes
   useEffect(() => {
-    const onAwarenessChange = () => {
+    const onAwarenessChanged = () => {
       setActiveUsers(new Map(presenceTracker.getStates()));
     };
 
-    presenceTracker.stateChanged.connect(onAwarenessChange);
-    
-    // Initial setup
-    onAwarenessChange();
+    presenceTracker.stateChanged.connect(onAwarenessChanged);
+    // Initial state
+    onAwarenessChanged();
 
     return () => {
-      presenceTracker.stateChanged.disconnect(onAwarenessChange);
+      presenceTracker.stateChanged.disconnect(onAwarenessChanged);
     };
   }, [presenceTracker]);
 
-  /**
-   * Get the connection status icon and text.
-   */
+  // Get connection status class and text
   const getConnectionStatusInfo = () => {
     switch (connectionStatus) {
       case ConnectionStatus.Connected:
         return {
-          icon: 'jp-CollaborationBar-statusConnected',
-          text: 'Connected',
-          className: 'jp-CollaborationBar-statusConnected'
+          className: 'jp-CollaborationBar-status-connected',
+          text: trans.__('Connected')
         };
       case ConnectionStatus.Connecting:
         return {
-          icon: 'jp-CollaborationBar-statusConnecting',
-          text: 'Connecting',
-          className: 'jp-CollaborationBar-statusConnecting'
+          className: 'jp-CollaborationBar-status-connecting',
+          text: trans.__('Connecting...')
         };
       case ConnectionStatus.Disconnected:
         return {
-          icon: 'jp-CollaborationBar-statusDisconnected',
-          text: 'Disconnected',
-          className: 'jp-CollaborationBar-statusDisconnected'
+          className: 'jp-CollaborationBar-status-disconnected',
+          text: trans.__('Disconnected')
         };
       default:
         return {
-          icon: 'jp-CollaborationBar-statusUnknown',
-          text: 'Unknown',
-          className: 'jp-CollaborationBar-statusUnknown'
+          className: 'jp-CollaborationBar-status-unknown',
+          text: trans.__('Unknown')
         };
     }
   };
 
-  /**
-   * Get the user status icon and text.
-   */
-  const getUserStatusInfo = (status: UserStatus) => {
+  // Get user status text
+  const getUserStatusText = (status: UserStatus) => {
     switch (status) {
       case UserStatus.Active:
-        return {
-          icon: 'jp-CollaborationBar-userActive',
-          text: 'Active',
-          className: 'jp-CollaborationBar-userActive'
-        };
+        return trans.__('Active');
       case UserStatus.Viewing:
-        return {
-          icon: 'jp-CollaborationBar-userViewing',
-          text: 'Viewing',
-          className: 'jp-CollaborationBar-userViewing'
-        };
+        return trans.__('Viewing');
       case UserStatus.Idle:
-        return {
-          icon: 'jp-CollaborationBar-userIdle',
-          text: 'Idle',
-          className: 'jp-CollaborationBar-userIdle'
-        };
+        return trans.__('Idle');
       case UserStatus.Editing:
-        return {
-          icon: 'jp-CollaborationBar-userEditing',
-          text: 'Editing',
-          className: 'jp-CollaborationBar-userEditing'
-        };
+        return trans.__('Editing');
       default:
-        return {
-          icon: 'jp-CollaborationBar-userUnknown',
-          text: 'Unknown',
-          className: 'jp-CollaborationBar-userUnknown'
-        };
+        return trans.__('Unknown');
     }
   };
 
-  /**
-   * Open the permissions dialog.
-   */
-  const openPermissionsDialog = () => {
-    if (commands.hasCommand('collaboration:open-permissions')) {
-      commands.execute('collaboration:open-permissions');
+  // Get user avatar or initials
+  const getUserAvatar = (user: IUserAwarenessState) => {
+    if (user.avatarUrl) {
+      return (
+        <img
+          src={user.avatarUrl}
+          alt={user.displayName}
+          className="jp-CollaborationBar-avatar"
+        />
+      );
+    } else {
+      // Use initials if no avatar is available
+      const initials = user.displayName
+        .split(' ')
+        .map(name => name[0])
+        .join('')
+        .substring(0, 2)
+        .toUpperCase();
+
+      return (
+        <div
+          className="jp-CollaborationBar-avatar jp-CollaborationBar-avatar-initials"
+          style={{ backgroundColor: user.color }}
+        >
+          {initials}
+        </div>
+      );
     }
   };
 
-  /**
-   * Open the comments panel.
-   */
-  const openCommentsPanel = () => {
-    if (commands.hasCommand('collaboration:open-comments')) {
-      commands.execute('collaboration:open-comments');
+  // Get status indicator class
+  const getStatusIndicatorClass = (status: UserStatus) => {
+    switch (status) {
+      case UserStatus.Active:
+        return 'jp-CollaborationBar-status-indicator-active';
+      case UserStatus.Viewing:
+        return 'jp-CollaborationBar-status-indicator-viewing';
+      case UserStatus.Idle:
+        return 'jp-CollaborationBar-status-indicator-idle';
+      case UserStatus.Editing:
+        return 'jp-CollaborationBar-status-indicator-editing';
+      default:
+        return 'jp-CollaborationBar-status-indicator-unknown';
     }
   };
 
-  /**
-   * Open the history viewer.
-   */
-  const openHistoryViewer = () => {
-    if (commands.hasCommand('collaboration:open-history')) {
-      commands.execute('collaboration:open-history');
-    }
+  // Handle button clicks
+  const handleOpenPermissions = () => {
+    commands.execute('collaboration:open-permissions');
   };
 
-  /**
-   * Toggle the user list dropdown.
-   */
-  const toggleUserList = () => {
-    setShowUserList(!showUserList);
+  const handleOpenComments = () => {
+    commands.execute('collaboration:open-comments');
   };
 
-  // Get connection status information
+  const handleOpenHistory = () => {
+    commands.execute('collaboration:open-history');
+  };
+
   const connectionStatusInfo = getConnectionStatusInfo();
-
-  // Count active users (excluding the current user)
-  const otherUsersCount = activeUsers.size - 1;
-
-  // Get the document ID
-  const documentId = collaborationProvider.getDocumentId();
+  const userCount = activeUsers.size;
 
   return (
     <div className="jp-CollaborationBar">
       {/* Connection status indicator */}
-      <div 
-        className={`jp-CollaborationBar-status ${connectionStatusInfo.className}`}
-        title={`Collaboration status: ${connectionStatusInfo.text}`}
-      >
-        <div className="jp-CollaborationBar-statusIcon" />
-        <span className="jp-CollaborationBar-statusText">{connectionStatusInfo.text}</span>
-      </div>
-
-      {/* Document ID */}
-      <div className="jp-CollaborationBar-documentId" title={`Document ID: ${documentId}`}>
-        {documentId}
-      </div>
-
-      {/* Collaboration tools */}
-      <div className="jp-CollaborationBar-tools">
-        {/* Permissions button */}
-        <button 
-          className="jp-CollaborationBar-button jp-CollaborationBar-permissionsButton"
-          onClick={openPermissionsDialog}
-          title="Manage access permissions"
-          aria-label="Manage access permissions"
-        >
-          <div className="jp-CollaborationBar-buttonIcon jp-CollaborationBar-permissionsIcon" />
-          <span className="jp-CollaborationBar-buttonText">Permissions</span>
-        </button>
-
-        {/* Comments button */}
-        <button 
-          className="jp-CollaborationBar-button jp-CollaborationBar-commentsButton"
-          onClick={openCommentsPanel}
-          title="View and manage comments"
-          aria-label="View and manage comments"
-        >
-          <div className="jp-CollaborationBar-buttonIcon jp-CollaborationBar-commentsIcon" />
-          <span className="jp-CollaborationBar-buttonText">Comments</span>
-        </button>
-
-        {/* History button */}
-        <button 
-          className="jp-CollaborationBar-button jp-CollaborationBar-historyButton"
-          onClick={openHistoryViewer}
-          title="View version history"
-          aria-label="View version history"
-        >
-          <div className="jp-CollaborationBar-buttonIcon jp-CollaborationBar-historyIcon" />
-          <span className="jp-CollaborationBar-buttonText">History</span>
-        </button>
-      </div>
-
-      {/* User presence */}
-      <div className="jp-CollaborationBar-users">
-        <button 
-          className="jp-CollaborationBar-usersButton"
-          onClick={toggleUserList}
-          title={`${activeUsers.size} users collaborating`}
-          aria-label={`${activeUsers.size} users collaborating`}
-          aria-expanded={showUserList}
-          aria-haspopup="true"
-        >
-          <div className="jp-CollaborationBar-usersIcon" />
-          <span className="jp-CollaborationBar-usersCount">
-            {activeUsers.size}
+      <div className="jp-CollaborationBar-connection">
+        <div className={`jp-CollaborationBar-status ${connectionStatusInfo.className}`}>
+          <div className="jp-CollaborationBar-status-indicator"></div>
+          <span className="jp-CollaborationBar-status-text">
+            {connectionStatusInfo.text}
           </span>
-        </button>
+        </div>
+      </div>
 
-        {/* User list dropdown */}
-        {showUserList && (
-          <div 
-            className="jp-CollaborationBar-userList"
-            role="menu"
-            aria-label="Collaborating users"
-          >
-            {Array.from(activeUsers.entries()).map(([clientId, user]) => {
-              const userStatusInfo = getUserStatusInfo(user.status);
-              const isCurrentUser = clientId === presenceTracker.clientId;
-
-              return (
-                <div 
-                  key={clientId}
-                  className={`jp-CollaborationBar-userItem ${isCurrentUser ? 'jp-CollaborationBar-currentUser' : ''}`}
-                  role="menuitem"
-                >
-                  {/* User avatar */}
-                  <div 
-                    className="jp-CollaborationBar-userAvatar"
-                    style={{ backgroundColor: user.color }}
-                    title={user.displayName}
-                  >
-                    {user.displayName.charAt(0).toUpperCase()}
-                  </div>
-
-                  {/* User info */}
-                  <div className="jp-CollaborationBar-userInfo">
-                    <div className="jp-CollaborationBar-userName">
-                      {user.displayName}
-                      {isCurrentUser && ' (you)'}
-                    </div>
-                    <div className={`jp-CollaborationBar-userStatus ${userStatusInfo.className}`}>
-                      <div className="jp-CollaborationBar-userStatusIcon" />
-                      <span className="jp-CollaborationBar-userStatusText">
-                        {userStatusInfo.text}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-              );
-            })}
+      {/* Active users */}
+      <div className="jp-CollaborationBar-users">
+        {userCount > 0 ? (
+          <div className="jp-CollaborationBar-user-count">
+            {trans.__('%1 collaborators', userCount)}
           </div>
-        )}
+        ) : null}
+        <div className="jp-CollaborationBar-avatars">
+          {Array.from(activeUsers.values()).map((user) => (
+            <div
+              key={user.userId}
+              className="jp-CollaborationBar-user"
+              title={`${user.displayName} (${getUserStatusText(user.status)})`}
+            >
+              {getUserAvatar(user)}
+              <div
+                className={`jp-CollaborationBar-status-indicator ${getStatusIndicatorClass(
+                  user.status
+                )}`}
+              ></div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Collaboration controls */}
+      <div className="jp-CollaborationBar-controls">
+        <button
+          className="jp-CollaborationBar-button jp-CollaborationBar-permissions"
+          onClick={handleOpenPermissions}
+          title={trans.__('Manage permissions')}
+          aria-label={trans.__('Manage permissions')}
+        >
+          <div className="jp-CollaborationBar-buttonIcon jp-icon-permissions"></div>
+        </button>
+        <button
+          className="jp-CollaborationBar-button jp-CollaborationBar-comments"
+          onClick={handleOpenComments}
+          title={trans.__('View comments')}
+          aria-label={trans.__('View comments')}
+        >
+          <div className="jp-CollaborationBar-buttonIcon jp-icon-comments"></div>
+        </button>
+        <button
+          className="jp-CollaborationBar-button jp-CollaborationBar-history"
+          onClick={handleOpenHistory}
+          title={trans.__('View history')}
+          aria-label={trans.__('View history')}
+        >
+          <div className="jp-CollaborationBar-buttonIcon jp-icon-history"></div>
+        </button>
       </div>
     </div>
   );
-};
+}
 
 /**
  * A namespace for CollaborationBar statics.
  */
 export namespace CollaborationBar {
   /**
-   * Create a new CollaborationBar component wrapped in a ReactWidget.
-   *
-   * @param props - The component props.
-   * @returns A new CollaborationBar widget.
+   * Create a new CollaborationBar widget.
    */
-  export function create(props: ICollaborationBarProps): ReactWidget {
-    const widget = ReactWidget.create(<CollaborationBar {...props} />);
-    widget.addClass('jp-CollaborationBarWidget');
+  export function create(options: {
+    collaborationProvider: ICollaborationProvider;
+    presenceTracker: IPresenceTracker;
+    notebookPanel: NotebookPanel;
+    commands: CommandRegistry;
+    translator?: ITranslator;
+  }): ReactWidget {
+    const widget = ReactWidget.create(
+      <CollaborationBar
+        collaborationProvider={options.collaborationProvider}
+        presenceTracker={options.presenceTracker}
+        notebookPanel={options.notebookPanel}
+        commands={options.commands}
+        translator={options.translator}
+      />
+    );
+    widget.addClass('jp-CollaborationBar-widget');
     return widget;
   }
 
   /**
-   * Create the CSS for the CollaborationBar component.
-   * 
-   * @returns The CSS for the CollaborationBar component.
+   * Create a style element for the collaboration bar.
    */
-  export function createStyle(): HTMLElement {
+  export function createStyle(): HTMLStyleElement {
     const style = document.createElement('style');
     style.textContent = `
+      /* Collaboration Bar styles */
+      .jp-CollaborationBar-widget {
+        display: flex;
+        align-items: center;
+        height: 28px;
+        padding: 0 8px;
+      }
+      
       .jp-CollaborationBar {
         display: flex;
         align-items: center;
-        padding: 0 10px;
-        height: 28px;
-        background-color: var(--jp-layout-color1);
-        border-bottom: 1px solid var(--jp-border-color1);
-        color: var(--jp-ui-font-color1);
+        justify-content: space-between;
+        width: 100%;
+        height: 100%;
         font-size: var(--jp-ui-font-size1);
+        color: var(--jp-ui-font-color1);
       }
-
+      
+      /* Connection status styles */
+      .jp-CollaborationBar-connection {
+        display: flex;
+        align-items: center;
+        margin-right: 12px;
+      }
+      
       .jp-CollaborationBar-status {
         display: flex;
         align-items: center;
-        margin-right: 10px;
-      }
-
-      .jp-CollaborationBar-statusIcon {
-        width: 10px;
-        height: 10px;
-        border-radius: 50%;
-        margin-right: 5px;
-      }
-
-      .jp-CollaborationBar-statusConnected .jp-CollaborationBar-statusIcon {
-        background-color: #4CAF50; /* Green */
-      }
-
-      .jp-CollaborationBar-statusConnecting .jp-CollaborationBar-statusIcon {
-        background-color: #FFC107; /* Amber */
-        animation: jp-CollaborationBar-pulse 1.5s infinite;
-      }
-
-      .jp-CollaborationBar-statusDisconnected .jp-CollaborationBar-statusIcon {
-        background-color: #F44336; /* Red */
-      }
-
-      .jp-CollaborationBar-statusUnknown .jp-CollaborationBar-statusIcon {
-        background-color: #9E9E9E; /* Grey */
-      }
-
-      @keyframes jp-CollaborationBar-pulse {
-        0% { opacity: 1; }
-        50% { opacity: 0.5; }
-        100% { opacity: 1; }
-      }
-
-      .jp-CollaborationBar-documentId {
-        flex: 1;
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        margin-right: 10px;
-        font-size: var(--jp-ui-font-size0);
-        color: var(--jp-ui-font-color2);
-      }
-
-      .jp-CollaborationBar-tools {
-        display: flex;
-        align-items: center;
-        margin-right: 10px;
-      }
-
-      .jp-CollaborationBar-button {
-        display: flex;
-        align-items: center;
-        background: none;
-        border: none;
         padding: 4px 8px;
-        margin: 0 2px;
-        border-radius: 3px;
-        cursor: pointer;
-        color: var(--jp-ui-font-color1);
-        font-size: var(--jp-ui-font-size1);
-      }
-
-      .jp-CollaborationBar-button:hover {
+        border-radius: 12px;
         background-color: var(--jp-layout-color2);
       }
-
-      .jp-CollaborationBar-button:focus {
-        outline: 1px solid var(--jp-brand-color1);
-      }
-
-      .jp-CollaborationBar-buttonIcon {
-        width: 16px;
-        height: 16px;
-        margin-right: 4px;
-        background-size: 16px;
-        background-repeat: no-repeat;
-        background-position: center;
-      }
-
-      .jp-CollaborationBar-permissionsIcon {
-        background-image: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg>');
-      }
-
-      .jp-CollaborationBar-commentsIcon {
-        background-image: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>');
-      }
-
-      .jp-CollaborationBar-historyIcon {
-        background-image: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>');
-      }
-
-      /* Hide button text on small screens */
-      @media (max-width: 600px) {
-        .jp-CollaborationBar-buttonText {
-          display: none;
-        }
-        
-        .jp-CollaborationBar-buttonIcon {
-          margin-right: 0;
-        }
-        
-        .jp-CollaborationBar-button {
-          padding: 4px;
-        }
-      }
-
-      .jp-CollaborationBar-users {
-        position: relative;
-      }
-
-      .jp-CollaborationBar-usersButton {
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        background: none;
-        border: none;
-        padding: 4px;
-        border-radius: 3px;
-        cursor: pointer;
-      }
-
-      .jp-CollaborationBar-usersButton:hover {
-        background-color: var(--jp-layout-color2);
-      }
-
-      .jp-CollaborationBar-usersButton:focus {
-        outline: 1px solid var(--jp-brand-color1);
-      }
-
-      .jp-CollaborationBar-usersIcon {
-        width: 16px;
-        height: 16px;
-        background-image: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M23 21v-2a4 4 0 0 0-3-3.87"></path><path d="M16 3.13a4 4 0 0 1 0 7.75"></path></svg>');
-        background-size: 16px;
-        background-repeat: no-repeat;
-        background-position: center;
-      }
-
-      .jp-CollaborationBar-usersCount {
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        min-width: 18px;
-        height: 18px;
-        background-color: var(--jp-brand-color1);
-        color: white;
-        border-radius: 9px;
-        font-size: var(--jp-ui-font-size0);
-        margin-left: 4px;
-        padding: 0 4px;
-      }
-
-      .jp-CollaborationBar-userList {
-        position: absolute;
-        top: 100%;
-        right: 0;
-        width: 250px;
-        max-height: 300px;
-        overflow-y: auto;
-        background-color: var(--jp-layout-color1);
-        border: 1px solid var(--jp-border-color1);
-        border-radius: 3px;
-        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
-        z-index: 1000;
-        margin-top: 4px;
-      }
-
-      .jp-CollaborationBar-userItem {
-        display: flex;
-        align-items: center;
-        padding: 8px;
-        border-bottom: 1px solid var(--jp-border-color1);
-      }
-
-      .jp-CollaborationBar-userItem:last-child {
-        border-bottom: none;
-      }
-
-      .jp-CollaborationBar-userItem.jp-CollaborationBar-currentUser {
-        background-color: var(--jp-layout-color2);
-      }
-
-      .jp-CollaborationBar-userAvatar {
-        width: 24px;
-        height: 24px;
-        border-radius: 50%;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        color: white;
-        font-weight: bold;
-        margin-right: 8px;
-      }
-
-      .jp-CollaborationBar-userInfo {
-        flex: 1;
-        min-width: 0;
-      }
-
-      .jp-CollaborationBar-userName {
-        font-weight: bold;
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
-      }
-
-      .jp-CollaborationBar-userStatus {
-        display: flex;
-        align-items: center;
-        font-size: var(--jp-ui-font-size0);
-        color: var(--jp-ui-font-color2);
-      }
-
-      .jp-CollaborationBar-userStatusIcon {
+      
+      .jp-CollaborationBar-status-indicator {
         width: 8px;
         height: 8px;
         border-radius: 50%;
+        margin-right: 6px;
+      }
+      
+      .jp-CollaborationBar-status-connected .jp-CollaborationBar-status-indicator {
+        background-color: var(--jp-success-color0);
+      }
+      
+      .jp-CollaborationBar-status-connecting .jp-CollaborationBar-status-indicator {
+        background-color: var(--jp-warn-color0);
+        animation: jp-CollaborationBar-pulse 1.5s infinite;
+      }
+      
+      .jp-CollaborationBar-status-disconnected .jp-CollaborationBar-status-indicator {
+        background-color: var(--jp-error-color0);
+      }
+      
+      .jp-CollaborationBar-status-unknown .jp-CollaborationBar-status-indicator {
+        background-color: var(--jp-layout-color3);
+      }
+      
+      @keyframes jp-CollaborationBar-pulse {
+        0% {
+          opacity: 1;
+        }
+        50% {
+          opacity: 0.4;
+        }
+        100% {
+          opacity: 1;
+        }
+      }
+      
+      /* Users and avatars styles */
+      .jp-CollaborationBar-users {
+        display: flex;
+        align-items: center;
+        flex: 1;
+        margin: 0 12px;
+      }
+      
+      .jp-CollaborationBar-user-count {
+        margin-right: 8px;
+        white-space: nowrap;
+      }
+      
+      .jp-CollaborationBar-avatars {
+        display: flex;
+        align-items: center;
+        overflow: hidden;
+      }
+      
+      .jp-CollaborationBar-user {
+        position: relative;
         margin-right: 4px;
       }
-
-      .jp-CollaborationBar-userActive .jp-CollaborationBar-userStatusIcon {
-        background-color: #4CAF50; /* Green */
+      
+      .jp-CollaborationBar-avatar {
+        width: 24px;
+        height: 24px;
+        border-radius: 50%;
+        border: 1px solid var(--jp-border-color1);
+        background-color: var(--jp-layout-color1);
+        overflow: hidden;
       }
-
-      .jp-CollaborationBar-userViewing .jp-CollaborationBar-userStatusIcon {
-        background-color: #2196F3; /* Blue */
+      
+      .jp-CollaborationBar-avatar-initials {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 10px;
+        font-weight: bold;
+        color: white;
       }
-
-      .jp-CollaborationBar-userIdle .jp-CollaborationBar-userStatusIcon {
-        background-color: #9E9E9E; /* Grey */
+      
+      .jp-CollaborationBar-status-indicator {
+        position: absolute;
+        bottom: 0;
+        right: 0;
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        border: 1px solid var(--jp-layout-color1);
       }
-
-      .jp-CollaborationBar-userEditing .jp-CollaborationBar-userStatusIcon {
-        background-color: #FF9800; /* Orange */
+      
+      .jp-CollaborationBar-status-indicator-active {
+        background-color: var(--jp-success-color0);
       }
-
-      .jp-CollaborationBar-userUnknown .jp-CollaborationBar-userStatusIcon {
-        background-color: #9E9E9E; /* Grey */
+      
+      .jp-CollaborationBar-status-indicator-viewing {
+        background-color: var(--jp-info-color0);
+      }
+      
+      .jp-CollaborationBar-status-indicator-idle {
+        background-color: var(--jp-layout-color3);
+      }
+      
+      .jp-CollaborationBar-status-indicator-editing {
+        background-color: var(--jp-warn-color0);
+      }
+      
+      /* Controls styles */
+      .jp-CollaborationBar-controls {
+        display: flex;
+        align-items: center;
+      }
+      
+      .jp-CollaborationBar-button {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 28px;
+        height: 28px;
+        margin-left: 4px;
+        border-radius: 4px;
+        background-color: transparent;
+        border: none;
+        cursor: pointer;
+        transition: background-color 0.2s;
+      }
+      
+      .jp-CollaborationBar-button:hover {
+        background-color: var(--jp-layout-color2);
+      }
+      
+      .jp-CollaborationBar-button:focus {
+        outline: 1px solid var(--jp-brand-color1);
+      }
+      
+      .jp-CollaborationBar-buttonIcon {
+        width: 16px;
+        height: 16px;
+        background-size: contain;
+        background-repeat: no-repeat;
+        background-position: center;
+      }
+      
+      /* Icon placeholders - these would be replaced with actual SVG icons */
+      .jp-icon-permissions {
+        background-image: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="%23616161"><path d="M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4zm0 10.99h7c-.53 4.12-3.28 7.79-7 8.94V12H5V6.3l7-3.11v8.8z"/></svg>');
+      }
+      
+      .jp-icon-comments {
+        background-image: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="%23616161"><path d="M21 6h-2v9H6v2c0 .55.45 1 1 1h11l4 4V7c0-.55-.45-1-1-1zm-4 6V3c0-.55-.45-1-1-1H3c-.55 0-1 .45-1 1v14l4-4h10c.55 0 1-.45 1-1z"/></svg>');
+      }
+      
+      .jp-icon-history {
+        background-image: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="%23616161"><path d="M13 3c-4.97 0-9 4.03-9 9H1l3.89 3.89.07.14L9 12H6c0-3.87 3.13-7 7-7s7 3.13 7 7-3.13 7-7 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42C8.27 19.99 10.51 21 13 21c4.97 0 9-4.03 9-9s-4.03-9-9-9zm-1 5v5l4.28 2.54.72-1.21-3.5-2.08V8H12z"/></svg>');
+      }
+      
+      /* Responsive adjustments */
+      @media (max-width: 640px) {
+        .jp-CollaborationBar-status-text,
+        .jp-CollaborationBar-user-count {
+          display: none;
+        }
+        
+        .jp-CollaborationBar-connection {
+          margin-right: 4px;
+        }
+        
+        .jp-CollaborationBar-users {
+          margin: 0 4px;
+        }
+        
+        .jp-CollaborationBar-avatar {
+          width: 20px;
+          height: 20px;
+        }
       }
     `;
     return style;
