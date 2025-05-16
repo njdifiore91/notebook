@@ -2,1165 +2,1106 @@
 // Distributed under the terms of the Modified BSD License.
 
 import { ISignal, Signal } from '@lumino/signaling';
+import { Token } from '@lumino/coreutils';
 import * as Y from 'yjs';
+import { INotebookModel } from '../model';
+import { IPermissionManager } from './permissions';
 
 /**
- * Comment status enum
+ * The comment manager token.
+ *
+ * This token is used to provide a comment manager to the notebook.
+ * The comment manager is responsible for managing comments and threads
+ * for collaborative notebook editing.
+ */
+export const ICommentManager = new Token<ICommentManager>(
+  '@jupyterlab/notebook:ICommentManager'
+);
+
+/**
+ * The status of a comment.
  */
 export enum CommentStatus {
   /**
-   * Comment is open and active
+   * The comment is active and unresolved.
    */
-  Open = 'open',
+  Active = 'active',
 
   /**
-   * Comment has been resolved
+   * The comment has been resolved.
    */
   Resolved = 'resolved',
 
   /**
-   * Comment has been archived
+   * The comment has been marked as a question that needs attention.
+   */
+  Question = 'question',
+
+  /**
+   * The comment has been archived.
    */
   Archived = 'archived'
 }
 
 /**
- * Interface for a comment author
- */
-export interface ICommentAuthor {
-  /**
-   * Unique identifier for the author
-   */
-  id: string;
-
-  /**
-   * Display name of the author
-   */
-  name: string;
-
-  /**
-   * Optional URL to the author's avatar
-   */
-  avatarUrl?: string;
-}
-
-/**
- * Interface for a comment
+ * Interface for a comment in a notebook.
  */
 export interface IComment {
   /**
-   * Unique identifier for the comment
+   * The unique ID of the comment.
    */
   id: string;
 
   /**
-   * The content of the comment (supports markdown)
-   */
-  content: string;
-
-  /**
-   * The author of the comment
-   */
-  author: ICommentAuthor;
-
-  /**
-   * Timestamp when the comment was created
-   */
-  createdAt: number;
-
-  /**
-   * Timestamp when the comment was last updated
-   */
-  updatedAt: number;
-
-  /**
-   * Optional ID of the parent comment (for threaded replies)
-   */
-  parentId?: string;
-
-  /**
-   * Status of the comment
-   */
-  status: CommentStatus;
-
-  /**
-   * Optional ID of the user who resolved the comment
-   */
-  resolvedBy?: ICommentAuthor;
-
-  /**
-   * Timestamp when the comment was resolved
-   */
-  resolvedAt?: number;
-
-  /**
-   * Optional metadata for the comment
-   */
-  metadata?: { [key: string]: any };
-}
-
-/**
- * Interface for a comment thread
- */
-export interface ICommentThread {
-  /**
-   * Unique identifier for the thread
-   */
-  id: string;
-
-  /**
-   * ID of the cell this thread is attached to
+   * The ID of the cell this comment is attached to.
    */
   cellId: string;
 
   /**
-   * Optional range within the cell (for comments on specific code sections)
+   * The ID of the user who created the comment.
    */
-  range?: {
-    start: number;
-    end: number;
-  };
+  authorId: string;
 
   /**
-   * Status of the thread
+   * The display name of the user who created the comment.
    */
-  status: CommentStatus;
+  authorName: string;
 
   /**
-   * Timestamp when the thread was created
+   * The content of the comment.
+   */
+  content: string;
+
+  /**
+   * The timestamp when the comment was created.
    */
   createdAt: number;
 
   /**
-   * Timestamp when the thread was last updated
+   * The timestamp when the comment was last updated.
    */
   updatedAt: number;
 
   /**
-   * Comments in this thread
+   * The status of the comment.
    */
-  comments: IComment[];
+  status: CommentStatus;
 
   /**
-   * Optional metadata for the thread
+   * The ID of the thread this comment belongs to.
+   * If this is the root comment, threadId will be the same as id.
+   */
+  threadId: string;
+
+  /**
+   * The ID of the parent comment if this is a reply.
+   * If this is the root comment, parentId will be null.
+   */
+  parentId: string | null;
+
+  /**
+   * Optional metadata for the comment.
    */
   metadata?: { [key: string]: any };
 }
 
 /**
- * Interface for comment notification
+ * Interface for a comment thread in a notebook.
  */
-export interface ICommentNotification {
+export interface ICommentThread {
   /**
-   * Unique identifier for the notification
+   * The unique ID of the thread (same as the root comment ID).
    */
   id: string;
 
   /**
-   * Type of notification
+   * The ID of the cell this thread is attached to.
    */
-  type: 'new_comment' | 'reply' | 'mention' | 'resolution';
+  cellId: string;
 
   /**
-   * ID of the thread this notification is about
+   * The root comment of the thread.
    */
-  threadId: string;
+  rootComment: IComment;
 
   /**
-   * ID of the comment this notification is about
+   * The replies in the thread.
+   */
+  replies: IComment[];
+
+  /**
+   * The status of the thread (same as the root comment status).
+   */
+  status: CommentStatus;
+
+  /**
+   * The timestamp when the thread was last updated.
+   */
+  updatedAt: number;
+}
+
+/**
+ * Interface for comment creation options.
+ */
+export interface ICommentOptions {
+  /**
+   * The ID of the cell to attach the comment to.
+   */
+  cellId: string;
+
+  /**
+   * The content of the comment.
+   */
+  content: string;
+
+  /**
+   * The ID of the thread to add this comment to (for replies).
+   * If not provided, a new thread will be created.
+   */
+  threadId?: string;
+
+  /**
+   * The ID of the parent comment (for nested replies).
+   * If not provided but threadId is, the comment will be a direct reply to the root comment.
+   */
+  parentId?: string;
+
+  /**
+   * Optional metadata for the comment.
+   */
+  metadata?: { [key: string]: any };
+}
+
+/**
+ * Interface for comment update options.
+ */
+export interface ICommentUpdateOptions {
+  /**
+   * The new content of the comment.
+   */
+  content?: string;
+
+  /**
+   * The new status of the comment.
+   */
+  status?: CommentStatus;
+
+  /**
+   * Optional metadata updates for the comment.
+   */
+  metadata?: { [key: string]: any };
+}
+
+/**
+ * Interface for comment notification.
+ */
+export interface ICommentNotification {
+  /**
+   * The ID of the comment that triggered the notification.
    */
   commentId: string;
 
   /**
-   * ID of the user who should receive this notification
+   * The ID of the thread the comment belongs to.
+   */
+  threadId: string;
+
+  /**
+   * The ID of the cell the comment is attached to.
+   */
+  cellId: string;
+
+  /**
+   * The ID of the user who should receive the notification.
    */
   recipientId: string;
 
   /**
-   * Whether the notification has been read
+   * The type of notification.
+   */
+  type: 'new' | 'reply' | 'mention' | 'resolution' | 'status_change';
+
+  /**
+   * Whether the notification has been read.
    */
   read: boolean;
 
   /**
-   * Timestamp when the notification was created
+   * The timestamp when the notification was created.
    */
   createdAt: number;
 }
 
 /**
- * Interface for comment manager options
- */
-export interface ICommentManagerOptions {
-  /**
-   * The Yjs document to use for synchronization
-   */
-  ydoc: Y.Doc;
-
-  /**
-   * The current user's information
-   */
-  currentUser: ICommentAuthor;
-}
-
-/**
- * Interface for the comment manager
+ * Interface for a comment manager.
  */
 export interface ICommentManager {
   /**
-   * Signal emitted when a comment thread is added
+   * A signal emitted when comments change.
    */
-  readonly threadAdded: ISignal<ICommentManager, ICommentThread>;
+  readonly commentsChanged: ISignal<ICommentManager, IComment[]>;
 
   /**
-   * Signal emitted when a comment thread is updated
-   */
-  readonly threadUpdated: ISignal<ICommentManager, ICommentThread>;
-
-  /**
-   * Signal emitted when a comment thread is deleted
-   */
-  readonly threadDeleted: ISignal<ICommentManager, string>;
-
-  /**
-   * Signal emitted when a comment is added
-   */
-  readonly commentAdded: ISignal<ICommentManager, IComment>;
-
-  /**
-   * Signal emitted when a comment is updated
-   */
-  readonly commentUpdated: ISignal<ICommentManager, IComment>;
-
-  /**
-   * Signal emitted when a comment is deleted
-   */
-  readonly commentDeleted: ISignal<ICommentManager, string>;
-
-  /**
-   * Signal emitted when a notification is added
+   * A signal emitted when a new notification is created.
    */
   readonly notificationAdded: ISignal<ICommentManager, ICommentNotification>;
 
   /**
-   * Signal emitted when a notification is updated
+   * A signal emitted when a notification is marked as read.
    */
-  readonly notificationUpdated: ISignal<ICommentManager, ICommentNotification>;
+  readonly notificationRead: ISignal<ICommentManager, string>;
 
   /**
-   * Signal emitted when a notification is deleted
+   * Get all comments for a notebook.
    */
-  readonly notificationDeleted: ISignal<ICommentManager, string>;
+  getComments(): IComment[];
 
   /**
-   * Get all comment threads
+   * Get all comments for a specific cell.
+   * 
+   * @param cellId - The ID of the cell.
+   */
+  getCellComments(cellId: string): IComment[];
+
+  /**
+   * Get all threads for a notebook.
    */
   getThreads(): ICommentThread[];
 
   /**
-   * Get a specific comment thread by ID
+   * Get all threads for a specific cell.
+   * 
+   * @param cellId - The ID of the cell.
+   */
+  getCellThreads(cellId: string): ICommentThread[];
+
+  /**
+   * Get a specific comment by ID.
+   * 
+   * @param commentId - The ID of the comment.
+   */
+  getComment(commentId: string): IComment | undefined;
+
+  /**
+   * Get a specific thread by ID.
+   * 
+   * @param threadId - The ID of the thread.
    */
   getThread(threadId: string): ICommentThread | undefined;
 
   /**
-   * Get all comment threads for a specific cell
+   * Add a new comment.
+   * 
+   * @param options - The comment options.
+   * @returns The created comment, or undefined if creation failed.
    */
-  getThreadsForCell(cellId: string): ICommentThread[];
+  addComment(options: ICommentOptions): IComment | undefined;
 
   /**
-   * Create a new comment thread
+   * Update an existing comment.
+   * 
+   * @param commentId - The ID of the comment to update.
+   * @param options - The update options.
+   * @returns The updated comment, or undefined if update failed.
    */
-  createThread(cellId: string, range?: { start: number; end: number }): ICommentThread;
+  updateComment(commentId: string, options: ICommentUpdateOptions): IComment | undefined;
 
   /**
-   * Update a comment thread
+   * Delete a comment.
+   * 
+   * @param commentId - The ID of the comment to delete.
+   * @returns Whether the deletion was successful.
    */
-  updateThread(threadId: string, updates: Partial<ICommentThread>): ICommentThread;
+  deleteComment(commentId: string): boolean;
 
   /**
-   * Delete a comment thread
+   * Resolve a thread.
+   * 
+   * @param threadId - The ID of the thread to resolve.
+   * @returns Whether the resolution was successful.
    */
-  deleteThread(threadId: string): void;
+  resolveThread(threadId: string): boolean;
 
   /**
-   * Add a comment to a thread
+   * Reopen a resolved thread.
+   * 
+   * @param threadId - The ID of the thread to reopen.
+   * @returns Whether the reopening was successful.
    */
-  addComment(threadId: string, content: string, parentId?: string): IComment;
+  reopenThread(threadId: string): boolean;
 
   /**
-   * Update a comment
-   */
-  updateComment(commentId: string, content: string): IComment;
-
-  /**
-   * Delete a comment
-   */
-  deleteComment(commentId: string): void;
-
-  /**
-   * Resolve a comment thread
-   */
-  resolveThread(threadId: string): ICommentThread;
-
-  /**
-   * Reopen a resolved comment thread
-   */
-  reopenThread(threadId: string): ICommentThread;
-
-  /**
-   * Archive a comment thread
-   */
-  archiveThread(threadId: string): ICommentThread;
-
-  /**
-   * Get all notifications for the current user
+   * Get all notifications for the current user.
    */
   getNotifications(): ICommentNotification[];
 
   /**
-   * Mark a notification as read
+   * Get unread notifications for the current user.
    */
-  markNotificationAsRead(notificationId: string): ICommentNotification;
+  getUnreadNotifications(): ICommentNotification[];
 
   /**
-   * Mark all notifications as read
+   * Mark a notification as read.
+   * 
+   * @param notificationId - The ID of the notification to mark as read.
+   */
+  markNotificationAsRead(notificationId: string): void;
+
+  /**
+   * Mark all notifications as read.
    */
   markAllNotificationsAsRead(): void;
 
   /**
-   * Delete a notification
+   * Connect the comment manager to a notebook model.
+   * 
+   * @param model - The notebook model.
+   * @param permissionManager - The permission manager.
    */
-  deleteNotification(notificationId: string): void;
+  connectNotebook(model: INotebookModel, permissionManager: IPermissionManager): void;
 
   /**
-   * Dispose of the comment manager
+   * Disconnect the comment manager from a notebook model.
    */
-  dispose(): void;
+  disconnectNotebook(): void;
 }
 
 /**
- * Implementation of the comment manager
+ * A concrete implementation of ICommentManager.
  */
 export class CommentManager implements ICommentManager {
   /**
-   * Constructor
+   * Construct a new CommentManager.
+   * 
+   * @param options - The options for the comment manager.
    */
-  constructor(options: ICommentManagerOptions) {
-    this._ydoc = options.ydoc;
-    this._currentUser = options.currentUser;
-
-    // Initialize Yjs shared data structures
-    this._yThreads = this._ydoc.getMap<Y.Map<any>>('comments.threads');
-    this._yComments = this._ydoc.getMap<Y.Map<any>>('comments.comments');
-    this._yNotifications = this._ydoc.getMap<Y.Map<any>>('comments.notifications');
-
-    // Set up observers for Yjs data changes
-    this._yThreads.observe(this._onThreadsChanged.bind(this));
-    this._yComments.observe(this._onCommentsChanged.bind(this));
-    this._yNotifications.observe(this._onNotificationsChanged.bind(this));
+  constructor(options: CommentManager.IOptions = {}) {
+    this._currentUserId = options.currentUserId || this._getCurrentUserIdFromJupyterHub();
+    this._currentUserDisplayName = options.currentUserDisplayName || this._currentUserId;
   }
 
   /**
-   * Signal emitted when a comment thread is added
+   * A signal emitted when comments change.
    */
-  get threadAdded(): ISignal<ICommentManager, ICommentThread> {
-    return this._threadAdded;
+  get commentsChanged(): ISignal<this, IComment[]> {
+    return this._commentsChanged;
   }
 
   /**
-   * Signal emitted when a comment thread is updated
+   * A signal emitted when a new notification is created.
    */
-  get threadUpdated(): ISignal<ICommentManager, ICommentThread> {
-    return this._threadUpdated;
-  }
-
-  /**
-   * Signal emitted when a comment thread is deleted
-   */
-  get threadDeleted(): ISignal<ICommentManager, string> {
-    return this._threadDeleted;
-  }
-
-  /**
-   * Signal emitted when a comment is added
-   */
-  get commentAdded(): ISignal<ICommentManager, IComment> {
-    return this._commentAdded;
-  }
-
-  /**
-   * Signal emitted when a comment is updated
-   */
-  get commentUpdated(): ISignal<ICommentManager, IComment> {
-    return this._commentUpdated;
-  }
-
-  /**
-   * Signal emitted when a comment is deleted
-   */
-  get commentDeleted(): ISignal<ICommentManager, string> {
-    return this._commentDeleted;
-  }
-
-  /**
-   * Signal emitted when a notification is added
-   */
-  get notificationAdded(): ISignal<ICommentManager, ICommentNotification> {
+  get notificationAdded(): ISignal<this, ICommentNotification> {
     return this._notificationAdded;
   }
 
   /**
-   * Signal emitted when a notification is updated
+   * A signal emitted when a notification is marked as read.
    */
-  get notificationUpdated(): ISignal<ICommentManager, ICommentNotification> {
-    return this._notificationUpdated;
+  get notificationRead(): ISignal<this, string> {
+    return this._notificationRead;
   }
 
   /**
-   * Signal emitted when a notification is deleted
+   * Get all comments for a notebook.
    */
-  get notificationDeleted(): ISignal<ICommentManager, string> {
-    return this._notificationDeleted;
+  getComments(): IComment[] {
+    if (!this._ydoc || !this._ycomments) {
+      return [];
+    }
+
+    const comments: IComment[] = [];
+    this._ycomments.forEach((comment) => {
+      comments.push(comment as IComment);
+    });
+
+    return comments;
   }
 
   /**
-   * Get all comment threads
+   * Get all comments for a specific cell.
+   * 
+   * @param cellId - The ID of the cell.
+   */
+  getCellComments(cellId: string): IComment[] {
+    return this.getComments().filter(comment => comment.cellId === cellId);
+  }
+
+  /**
+   * Get all threads for a notebook.
    */
   getThreads(): ICommentThread[] {
-    const threads: ICommentThread[] = [];
-    this._yThreads.forEach((yThread) => {
-      threads.push(this._yThreadToThread(yThread));
+    const comments = this.getComments();
+    const threadMap = new Map<string, ICommentThread>();
+
+    // First pass: create threads for root comments
+    comments.forEach(comment => {
+      if (comment.parentId === null) {
+        threadMap.set(comment.id, {
+          id: comment.id,
+          cellId: comment.cellId,
+          rootComment: comment,
+          replies: [],
+          status: comment.status,
+          updatedAt: comment.updatedAt
+        });
+      }
     });
-    return threads;
+
+    // Second pass: add replies to threads
+    comments.forEach(comment => {
+      if (comment.parentId !== null) {
+        const thread = threadMap.get(comment.threadId);
+        if (thread) {
+          thread.replies.push(comment);
+          // Update thread updatedAt if reply is newer
+          if (comment.updatedAt > thread.updatedAt) {
+            thread.updatedAt = comment.updatedAt;
+          }
+        }
+      }
+    });
+
+    // Sort replies by createdAt
+    threadMap.forEach(thread => {
+      thread.replies.sort((a, b) => a.createdAt - b.createdAt);
+    });
+
+    return Array.from(threadMap.values());
   }
 
   /**
-   * Get a specific comment thread by ID
+   * Get all threads for a specific cell.
+   * 
+   * @param cellId - The ID of the cell.
    */
-  getThread(threadId: string): ICommentThread | undefined {
-    const yThread = this._yThreads.get(threadId);
-    if (!yThread) {
+  getCellThreads(cellId: string): ICommentThread[] {
+    return this.getThreads().filter(thread => thread.cellId === cellId);
+  }
+
+  /**
+   * Get a specific comment by ID.
+   * 
+   * @param commentId - The ID of the comment.
+   */
+  getComment(commentId: string): IComment | undefined {
+    if (!this._ydoc || !this._ycomments) {
       return undefined;
     }
-    return this._yThreadToThread(yThread);
+
+    return this._ycomments.get(commentId) as IComment | undefined;
   }
 
   /**
-   * Get all comment threads for a specific cell
+   * Get a specific thread by ID.
+   * 
+   * @param threadId - The ID of the thread.
    */
-  getThreadsForCell(cellId: string): ICommentThread[] {
-    const threads: ICommentThread[] = [];
-    this._yThreads.forEach((yThread) => {
-      const thread = this._yThreadToThread(yThread);
-      if (thread.cellId === cellId) {
-        threads.push(thread);
-      }
-    });
-    return threads;
+  getThread(threadId: string): ICommentThread | undefined {
+    return this.getThreads().find(thread => thread.id === threadId);
   }
 
   /**
-   * Create a new comment thread
+   * Add a new comment.
+   * 
+   * @param options - The comment options.
+   * @returns The created comment, or undefined if creation failed.
    */
-  createThread(cellId: string, range?: { start: number; end: number }): ICommentThread {
-    const threadId = this._generateId();
+  addComment(options: ICommentOptions): IComment | undefined {
+    if (!this._ydoc || !this._ycomments || !this._permissionManager) {
+      return undefined;
+    }
+
+    // Check if the user has permission to comment
+    if (!this._permissionManager.canCommentOnCell(options.cellId, this._currentUserId)) {
+      console.warn('User does not have permission to comment on this cell');
+      return undefined;
+    }
+
     const now = Date.now();
-
-    const thread: ICommentThread = {
-      id: threadId,
-      cellId,
-      range,
-      status: CommentStatus.Open,
-      createdAt: now,
-      updatedAt: now,
-      comments: []
-    };
-
-    // Create Yjs map for the thread
-    const yThread = new Y.Map<any>();
-    yThread.set('id', thread.id);
-    yThread.set('cellId', thread.cellId);
-    if (thread.range) {
-      yThread.set('range', thread.range);
-    }
-    yThread.set('status', thread.status);
-    yThread.set('createdAt', thread.createdAt);
-    yThread.set('updatedAt', thread.updatedAt);
-    yThread.set('commentIds', new Y.Array<string>());
-
-    // Add thread to Yjs map
-    this._yThreads.set(threadId, yThread);
-
-    return thread;
-  }
-
-  /**
-   * Update a comment thread
-   */
-  updateThread(threadId: string, updates: Partial<ICommentThread>): ICommentThread {
-    const yThread = this._yThreads.get(threadId);
-    if (!yThread) {
-      throw new Error(`Thread with ID ${threadId} not found`);
-    }
-
-    // Update the thread in Yjs
-    this._ydoc.transact(() => {
-      if (updates.status !== undefined) {
-        yThread.set('status', updates.status);
-      }
-
-      if (updates.range !== undefined) {
-        yThread.set('range', updates.range);
-      }
-
-      if (updates.metadata !== undefined) {
-        yThread.set('metadata', updates.metadata);
-      }
-
-      // Always update the updatedAt timestamp
-      yThread.set('updatedAt', Date.now());
-    });
-
-    return this._yThreadToThread(yThread);
-  }
-
-  /**
-   * Delete a comment thread
-   */
-  deleteThread(threadId: string): void {
-    const yThread = this._yThreads.get(threadId);
-    if (!yThread) {
-      throw new Error(`Thread with ID ${threadId} not found`);
-    }
-
-    // Get all comment IDs in this thread
-    const commentIds = yThread.get('commentIds').toArray();
-
-    // Delete all comments in the thread
-    this._ydoc.transact(() => {
-      commentIds.forEach((commentId: string) => {
-        this._yComments.delete(commentId);
-      });
-
-      // Delete the thread
-      this._yThreads.delete(threadId);
-    });
-  }
-
-  /**
-   * Add a comment to a thread
-   */
-  addComment(threadId: string, content: string, parentId?: string): IComment {
-    const yThread = this._yThreads.get(threadId);
-    if (!yThread) {
-      throw new Error(`Thread with ID ${threadId} not found`);
-    }
-
     const commentId = this._generateId();
-    const now = Date.now();
+    let threadId = options.threadId || commentId;
+    let parentId = options.parentId || null;
 
+    // If this is a reply, verify that the thread and parent exist
+    if (options.threadId) {
+      const thread = this.getThread(options.threadId);
+      if (!thread) {
+        console.warn(`Thread with ID ${options.threadId} not found`);
+        return undefined;
+      }
+
+      // If parentId is provided, verify it exists
+      if (options.parentId) {
+        const parentComment = this.getComment(options.parentId);
+        if (!parentComment) {
+          console.warn(`Parent comment with ID ${options.parentId} not found`);
+          return undefined;
+        }
+      } else {
+        // If no parentId is provided, use the root comment as parent
+        parentId = thread.rootComment.id;
+      }
+    }
+
+    // Create the comment
     const comment: IComment = {
       id: commentId,
-      content,
-      author: this._currentUser,
+      cellId: options.cellId,
+      authorId: this._currentUserId,
+      authorName: this._currentUserDisplayName,
+      content: options.content,
       createdAt: now,
       updatedAt: now,
+      status: CommentStatus.Active,
+      threadId,
       parentId,
-      status: CommentStatus.Open
+      metadata: options.metadata || {}
     };
 
-    // Create Yjs map for the comment
-    const yComment = new Y.Map<any>();
-    yComment.set('id', comment.id);
-    yComment.set('content', comment.content);
-    yComment.set('author', comment.author);
-    yComment.set('createdAt', comment.createdAt);
-    yComment.set('updatedAt', comment.updatedAt);
-    yComment.set('status', comment.status);
-    if (comment.parentId) {
-      yComment.set('parentId', comment.parentId);
-    }
+    // Add the comment to the shared map
+    this._ycomments.set(commentId, comment);
 
-    // Add comment to Yjs maps and update the thread
-    this._ydoc.transact(() => {
-      // Add comment to comments map
-      this._yComments.set(commentId, yComment);
-
-      // Add comment ID to thread's comment list
-      const commentIds = yThread.get('commentIds') as Y.Array<string>;
-      commentIds.push([commentId]);
-
-      // Update thread's updatedAt timestamp
-      yThread.set('updatedAt', now);
-    });
-
-    // Create notifications for this comment
-    this._createCommentNotifications(comment, threadId);
+    // Create notifications for relevant users
+    this._createNotificationsForComment(comment);
 
     return comment;
   }
 
   /**
-   * Update a comment
+   * Update an existing comment.
+   * 
+   * @param commentId - The ID of the comment to update.
+   * @param options - The update options.
+   * @returns The updated comment, or undefined if update failed.
    */
-  updateComment(commentId: string, content: string): IComment {
-    const yComment = this._yComments.get(commentId);
-    if (!yComment) {
-      throw new Error(`Comment with ID ${commentId} not found`);
+  updateComment(commentId: string, options: ICommentUpdateOptions): IComment | undefined {
+    if (!this._ydoc || !this._ycomments) {
+      return undefined;
     }
 
-    // Check if the current user is the author of the comment
-    const author = yComment.get('author') as ICommentAuthor;
-    if (author.id !== this._currentUser.id) {
-      throw new Error('You can only edit your own comments');
+    // Get the existing comment
+    const comment = this.getComment(commentId);
+    if (!comment) {
+      console.warn(`Comment with ID ${commentId} not found`);
+      return undefined;
     }
 
-    const now = Date.now();
-
-    // Update the comment in Yjs
-    this._ydoc.transact(() => {
-      yComment.set('content', content);
-      yComment.set('updatedAt', now);
-    });
-
-    return this._yCommentToComment(yComment);
-  }
-
-  /**
-   * Delete a comment
-   */
-  deleteComment(commentId: string): void {
-    const yComment = this._yComments.get(commentId);
-    if (!yComment) {
-      throw new Error(`Comment with ID ${commentId} not found`);
+    // Check if the user has permission to update the comment
+    if (comment.authorId !== this._currentUserId && !this._isAdmin()) {
+      console.warn('Only the comment author or an admin can update a comment');
+      return undefined;
     }
 
-    // Check if the current user is the author of the comment
-    const author = yComment.get('author') as ICommentAuthor;
-    if (author.id !== this._currentUser.id) {
-      throw new Error('You can only delete your own comments');
-    }
-
-    // Find the thread that contains this comment
-    let threadId: string | undefined;
-    let commentIndex: number = -1;
-
-    this._yThreads.forEach((yThread, id) => {
-      const commentIds = yThread.get('commentIds').toArray();
-      const index = commentIds.indexOf(commentId);
-      if (index !== -1) {
-        threadId = id;
-        commentIndex = index;
-      }
-    });
-
-    if (!threadId || commentIndex === -1) {
-      throw new Error(`Could not find thread containing comment ${commentId}`);
-    }
-
-    const yThread = this._yThreads.get(threadId)!;
-
-    // Delete the comment and update the thread
-    this._ydoc.transact(() => {
-      // Remove comment ID from thread's comment list
-      const commentIds = yThread.get('commentIds') as Y.Array<string>;
-      commentIds.delete(commentIndex, 1);
-
-      // Delete the comment
-      this._yComments.delete(commentId);
-
-      // Update thread's updatedAt timestamp
-      yThread.set('updatedAt', Date.now());
-
-      // If this was the last comment in the thread, delete the thread
-      if (commentIds.length === 0) {
-        this._yThreads.delete(threadId!);
-      }
-    });
-
-    // Delete any notifications related to this comment
-    this._deleteNotificationsForComment(commentId);
-  }
-
-  /**
-   * Resolve a comment thread
-   */
-  resolveThread(threadId: string): ICommentThread {
-    const yThread = this._yThreads.get(threadId);
-    if (!yThread) {
-      throw new Error(`Thread with ID ${threadId} not found`);
-    }
-
-    const now = Date.now();
-
-    // Update the thread in Yjs
-    this._ydoc.transact(() => {
-      yThread.set('status', CommentStatus.Resolved);
-      yThread.set('resolvedBy', this._currentUser);
-      yThread.set('resolvedAt', now);
-      yThread.set('updatedAt', now);
-    });
-
-    // Create resolution notifications
-    this._createResolutionNotifications(threadId);
-
-    return this._yThreadToThread(yThread);
-  }
-
-  /**
-   * Reopen a resolved comment thread
-   */
-  reopenThread(threadId: string): ICommentThread {
-    const yThread = this._yThreads.get(threadId);
-    if (!yThread) {
-      throw new Error(`Thread with ID ${threadId} not found`);
-    }
-
-    // Update the thread in Yjs
-    this._ydoc.transact(() => {
-      yThread.set('status', CommentStatus.Open);
-      yThread.delete('resolvedBy');
-      yThread.delete('resolvedAt');
-      yThread.set('updatedAt', Date.now());
-    });
-
-    return this._yThreadToThread(yThread);
-  }
-
-  /**
-   * Archive a comment thread
-   */
-  archiveThread(threadId: string): ICommentThread {
-    const yThread = this._yThreads.get(threadId);
-    if (!yThread) {
-      throw new Error(`Thread with ID ${threadId} not found`);
-    }
-
-    // Update the thread in Yjs
-    this._ydoc.transact(() => {
-      yThread.set('status', CommentStatus.Archived);
-      yThread.set('updatedAt', Date.now());
-    });
-
-    return this._yThreadToThread(yThread);
-  }
-
-  /**
-   * Get all notifications for the current user
-   */
-  getNotifications(): ICommentNotification[] {
-    const notifications: ICommentNotification[] = [];
-    this._yNotifications.forEach((yNotification) => {
-      const notification = this._yNotificationToNotification(yNotification);
-      if (notification.recipientId === this._currentUser.id) {
-        notifications.push(notification);
-      }
-    });
-    return notifications;
-  }
-
-  /**
-   * Mark a notification as read
-   */
-  markNotificationAsRead(notificationId: string): ICommentNotification {
-    const yNotification = this._yNotifications.get(notificationId);
-    if (!yNotification) {
-      throw new Error(`Notification with ID ${notificationId} not found`);
-    }
-
-    // Check if this notification is for the current user
-    const recipientId = yNotification.get('recipientId');
-    if (recipientId !== this._currentUser.id) {
-      throw new Error('You can only mark your own notifications as read');
-    }
-
-    // Update the notification in Yjs
-    this._ydoc.transact(() => {
-      yNotification.set('read', true);
-    });
-
-    return this._yNotificationToNotification(yNotification);
-  }
-
-  /**
-   * Mark all notifications as read
-   */
-  markAllNotificationsAsRead(): void {
-    // Update all notifications for the current user
-    this._ydoc.transact(() => {
-      this._yNotifications.forEach((yNotification) => {
-        const recipientId = yNotification.get('recipientId');
-        if (recipientId === this._currentUser.id) {
-          yNotification.set('read', true);
-        }
-      });
-    });
-  }
-
-  /**
-   * Delete a notification
-   */
-  deleteNotification(notificationId: string): void {
-    const yNotification = this._yNotifications.get(notificationId);
-    if (!yNotification) {
-      throw new Error(`Notification with ID ${notificationId} not found`);
-    }
-
-    // Check if this notification is for the current user
-    const recipientId = yNotification.get('recipientId');
-    if (recipientId !== this._currentUser.id) {
-      throw new Error('You can only delete your own notifications');
-    }
-
-    // Delete the notification in Yjs
-    this._ydoc.transact(() => {
-      this._yNotifications.delete(notificationId);
-    });
-  }
-
-  /**
-   * Dispose of the comment manager
-   */
-  dispose(): void {
-    // Disconnect observers
-    this._yThreads.unobserve(this._onThreadsChanged.bind(this));
-    this._yComments.unobserve(this._onCommentsChanged.bind(this));
-    this._yNotifications.unobserve(this._onNotificationsChanged.bind(this));
-
-    // Clear signals
-    Signal.clearData(this);
-  }
-
-  /**
-   * Handle changes to the threads map
-   */
-  private _onThreadsChanged(event: Y.YMapEvent<Y.Map<any>>): void {
-    event.keysChanged.forEach((key) => {
-      if (event.changes.keys.get(key)?.action === 'add') {
-        // Thread added
-        const yThread = this._yThreads.get(key)!;
-        const thread = this._yThreadToThread(yThread);
-        this._threadAdded.emit(thread);
-      } else if (event.changes.keys.get(key)?.action === 'update') {
-        // Thread updated
-        const yThread = this._yThreads.get(key)!;
-        const thread = this._yThreadToThread(yThread);
-        this._threadUpdated.emit(thread);
-      } else if (event.changes.keys.get(key)?.action === 'delete') {
-        // Thread deleted
-        this._threadDeleted.emit(key);
-      }
-    });
-  }
-
-  /**
-   * Handle changes to the comments map
-   */
-  private _onCommentsChanged(event: Y.YMapEvent<Y.Map<any>>): void {
-    event.keysChanged.forEach((key) => {
-      if (event.changes.keys.get(key)?.action === 'add') {
-        // Comment added
-        const yComment = this._yComments.get(key)!;
-        const comment = this._yCommentToComment(yComment);
-        this._commentAdded.emit(comment);
-      } else if (event.changes.keys.get(key)?.action === 'update') {
-        // Comment updated
-        const yComment = this._yComments.get(key)!;
-        const comment = this._yCommentToComment(yComment);
-        this._commentUpdated.emit(comment);
-      } else if (event.changes.keys.get(key)?.action === 'delete') {
-        // Comment deleted
-        this._commentDeleted.emit(key);
-      }
-    });
-  }
-
-  /**
-   * Handle changes to the notifications map
-   */
-  private _onNotificationsChanged(event: Y.YMapEvent<Y.Map<any>>): void {
-    event.keysChanged.forEach((key) => {
-      if (event.changes.keys.get(key)?.action === 'add') {
-        // Notification added
-        const yNotification = this._yNotifications.get(key)!;
-        const notification = this._yNotificationToNotification(yNotification);
-        this._notificationAdded.emit(notification);
-      } else if (event.changes.keys.get(key)?.action === 'update') {
-        // Notification updated
-        const yNotification = this._yNotifications.get(key)!;
-        const notification = this._yNotificationToNotification(yNotification);
-        this._notificationUpdated.emit(notification);
-      } else if (event.changes.keys.get(key)?.action === 'delete') {
-        // Notification deleted
-        this._notificationDeleted.emit(key);
-      }
-    });
-  }
-
-  /**
-   * Convert a Yjs thread map to an ICommentThread
-   */
-  private _yThreadToThread(yThread: Y.Map<any>): ICommentThread {
-    const commentIds = yThread.get('commentIds').toArray();
-    const comments: IComment[] = [];
-
-    // Get all comments in this thread
-    commentIds.forEach((commentId: string) => {
-      const yComment = this._yComments.get(commentId);
-      if (yComment) {
-        comments.push(this._yCommentToComment(yComment));
-      }
-    });
-
-    // Build thread object
-    const thread: ICommentThread = {
-      id: yThread.get('id'),
-      cellId: yThread.get('cellId'),
-      status: yThread.get('status'),
-      createdAt: yThread.get('createdAt'),
-      updatedAt: yThread.get('updatedAt'),
-      comments
+    // Create the updated comment
+    const updatedComment: IComment = {
+      ...comment,
+      updatedAt: Date.now()
     };
 
-    // Add optional properties if they exist
-    if (yThread.has('range')) {
-      thread.range = yThread.get('range');
+    // Update content if provided
+    if (options.content !== undefined) {
+      updatedComment.content = options.content;
     }
 
-    if (yThread.has('metadata')) {
-      thread.metadata = yThread.get('metadata');
+    // Update status if provided
+    if (options.status !== undefined) {
+      updatedComment.status = options.status;
+
+      // If this is a root comment, update thread status
+      if (comment.parentId === null && options.status === CommentStatus.Resolved) {
+        this._createStatusChangeNotifications(comment, options.status);
+      }
     }
 
-    return thread;
+    // Update metadata if provided
+    if (options.metadata !== undefined) {
+      updatedComment.metadata = {
+        ...comment.metadata,
+        ...options.metadata
+      };
+    }
+
+    // Update the comment in the shared map
+    this._ycomments.set(commentId, updatedComment);
+
+    return updatedComment;
   }
 
   /**
-   * Convert a Yjs comment map to an IComment
+   * Delete a comment.
+   * 
+   * @param commentId - The ID of the comment to delete.
+   * @returns Whether the deletion was successful.
    */
-  private _yCommentToComment(yComment: Y.Map<any>): IComment {
-    // Build comment object
-    const comment: IComment = {
-      id: yComment.get('id'),
-      content: yComment.get('content'),
-      author: yComment.get('author'),
-      createdAt: yComment.get('createdAt'),
-      updatedAt: yComment.get('updatedAt'),
-      status: yComment.get('status')
-    };
-
-    // Add optional properties if they exist
-    if (yComment.has('parentId')) {
-      comment.parentId = yComment.get('parentId');
+  deleteComment(commentId: string): boolean {
+    if (!this._ydoc || !this._ycomments) {
+      return false;
     }
 
-    if (yComment.has('resolvedBy')) {
-      comment.resolvedBy = yComment.get('resolvedBy');
+    // Get the existing comment
+    const comment = this.getComment(commentId);
+    if (!comment) {
+      console.warn(`Comment with ID ${commentId} not found`);
+      return false;
     }
 
-    if (yComment.has('resolvedAt')) {
-      comment.resolvedAt = yComment.get('resolvedAt');
+    // Check if the user has permission to delete the comment
+    if (comment.authorId !== this._currentUserId && !this._isAdmin()) {
+      console.warn('Only the comment author or an admin can delete a comment');
+      return false;
     }
 
-    if (yComment.has('metadata')) {
-      comment.metadata = yComment.get('metadata');
+    // If this is a root comment, delete all replies
+    if (comment.parentId === null) {
+      const thread = this.getThread(comment.id);
+      if (thread) {
+        thread.replies.forEach(reply => {
+          this._ycomments.delete(reply.id);
+        });
+      }
     }
 
-    return comment;
+    // Delete the comment from the shared map
+    this._ycomments.delete(commentId);
+
+    return true;
   }
 
   /**
-   * Convert a Yjs notification map to an ICommentNotification
+   * Resolve a thread.
+   * 
+   * @param threadId - The ID of the thread to resolve.
+   * @returns Whether the resolution was successful.
    */
-  private _yNotificationToNotification(yNotification: Y.Map<any>): ICommentNotification {
-    return {
-      id: yNotification.get('id'),
-      type: yNotification.get('type'),
-      threadId: yNotification.get('threadId'),
-      commentId: yNotification.get('commentId'),
-      recipientId: yNotification.get('recipientId'),
-      read: yNotification.get('read'),
-      createdAt: yNotification.get('createdAt')
-    };
-  }
-
-  /**
-   * Create notifications for a new comment
-   */
-  private _createCommentNotifications(comment: IComment, threadId: string): void {
+  resolveThread(threadId: string): boolean {
     const thread = this.getThread(threadId);
     if (!thread) {
-      return;
+      console.warn(`Thread with ID ${threadId} not found`);
+      return false;
     }
 
-    // Get all unique authors in this thread (excluding the current user)
-    const authorIds = new Set<string>();
-    thread.comments.forEach((c) => {
-      if (c.author.id !== this._currentUser.id) {
-        authorIds.add(c.author.id);
+    // Update the root comment status to resolved
+    const updated = this.updateComment(thread.rootComment.id, {
+      status: CommentStatus.Resolved
+    });
+
+    return !!updated;
+  }
+
+  /**
+   * Reopen a resolved thread.
+   * 
+   * @param threadId - The ID of the thread to reopen.
+   * @returns Whether the reopening was successful.
+   */
+  reopenThread(threadId: string): boolean {
+    const thread = this.getThread(threadId);
+    if (!thread) {
+      console.warn(`Thread with ID ${threadId} not found`);
+      return false;
+    }
+
+    // Update the root comment status to active
+    const updated = this.updateComment(thread.rootComment.id, {
+      status: CommentStatus.Active
+    });
+
+    return !!updated;
+  }
+
+  /**
+   * Get all notifications for the current user.
+   */
+  getNotifications(): ICommentNotification[] {
+    if (!this._ydoc || !this._ynotifications) {
+      return [];
+    }
+
+    const notifications: ICommentNotification[] = [];
+    this._ynotifications.forEach((notification, id) => {
+      if (notification.recipientId === this._currentUserId) {
+        notifications.push(notification as ICommentNotification);
       }
     });
 
-    // Create notifications for each author
-    this._ydoc.transact(() => {
-      authorIds.forEach((authorId) => {
-        const notificationType = comment.parentId ? 'reply' : 'new_comment';
-        this._createNotification({
-          type: notificationType,
-          threadId,
-          commentId: comment.id,
-          recipientId: authorId
-        });
-      });
+    // Sort by creation time, newest first
+    return notifications.sort((a, b) => b.createdAt - a.createdAt);
+  }
 
-      // Check for @mentions in the comment content and create notifications
-      this._createMentionNotifications(comment, threadId);
+  /**
+   * Get unread notifications for the current user.
+   */
+  getUnreadNotifications(): ICommentNotification[] {
+    return this.getNotifications().filter(notification => !notification.read);
+  }
+
+  /**
+   * Mark a notification as read.
+   * 
+   * @param notificationId - The ID of the notification to mark as read.
+   */
+  markNotificationAsRead(notificationId: string): void {
+    if (!this._ydoc || !this._ynotifications) {
+      return;
+    }
+
+    const notification = this._ynotifications.get(notificationId) as ICommentNotification | undefined;
+    if (!notification) {
+      console.warn(`Notification with ID ${notificationId} not found`);
+      return;
+    }
+
+    // Check if this notification is for the current user
+    if (notification.recipientId !== this._currentUserId) {
+      console.warn('Cannot mark another user\'s notification as read');
+      return;
+    }
+
+    // Update the notification
+    const updatedNotification: ICommentNotification = {
+      ...notification,
+      read: true
+    };
+
+    // Update the notification in the shared map
+    this._ynotifications.set(notificationId, updatedNotification);
+
+    // Emit the notification read signal
+    this._notificationRead.emit(notificationId);
+  }
+
+  /**
+   * Mark all notifications as read.
+   */
+  markAllNotificationsAsRead(): void {
+    if (!this._ydoc || !this._ynotifications) {
+      return;
+    }
+
+    const unreadNotifications = this.getUnreadNotifications();
+    unreadNotifications.forEach(notification => {
+      this.markNotificationAsRead(notification.commentId);
     });
   }
 
   /**
-   * Create notifications for @mentions in a comment
+   * Connect the comment manager to a notebook model.
+   * 
+   * @param model - The notebook model.
+   * @param permissionManager - The permission manager.
    */
-  private _createMentionNotifications(comment: IComment, threadId: string): void {
-    // Simple regex to find @username mentions
-    // In a real implementation, this would be more sophisticated
-    const mentionRegex = /@([\w-]+)/g;
-    const mentions = comment.content.match(mentionRegex);
-
-    if (!mentions) {
+  connectNotebook(model: INotebookModel, permissionManager: IPermissionManager): void {
+    if (this._model === model) {
       return;
     }
 
-    // For each mention, create a notification
-    // This is a simplified implementation - in a real system, you would
-    // need to resolve usernames to user IDs
-    mentions.forEach((mention) => {
-      const username = mention.substring(1); // Remove the @ symbol
-      // In a real implementation, you would look up the user ID from the username
-      // For now, we'll just use the username as the ID
-      const userId = username;
+    // Disconnect from any existing model
+    this.disconnectNotebook();
 
-      // Don't notify the current user
-      if (userId === this._currentUser.id) {
+    // Connect to the new model
+    this._model = model;
+    this._permissionManager = permissionManager;
+
+    // Get the Yjs document from the collaboration provider
+    const provider = model.collaborationProvider;
+    if (!provider) {
+      console.warn('Notebook model does not have a collaboration provider');
+      return;
+    }
+
+    this._ydoc = provider.ydoc;
+    if (!this._ydoc) {
+      console.warn('Collaboration provider does not have a Yjs document');
+      return;
+    }
+
+    // Initialize shared data structures
+    this._initSharedData();
+
+    // Set up observation of shared data structures
+    this._observeSharedData();
+  }
+
+  /**
+   * Disconnect the comment manager from a notebook model.
+   */
+  disconnectNotebook(): void {
+    if (!this._model) {
+      return;
+    }
+
+    // Clean up observation of shared data structures
+    this._unobserveSharedData();
+
+    // Clear references
+    this._model = null;
+    this._permissionManager = null;
+    this._ydoc = null;
+    this._ycomments = null;
+    this._ynotifications = null;
+  }
+
+  /**
+   * Initialize the shared data structures.
+   */
+  private _initSharedData(): void {
+    if (!this._ydoc) {
+      return;
+    }
+
+    // Create or get shared data structures
+    this._ycomments = this._ydoc.getMap('comments');
+    this._ynotifications = this._ydoc.getMap('commentNotifications');
+  }
+
+  /**
+   * Set up observation of shared data structures.
+   */
+  private _observeSharedData(): void {
+    if (!this._ydoc || !this._ycomments || !this._ynotifications) {
+      return;
+    }
+
+    // Observe comments
+    this._ycomments.observe(this._onCommentsChanged.bind(this));
+
+    // Observe notifications
+    this._ynotifications.observe(this._onNotificationsChanged.bind(this));
+  }
+
+  /**
+   * Clean up observation of shared data structures.
+   */
+  private _unobserveSharedData(): void {
+    if (!this._ydoc) {
+      return;
+    }
+
+    // Unobserve all shared data structures
+    this._ycomments?.unobserve(this._onCommentsChanged.bind(this));
+    this._ynotifications?.unobserve(this._onNotificationsChanged.bind(this));
+  }
+
+  /**
+   * Handle changes to comments.
+   */
+  private _onCommentsChanged(event: Y.YMapEvent<any>): void {
+    // Get all changed comments
+    const changedComments: IComment[] = [];
+    event.keysChanged.forEach(commentId => {
+      const comment = this._ycomments?.get(commentId) as IComment | undefined;
+      if (comment) {
+        changedComments.push(comment);
+      }
+    });
+
+    // Emit the comments changed signal
+    if (changedComments.length > 0) {
+      this._commentsChanged.emit(changedComments);
+    }
+  }
+
+  /**
+   * Handle changes to notifications.
+   */
+  private _onNotificationsChanged(event: Y.YMapEvent<any>): void {
+    // Check for new notifications for the current user
+    event.keysChanged.forEach(notificationId => {
+      const notification = this._ynotifications?.get(notificationId) as ICommentNotification | undefined;
+      if (notification && notification.recipientId === this._currentUserId && !notification.read) {
+        // Emit the notification added signal
+        this._notificationAdded.emit(notification);
+      }
+    });
+  }
+
+  /**
+   * Create notifications for a new comment.
+   */
+  private _createNotificationsForComment(comment: IComment): void {
+    if (!this._ydoc || !this._ynotifications) {
+      return;
+    }
+
+    const now = Date.now();
+    const notificationId = this._generateId();
+
+    // If this is a reply, notify the thread participants
+    if (comment.parentId !== null) {
+      const thread = this.getThread(comment.threadId);
+      if (thread) {
+        // Get unique participant IDs (excluding the current user)
+        const participantIds = new Set<string>();
+        participantIds.add(thread.rootComment.authorId);
+        thread.replies.forEach(reply => {
+          participantIds.add(reply.authorId);
+        });
+        participantIds.delete(this._currentUserId); // Don't notify yourself
+
+        // Create a notification for each participant
+        participantIds.forEach(participantId => {
+          const notification: ICommentNotification = {
+            commentId: comment.id,
+            threadId: comment.threadId,
+            cellId: comment.cellId,
+            recipientId: participantId,
+            type: 'reply',
+            read: false,
+            createdAt: now
+          };
+
+          this._ynotifications.set(`${notificationId}-${participantId}`, notification);
+        });
+      }
+    }
+
+    // Check for @mentions in the comment content
+    this._createMentionNotifications(comment);
+  }
+
+  /**
+   * Create notifications for @mentions in a comment.
+   */
+  private _createMentionNotifications(comment: IComment): void {
+    if (!this._ydoc || !this._ynotifications || !this._permissionManager) {
+      return;
+    }
+
+    const now = Date.now();
+    const notificationId = this._generateId();
+
+    // Get all users with permission to view this notebook
+    const users = this._permissionManager.getUserPermissions();
+
+    // Check for @mentions in the comment content
+    users.forEach(user => {
+      // Skip the current user
+      if (user.userId === this._currentUserId) {
         return;
       }
 
-      this._createNotification({
-        type: 'mention',
-        threadId,
-        commentId: comment.id,
-        recipientId: userId
-      });
+      // Check if the user is mentioned
+      const mentionRegex = new RegExp(`@${user.displayName}\b`, 'i');
+      if (mentionRegex.test(comment.content)) {
+        const notification: ICommentNotification = {
+          commentId: comment.id,
+          threadId: comment.threadId,
+          cellId: comment.cellId,
+          recipientId: user.userId,
+          type: 'mention',
+          read: false,
+          createdAt: now
+        };
+
+        this._ynotifications.set(`${notificationId}-${user.userId}`, notification);
+      }
     });
   }
 
   /**
-   * Create notifications for thread resolution
+   * Create notifications for status changes.
    */
-  private _createResolutionNotifications(threadId: string): void {
-    const thread = this.getThread(threadId);
+  private _createStatusChangeNotifications(comment: IComment, newStatus: CommentStatus): void {
+    if (!this._ydoc || !this._ynotifications) {
+      return;
+    }
+
+    const now = Date.now();
+    const notificationId = this._generateId();
+
+    // Get the thread
+    const thread = this.getThread(comment.threadId);
     if (!thread) {
       return;
     }
 
-    // Get all unique authors in this thread (excluding the current user)
-    const authorIds = new Set<string>();
-    thread.comments.forEach((c) => {
-      if (c.author.id !== this._currentUser.id) {
-        authorIds.add(c.author.id);
-      }
+    // Get unique participant IDs (excluding the current user)
+    const participantIds = new Set<string>();
+    participantIds.add(thread.rootComment.authorId);
+    thread.replies.forEach(reply => {
+      participantIds.add(reply.authorId);
     });
+    participantIds.delete(this._currentUserId); // Don't notify yourself
 
-    // Create notifications for each author
-    this._ydoc.transact(() => {
-      authorIds.forEach((authorId) => {
-        this._createNotification({
-          type: 'resolution',
-          threadId,
-          commentId: thread.comments[0].id, // Use the first comment ID
-          recipientId: authorId
-        });
-      });
-    });
-  }
+    // Create a notification for each participant
+    participantIds.forEach(participantId => {
+      const notification: ICommentNotification = {
+        commentId: comment.id,
+        threadId: comment.threadId,
+        cellId: comment.cellId,
+        recipientId: participantId,
+        type: newStatus === CommentStatus.Resolved ? 'resolution' : 'status_change',
+        read: false,
+        createdAt: now
+      };
 
-  /**
-   * Create a notification
-   */
-  private _createNotification(options: {
-    type: 'new_comment' | 'reply' | 'mention' | 'resolution';
-    threadId: string;
-    commentId: string;
-    recipientId: string;
-  }): ICommentNotification {
-    const notificationId = this._generateId();
-    const now = Date.now();
-
-    const notification: ICommentNotification = {
-      id: notificationId,
-      type: options.type,
-      threadId: options.threadId,
-      commentId: options.commentId,
-      recipientId: options.recipientId,
-      read: false,
-      createdAt: now
-    };
-
-    // Create Yjs map for the notification
-    const yNotification = new Y.Map<any>();
-    yNotification.set('id', notification.id);
-    yNotification.set('type', notification.type);
-    yNotification.set('threadId', notification.threadId);
-    yNotification.set('commentId', notification.commentId);
-    yNotification.set('recipientId', notification.recipientId);
-    yNotification.set('read', notification.read);
-    yNotification.set('createdAt', notification.createdAt);
-
-    // Add notification to Yjs map
-    this._yNotifications.set(notificationId, yNotification);
-
-    return notification;
-  }
-
-  /**
-   * Delete all notifications related to a comment
-   */
-  private _deleteNotificationsForComment(commentId: string): void {
-    // Find all notifications related to this comment
-    const notificationsToDelete: string[] = [];
-
-    this._yNotifications.forEach((yNotification, id) => {
-      if (yNotification.get('commentId') === commentId) {
-        notificationsToDelete.push(id);
-      }
-    });
-
-    // Delete all found notifications
-    this._ydoc.transact(() => {
-      notificationsToDelete.forEach((id) => {
-        this._yNotifications.delete(id);
-      });
+      this._ynotifications.set(`${notificationId}-${participantId}`, notification);
     });
   }
 
   /**
-   * Generate a unique ID
+   * Generate a unique ID.
    */
   private _generateId(): string {
-    return `${Date.now().toString(36)}-${Math.random().toString(36).substr(2, 9)}`;
+    return `comment-${Date.now()}-${Math.random().toString(36).substring(2, 10)}`;
   }
 
-  private _ydoc: Y.Doc;
-  private _currentUser: ICommentAuthor;
-  private _yThreads: Y.Map<Y.Map<any>>;
-  private _yComments: Y.Map<Y.Map<any>>;
-  private _yNotifications: Y.Map<Y.Map<any>>;
+  /**
+   * Check if the current user is an admin.
+   */
+  private _isAdmin(): boolean {
+    return this._permissionManager?.isAdmin || false;
+  }
 
-  private _threadAdded = new Signal<ICommentManager, ICommentThread>(this);
-  private _threadUpdated = new Signal<ICommentManager, ICommentThread>(this);
-  private _threadDeleted = new Signal<ICommentManager, string>(this);
-  private _commentAdded = new Signal<ICommentManager, IComment>(this);
-  private _commentUpdated = new Signal<ICommentManager, IComment>(this);
-  private _commentDeleted = new Signal<ICommentManager, string>(this);
-  private _notificationAdded = new Signal<ICommentManager, ICommentNotification>(this);
-  private _notificationUpdated = new Signal<ICommentManager, ICommentNotification>(this);
-  private _notificationDeleted = new Signal<ICommentManager, string>(this);
+  /**
+   * Get the current user ID from JupyterHub if available.
+   */
+  private _getCurrentUserIdFromJupyterHub(): string {
+    // Try to get the user ID from the page config
+    try {
+      // @ts-ignore
+      const pageConfig = window.jupyter?.pageConfig;
+      if (pageConfig && pageConfig.user) {
+        return pageConfig.user;
+      }
+    } catch (error) {
+      console.warn('Error getting user ID from JupyterHub:', error);
+    }
+
+    // Fall back to a generated ID if JupyterHub is not available
+    return `user-${Math.random().toString(36).substring(2, 10)}`;
+  }
+
+  private _model: INotebookModel | null = null;
+  private _permissionManager: IPermissionManager | null = null;
+  private _ydoc: Y.Doc | null = null;
+  private _ycomments: Y.Map<IComment> | null = null;
+  private _ynotifications: Y.Map<ICommentNotification> | null = null;
+
+  private _currentUserId: string;
+  private _currentUserDisplayName: string;
+
+  private _commentsChanged = new Signal<this, IComment[]>(this);
+  private _notificationAdded = new Signal<this, ICommentNotification>(this);
+  private _notificationRead = new Signal<this, string>(this);
+}
+
+/**
+ * The namespace for CommentManager class statics.
+ */
+export namespace CommentManager {
+  /**
+   * The options for initializing a comment manager.
+   */
+  export interface IOptions {
+    /**
+     * The current user ID.
+     */
+    currentUserId?: string;
+
+    /**
+     * The current user's display name.
+     */
+    currentUserDisplayName?: string;
+  }
 }
