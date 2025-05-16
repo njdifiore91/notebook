@@ -879,12 +879,28 @@ const collaborationUI: JupyterFrontEndPlugin<void> = {
     // Add the user presence style to the document
     document.head.appendChild(UserPresence.createStyle());
     
+    // Import and add the permissions dialog style to the document
+    import('./components/permissionsDialog').then(module => {
+      document.head.appendChild(module.PermissionsDialog.createStyle());
+    });
+    
     // Register commands for collaboration features
     app.commands.addCommand(CommandIDs.openPermissions, {
       label: 'Manage Collaboration Permissions',
       execute: () => {
-        // Implementation will be added when the permissions dialog component is created
-        console.log('Open permissions dialog');
+        const current = notebookTracker.currentWidget;
+        if (!current) {
+          return;
+        }
+        
+        // Import the PermissionsDialog dynamically to avoid circular dependencies
+        import('./components/permissionsDialog').then(module => {
+          module.PermissionsDialog.showDialog({
+            permissionManager,
+            notebookPanel: current,
+            translator: app.translator
+          });
+        });
       },
       isEnabled: () => notebookTracker.currentWidget !== null
     });
