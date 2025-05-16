@@ -1,489 +1,255 @@
 import asyncio
 import json
-import os
-import pathlib
 import pytest
-import uuid
 from unittest.mock import MagicMock, patch
 
-# Import Jupyter components
-from jupyter_server.serverapp import ServerApp
-from notebook.app import JupyterNotebookApp
-
-# Import Yjs and collaboration components
-try:
-    import y_py as Y
-except ImportError:
-    # Mock Y if not available
-    Y = MagicMock()
-
-try:
-    from jupyter_ydoc import YNotebook
-except ImportError:
-    # Mock YNotebook if not available
-    YNotebook = MagicMock()
-
-# Import WebSocket testing utilities
-try:
-    from websockets.client import connect as ws_connect
-    from websockets.server import serve as ws_serve
-except ImportError:
-    # Mock WebSocket components if not available
-    ws_connect = MagicMock()
-    ws_serve = MagicMock()
-
-
-# Reuse fixtures from main conftest.py if needed
-pytest_plugins = ["jupyter_server.pytest_plugin"]
-
+# Fixtures for testing Yjs and collaboration features
 
 @pytest.fixture
-def yjs_doc():
-    """
-    Creates a Yjs document for testing CRDT-based synchronization.
+def mock_yjs_shared_map():
+    """Create a mock Yjs shared map for testing."""
+    # This simulates the Yjs shared map that stores data
+    mock_map = MagicMock()
+    # Store the data in a dictionary for easy testing
+    mock_map.data = {}
     
-    Returns:
-        A Y.Doc instance that can be used for collaborative editing tests.
-    """
-    doc = Y.Doc()
-    try:
-        yield doc
-    finally:
-        # Clean up resources if needed
-        pass
-
-
-@pytest.fixture
-def ynotebook(yjs_doc):
-    """
-    Creates a YNotebook instance for testing notebook-specific collaboration.
+    # Mock the get method to retrieve from the data dictionary
+    def mock_get(key, txn=None):
+        return mock_map.data.get(key)
+    mock_map.get = mock_get
     
-    Args:
-        yjs_doc: The Yjs document fixture
-        
-    Returns:
-        A YNotebook instance connected to the test Yjs document.
-    """
-    notebook = YNotebook(yjs_doc)
-    try:
-        yield notebook
-    finally:
-        # Clean up resources if needed
-        pass
-
+    # Mock the set method to store in the data dictionary
+    def mock_set(key, value, txn=None):
+        mock_map.data[key] = value
+    mock_map.set = mock_set
+    
+    # Mock the delete method to remove from the data dictionary
+    def mock_delete(key, txn=None):
+        if key in mock_map.data:
+            del mock_map.data[key]
+    mock_map.delete = mock_delete
+    
+    # Mock the keys method to return all keys in the data dictionary
+    def mock_keys():
+        return list(mock_map.data.keys())
+    mock_map.keys = mock_keys
+    
+    return mock_map
 
 @pytest.fixture
-def awareness_state():
-    """
-    Creates an awareness state for testing user presence features.
+def mock_yjs_shared_array():
+    """Create a mock Yjs shared array for testing."""
+    mock_array = MagicMock()
+    # Store the data in a list for easy testing
+    mock_array.data = []
     
-    Returns:
-        A mock awareness state object for testing presence tracking.
-    """
-    # Create a mock awareness object or use actual implementation if available
-    try:
-        awareness = Y.Awareness(Y.Doc())
-    except (AttributeError, TypeError):
-        # Fall back to mock if Y.Awareness is not available or not working as expected
-        awareness = MagicMock()
-        awareness.set_local_state = MagicMock()
-        awareness.get_states = MagicMock(return_value={})
-        
-    return awareness
-
-
-@pytest.fixture
-async def mock_websocket_server():
-    """
-    Creates a mock WebSocket server for testing collaboration communication.
+    # Mock the insert method to insert into the data list
+    def mock_insert(index, value, txn=None):
+        mock_array.data.insert(index, value)
+    mock_array.insert = mock_insert
     
-    Yields:
-        A tuple containing (server, port, messages) where:
-        - server: The WebSocket server object
-        - port: The port the server is listening on
-        - messages: A list that will be populated with received messages
-    """
-    received_messages = []
-    clients = set()
+    # Mock the push_back method to append to the data list
+    def mock_push_back(value, txn=None):
+        mock_array.data.append(value)
+    mock_array.push_back = mock_push_back
     
-    async def handler(websocket):
-        clients.add(websocket)
-        try:
-            async for message in websocket:
-                received_messages.append(message)
-                # Broadcast to all other clients
-                for client in clients:
-                    if client != websocket and client.open:
-                        await client.send(message)
-        finally:
-            clients.remove(websocket)
+    # Mock the delete method to remove from the data list
+    def mock_delete(index, length=1, txn=None):
+        del mock_array.data[index:index+length]
+    mock_array.delete = mock_delete
     
-    # Use a random port to avoid conflicts
-    port = 8988  # Default test port, can be randomized if needed
-    server = await ws_serve(handler, "localhost", port)
+    # Mock the get method to retrieve from the data list
+    def mock_get(index):
+        return mock_array.data[index]
+    mock_array.get = mock_get
     
-    try:
-        yield server, port, received_messages
-    finally:
-        server.close()
-        await server.wait_closed()
-
+    # Mock the length property to return the length of the data list
+    @property
+    def mock_length():
+        return len(mock_array.data)
+    mock_array.length = mock_length
+    
+    return mock_array
 
 @pytest.fixture
-async def multi_client_websocket_simulation(mock_websocket_server):
-    """
-    Provides a factory for creating multiple WebSocket clients for testing concurrent editing.
+def mock_yjs_shared_text():
+    """Create a mock Yjs shared text for testing."""
+    mock_text = MagicMock()
+    # Store the text as a string for easy testing
+    mock_text.data = ""
     
-    Args:
-        mock_websocket_server: The WebSocket server fixture
-        
-    Returns:
-        A function that creates a new WebSocket client with the given user ID.
-    """
-    server, port, messages = mock_websocket_server
-    clients = []
+    # Mock the insert method to insert into the text
+    def mock_insert(index, text, txn=None):
+        mock_text.data = mock_text.data[:index] + text + mock_text.data[index:]
+    mock_text.insert = mock_insert
     
-    async def create_client(user_id=None):
-        if user_id is None:
-            user_id = f"test-user-{len(clients) + 1}"
-            
-        websocket = await ws_connect(f"ws://localhost:{port}")
-        
-        # Create a client object with methods for testing
-        client = {
-            "websocket": websocket,
-            "user_id": user_id,
-            "send": websocket.send,
-            "receive": websocket.recv,
-            "close": websocket.close
-        }
-        
-        clients.append(client)
-        return client
+    # Mock the delete method to remove from the text
+    def mock_delete(index, length, txn=None):
+        mock_text.data = mock_text.data[:index] + mock_text.data[index+length:]
+    mock_text.delete = mock_delete
     
-    try:
-        yield create_client
-    finally:
-        # Clean up all clients
-        for client in clients:
-            if not client["websocket"].closed:
-                asyncio.create_task(client["websocket"].close())
-
+    # Mock the toString method to return the text
+    def mock_to_string():
+        return mock_text.data
+    mock_text.toString = mock_to_string
+    
+    # Mock the length property to return the length of the text
+    @property
+    def mock_length():
+        return len(mock_text.data)
+    mock_text.length = mock_length
+    
+    return mock_text
 
 @pytest.fixture
-def mock_collaboration_provider():
-    """
-    Creates a mock collaboration provider for testing.
+def mock_yjs_doc(mock_yjs_shared_map, mock_yjs_shared_array, mock_yjs_shared_text):
+    """Create a mock Yjs document for testing."""
+    mock_doc = MagicMock()
     
-    Returns:
-        A mock object implementing the ICollaborationProvider interface.
-    """
-    provider = MagicMock()
-    provider.connect_document = MagicMock(return_value=asyncio.Future())
-    provider.disconnect_document = MagicMock(return_value=asyncio.Future())
-    provider.get_document = MagicMock()
-    provider.is_connected = MagicMock(return_value=True)
+    # Store maps, arrays, and texts in dictionaries for easy testing
+    mock_doc.maps = {}
+    mock_doc.arrays = {}
+    mock_doc.texts = {}
     
-    return provider
-
-
-@pytest.fixture
-def mock_presence_tracker():
-    """
-    Creates a mock presence tracker for testing user awareness features.
+    # Mock the get_map method to return a mock shared map
+    def mock_get_map(name):
+        if name not in mock_doc.maps:
+            mock_doc.maps[name] = mock_yjs_shared_map
+        return mock_doc.maps[name]
+    mock_doc.get_map = mock_get_map
     
-    Returns:
-        A mock object implementing the IPresenceTracker interface.
-    """
-    tracker = MagicMock()
-    tracker.set_awareness = MagicMock()
-    tracker.get_awareness_states = MagicMock(return_value={})
-    tracker.on_awareness_change = MagicMock(return_value=MagicMock())
+    # Mock the get_array method to return a mock shared array
+    def mock_get_array(name):
+        if name not in mock_doc.arrays:
+            mock_doc.arrays[name] = mock_yjs_shared_array
+        return mock_doc.arrays[name]
+    mock_doc.get_array = mock_get_array
     
-    return tracker
-
-
-@pytest.fixture
-def mock_comment_manager():
-    """
-    Creates a mock comment manager for testing comment functionality.
+    # Mock the get_text method to return a mock shared text
+    def mock_get_text(name):
+        if name not in mock_doc.texts:
+            mock_doc.texts[name] = mock_yjs_shared_text
+        return mock_doc.texts[name]
+    mock_doc.get_text = mock_get_text
     
-    Returns:
-        A mock object implementing the ICommentManager interface.
-    """
-    manager = MagicMock()
-    manager.get_threads = MagicMock(return_value=asyncio.Future())
-    manager.create_thread = MagicMock(return_value=asyncio.Future())
-    manager.add_comment = MagicMock(return_value=asyncio.Future())
-    manager.set_thread_status = MagicMock(return_value=asyncio.Future())
+    # Mock the transaction method to execute the callback with a transaction object
+    def mock_transaction(callback):
+        mock_txn = MagicMock()
+        callback(mock_txn)
+    mock_doc.transaction = mock_transaction
     
-    return manager
-
-
-@pytest.fixture
-def mock_permission_manager():
-    """
-    Creates a mock permission manager for testing access control.
+    # Mock the on_update method to register update callbacks
+    mock_doc.update_callbacks = []
+    def mock_on_update(callback):
+        mock_doc.update_callbacks.append(callback)
+        # Return a function to unregister the callback
+        return lambda: mock_doc.update_callbacks.remove(callback)
+    mock_doc.on_update = mock_on_update
     
-    Returns:
-        A mock object implementing the IPermissionManager interface.
-    """
-    manager = MagicMock()
-    manager.get_permissions = MagicMock(return_value=asyncio.Future())
-    manager.check_permission = MagicMock(return_value=asyncio.Future())
-    manager.set_permission = MagicMock(return_value=asyncio.Future())
+    # Method to simulate an update event
+    def mock_emit_update(update_data=None):
+        if update_data is None:
+            update_data = {"type": "update"}
+        for callback in mock_doc.update_callbacks:
+            callback(update_data)
+    mock_doc.emit_update = mock_emit_update
     
-    return manager
-
+    return mock_doc
 
 @pytest.fixture
-def create_test_notebook_content():
-    """
-    Helper function to create test notebook content with predefined cells.
-    
-    Returns:
-        A function that generates notebook content with the specified cells.
-    """
-    def _create_content(cells=None):
-        if cells is None:
-            cells = [
-                {
-                    "cell_type": "markdown",
-                    "metadata": {},
-                    "source": ["# Test Notebook\n", "This is a test notebook for collaboration testing."]
-                },
-                {
-                    "cell_type": "code",
-                    "execution_count": None,
-                    "metadata": {},
-                    "outputs": [],
-                    "source": ["# Test code cell\n", "print('Hello, collaborative world!')"],
-                }
-            ]
-            
-        return {
-            "cells": cells,
-            "metadata": {
-                "kernelspec": {
-                    "display_name": "Python 3",
-                    "language": "python",
-                    "name": "python3"
-                },
-                "language_info": {
-                    "codemirror_mode": {
-                        "name": "ipython",
-                        "version": 3
-                    },
-                    "file_extension": ".py",
-                    "mimetype": "text/x-python",
-                    "name": "python",
-                    "nbconvert_exporter": "python",
-                    "pygments_lexer": "ipython3",
-                    "version": "3.8.0"
-                },
-                "collaboration": {
-                    "enabled": True
-                }
-            },
-            "nbformat": 4,
-            "nbformat_minor": 5
-        }
-    
-    return _create_content
-
-
-@pytest.fixture
-def create_test_yjs_update():
-    """
-    Helper function to create test Yjs updates for simulating collaborative edits.
-    
-    Returns:
-        A function that generates a simulated Yjs update.
-    """
-    def _create_update(user_id=None, cell_id=None, content=None):
-        if user_id is None:
-            user_id = f"test-user-{uuid.uuid4().hex[:8]}"
-            
-        if cell_id is None:
-            cell_id = f"cell-{uuid.uuid4().hex[:8]}"
-            
-        if content is None:
-            content = "Test content"
-            
-        # Create a mock update that simulates a Yjs update
-        # In a real implementation, this would be a binary Yjs update
-        update = {
-            "user_id": user_id,
-            "cell_id": cell_id,
-            "content": content,
-            "timestamp": int(asyncio.get_event_loop().time() * 1000)
-        }
-        
-        return json.dumps(update).encode()
-    
-    return _create_update
-
-
-@pytest.fixture
-def create_test_awareness_update():
-    """
-    Helper function to create test awareness updates for simulating user presence.
-    
-    Returns:
-        A function that generates a simulated awareness update.
-    """
-    def _create_update(user_id=None, cursor_pos=None, selection=None, status="active"):
-        if user_id is None:
-            user_id = f"test-user-{uuid.uuid4().hex[:8]}"
-            
-        if cursor_pos is None:
-            cursor_pos = {"line": 0, "ch": 0}
-            
-        # Create a mock awareness update
-        update = {
-            "user": {
-                "id": user_id,
-                "name": f"Test User {user_id}",
-                "color": "#ff0000"
-            },
-            "cursor": cursor_pos,
-            "selection": selection,
-            "status": status,
-            "timestamp": int(asyncio.get_event_loop().time() * 1000)
-        }
-        
-        return json.dumps(update).encode()
-    
-    return _create_update
-
-
-@pytest.fixture
-def collab_test_config():
-    """
-    Provides configuration for collaboration tests.
-    
-    Returns:
-        A dictionary with configuration values for collaboration tests.
-    """
+def mock_users():
+    """Create mock users for testing collaborative features."""
     return {
-        "websocket_url": "ws://localhost:8988",
-        "collaboration_enabled": True,
-        "default_user": "test-user",
-        "test_document_id": f"test-doc-{uuid.uuid4().hex[:8]}",
-        "timeout": 5  # seconds
+        'user1': {'id': 'user1', 'name': 'User One', 'color': '#ff0000'},
+        'user2': {'id': 'user2', 'name': 'User Two', 'color': '#00ff00'},
+        'admin': {'id': 'admin', 'name': 'Admin User', 'color': '#0000ff', 'is_admin': True}
     }
 
-
 @pytest.fixture
-def mock_collaborative_notebook():
-    """
-    Creates a mock collaborative notebook for testing.
-    
-    Returns:
-        A mock object implementing the ICollaborativeNotebook interface.
-    """
-    notebook = MagicMock()
-    notebook.ydoc = MagicMock()
-    notebook.is_dirty = False
-    notebook.save = MagicMock(return_value=asyncio.Future())
-    notebook.get_history = MagicMock()
-    
-    return notebook
-
-
-@pytest.fixture
-async def collab_server_app(jp_root_dir, jp_template_dir):
-    """
-    Creates a Jupyter server app with collaboration enabled for testing.
-    
-    Args:
-        jp_root_dir: Jupyter root directory fixture from jupyter_server.pytest_plugin
-        jp_template_dir: Jupyter template directory fixture from jupyter_server.pytest_plugin
-        
-    Returns:
-        A configured ServerApp instance with collaboration enabled.
-    """
-    # Create a temporary directory for collaboration test data
-    collab_data_dir = jp_root_dir / "collab_data"
-    collab_data_dir.mkdir(exist_ok=True)
-    
-    # Configure the server app with collaboration enabled
-    app = ServerApp()
-    app.root_dir = str(jp_root_dir)
-    app.notebook_dir = str(jp_root_dir)
-    app.config.JupyterCollaboration = {
-        "enabled": True,
-        "document_storage_class": "jupyter_ydoc.InMemoryYDocStorage",
-        "awareness_storage_class": "jupyter_ydoc.InMemoryAwarenessStorage"
+def mock_cells():
+    """Create mock cells for testing."""
+    return {
+        'cell1': {'id': 'cell1', 'type': 'code', 'source': 'print("Hello, world!")'},
+        'cell2': {'id': 'cell2', 'type': 'markdown', 'source': '# Test Markdown'},
+        'cell3': {'id': 'cell3', 'type': 'code', 'source': 'import numpy as np\nnp.random.rand(10)'}
     }
-    
-    # Initialize but don't start the app
-    await app.initialize(argv=[])
-    
-    try:
-        yield app
-    finally:
-        # Clean up
-        await app.cleanup_kernels()
-        app.clear_instance()
-
 
 @pytest.fixture
-async def collab_notebook_app(collab_server_app, jp_root_dir, jp_template_dir):
-    """
-    Creates a Jupyter notebook app with collaboration enabled for testing.
-    
-    Args:
-        collab_server_app: The server app fixture with collaboration enabled
-        jp_root_dir: Jupyter root directory fixture from jupyter_server.pytest_plugin
-        jp_template_dir: Jupyter template directory fixture from jupyter_server.pytest_plugin
-        
-    Returns:
-        A configured JupyterNotebookApp instance with collaboration enabled.
-    """
-    # Create a notebook app linked to the server app
-    app = JupyterNotebookApp(serverapp=collab_server_app)
-    app.static_dir = str(jp_root_dir)
-    app.templates_dir = str(jp_template_dir)
-    app.app_url = "/"
-    
-    # Initialize but don't start the app
-    await app.initialize(argv=[])
-    
-    try:
-        yield app
-    finally:
-        # Clean up
-        app.clear_instance()
-
+def mock_notebook(mock_cells):
+    """Create a mock notebook for testing."""
+    return {
+        "metadata": {"kernelspec": {"name": "python3"}},
+        "nbformat": 4,
+        "nbformat_minor": 5,
+        "cells": list(mock_cells.values())
+    }
 
 @pytest.fixture
-def mock_websocket_client_factory():
-    """
-    Creates a factory for mock WebSocket clients for testing.
+def mock_websocket_client():
+    """Create a mock WebSocket client for testing."""
+    client = MagicMock()
     
-    Returns:
-        A function that creates mock WebSocket clients with specified user information.
-    """
-    clients = []
+    # Store sent messages for inspection
+    client.sent_messages = []
     
-    def create_client(user_id=None, roles=None):
-        if user_id is None:
-            user_id = f"test-user-{len(clients) + 1}"
-            
-        if roles is None:
-            roles = ["editor"]
-            
-        # Create a mock WebSocket client
+    # Mock the write_message method to store sent messages
+    async def mock_write_message(message):
+        if isinstance(message, str):
+            message = json.loads(message)
+        client.sent_messages.append(message)
+    client.write_message = mock_write_message
+    
+    # Mock the close method
+    async def mock_close():
+        pass
+    client.close = mock_close
+    
+    return client
+
+@pytest.fixture
+def mock_websocket_clients(mock_users):
+    """Create mock WebSocket clients for each user."""
+    clients = {}
+    for user_id, user_info in mock_users.items():
         client = MagicMock()
         client.user_id = user_id
-        client.roles = roles
-        client.connect = MagicMock(return_value=asyncio.Future())
-        client.disconnect = MagicMock(return_value=asyncio.Future())
-        client.send = MagicMock(return_value=asyncio.Future())
-        client.receive = MagicMock(return_value=asyncio.Future())
+        client.user_info = user_info
         
-        clients.append(client)
-        return client
-    
-    return create_client
+        # Store sent messages for inspection
+        client.sent_messages = []
+        
+        # Mock the write_message method to store sent messages
+        async def mock_write_message(message, client=client):
+            if isinstance(message, str):
+                message = json.loads(message)
+            client.sent_messages.append(message)
+        client.write_message = mock_write_message
+        
+        # Mock the close method
+        async def mock_close():
+            pass
+        client.close = mock_close
+        
+        clients[user_id] = client
+    return clients
+
+@pytest.fixture
+def mock_collaboration_manager(mock_yjs_doc, mock_websocket_clients):
+    """Create a mock collaboration manager for testing."""
+    # Import here to avoid circular imports during test collection
+    with patch('notebook.collab.provider.YDoc', return_value=mock_yjs_doc):
+        # Import the CollaborationManager class
+        from notebook.collab.provider import CollaborationManager
+        
+        # Create a collaboration manager with the mock Yjs document
+        collab_manager = CollaborationManager()
+        
+        # Register the mock clients
+        for user_id, client in mock_websocket_clients.items():
+            collab_manager.register_client(client, user_id)
+        
+        yield collab_manager
+        
+        # Clean up
+        for user_id, client in mock_websocket_clients.items():
+            collab_manager.unregister_client(client)
