@@ -1,568 +1,770 @@
+# Copyright (c) Jupyter Development Team.
+# Distributed under the terms of the Modified BSD License.
+
 import asyncio
-import json
-import os
 import pytest
+import json
 import time
-import uuid
+from typing import List, Dict, Any, Callable, Awaitable
 
-# Import test utilities
-from tests.integration.collab.conftest import WebSocketTestClient
+# Skip tests if y_py is not available
+pytest.importorskip("y_py")
 
-# Test constants
-TIMEOUT = 5.0  # Default timeout for async operations in seconds
-
-
-@pytest.mark.asyncio
-async def test_comment_creation_and_synchronization(jp_ws_client, create_collaborative_session):
-    """
-    Test that comments can be created and synchronized across clients.
-    
-    This test verifies that when one user creates a comment on a cell, it is properly
-    synchronized to other users viewing the same notebook.
-    """
-    # Create a collaborative session with 2 clients
-    document_path, clients = await create_collaborative_session(num_clients=2)
-    user1_client, user2_client = clients
-    
-    # Clear any existing messages
-    user1_client.clear_received_messages()
-    user2_client.clear_received_messages()
-    
-    # User 1 creates a comment on a cell
-    cell_id = "cell-1"  # Assuming this cell exists in the test document
-    comment_text = "This is a test comment from User 1"
-    comment_id = str(uuid.uuid4())
-    
-    # Send comment creation message
-    await user1_client.send({
-        "type": "comment_create",
-        "cell_id": cell_id,
-        "comment_id": comment_id,
-        "content": comment_text,
-        "timestamp": int(time.time() * 1000)
-    })
-    
-    # Wait for the comment to be synchronized to user 2
-    message = await user2_client.wait_for_message_containing(comment_id, timeout=TIMEOUT)
-    
-    # Verify that user 2 received the comment
-    assert message is not None, "Comment creation was not synchronized to user 2"
-    
-    # Parse the message and verify its contents
-    try:
-        data = json.loads(message)
-        assert data.get("type") == "comment_update", "Incorrect message type"
-        assert data.get("cell_id") == cell_id, "Incorrect cell ID"
-        assert data.get("comment_id") == comment_id, "Incorrect comment ID"
-        assert data.get("content") == comment_text, "Incorrect comment content"
-        assert data.get("author") == user1_client.user_id, "Incorrect comment author"
-    except json.JSONDecodeError:
-        pytest.fail("Received message is not valid JSON")
-    except KeyError as e:
-        pytest.fail(f"Missing expected field in comment message: {e}")
+from packages.notebook.src.collab.comments import CommentStatus
 
 
 @pytest.mark.asyncio
-async def test_comment_thread_management_and_replies(jp_ws_client, create_collaborative_session):
+async def test_comment_creation_and_synchronization(jp_serverapp, jp_ws_client):
     """
-    Test comment thread management including replies to existing comments.
+    Test that comments can be created and synchronized between clients.
     
-    This test verifies that users can reply to existing comments and that these replies
-    are properly organized in threads and synchronized across clients.
+    Verifies that when one user creates a comment, it appears for other users.
     """
-    # Create a collaborative session with 2 clients
-    document_path, clients = await create_collaborative_session(num_clients=2)
-    user1_client, user2_client = clients
+    # Create two clients connected to the same document
+    client1 = await jp_ws_client(user_id="user1", display_name="User One")
+    client2 = await jp_ws_client(user_id="user2", display_name="User Two")
     
-    # Clear any existing messages
-    user1_client.clear_received_messages()
-    user2_client.clear_received_messages()
+    # Both clients subscribe to the same document
+    doc_id = "test-comments-doc"
+    await client1.subscribe_document(doc_id)
+    await client2.subscribe_document(doc_id)
     
-    # User 1 creates a comment thread on a cell
-    cell_id = "cell-1"
-    thread_id = str(uuid.uuid4())
-    comment_text = "Initial comment to start a thread"
+    # Wait for initial synchronization
+    await asyncio.sleep(0.5)
     
-    # Send thread creation message
-    await user1_client.send({
-        "type": "thread_create",
-        "cell_id": cell_id,
-        "thread_id": thread_id,
-        "content": comment_text,
-        "timestamp": int(time.time() * 1000)
-    })
+    # Client 1 adds a cell
+    cell_id = "cell1"
+    cell_content = "# Test cell for comments"
+    await client1.add_cell(doc_id, cell_id, cell_content, "markdown")
     
-    # Wait for the thread to be synchronized to user 2
-    thread_message = await user2_client.wait_for_message_containing(thread_id, timeout=TIMEOUT)
-    assert thread_message is not None, "Thread creation was not synchronized to user 2"
+    # Wait for synchronization
+    await asyncio.sleep(0.5)
     
-    # User 2 replies to the thread
-    reply_id = str(uuid.uuid4())
-    reply_text = "This is a reply from User 2"
+    # Client 1 creates a comment on the cell
+    comment_content = "This is a test comment from User One"
+    comment_id = await client1.add_comment(doc_id, cell_id, comment_content)
     
-    # Send reply message
-    await user2_client.send({
-        "type": "comment_reply",
-        "thread_id": thread_id,
-        "comment_id": reply_id,
-        "content": reply_text,
-        "timestamp": int(time.time() * 1000)
-    })
+    # Wait for synchronization
+    await asyncio.sleep(0.5)
     
-    # Wait for the reply to be synchronized to user 1
-    reply_message = await user1_client.wait_for_message_containing(reply_id, timeout=TIMEOUT)
-    assert reply_message is not None, "Reply was not synchronized to user 1"
+    # Verify client 2 can see the comment
+    comments = await client2.get_comments(doc_id)
     
-    # Parse the reply message and verify its contents
-    try:
-        data = json.loads(reply_message)
-        assert data.get("type") == "comment_update", "Incorrect message type"
-        assert data.get("thread_id") == thread_id, "Incorrect thread ID"
-        assert data.get("comment_id") == reply_id, "Incorrect comment ID"
-        assert data.get("content") == reply_text, "Incorrect reply content"
-        assert data.get("author") == user2_client.user_id, "Incorrect reply author"
-    except json.JSONDecodeError:
-        pytest.fail("Received message is not valid JSON")
-    except KeyError as e:
-        pytest.fail(f"Missing expected field in reply message: {e}")
+    assert len(comments) > 0, "No comments synchronized to client 2"
     
-    # Verify thread structure by requesting the full thread
-    await user1_client.send({
-        "type": "get_thread",
-        "thread_id": thread_id
-    })
+    # Find the comment by ID
+    found_comment = None
+    for comment in comments:
+        if comment["id"] == comment_id:
+            found_comment = comment
+            break
     
-    # Wait for the thread data response
-    thread_data_message = await user1_client.wait_for_message_containing("thread_data", timeout=TIMEOUT)
-    assert thread_data_message is not None, "Failed to retrieve thread data"
-    
-    # Verify the thread structure contains both the initial comment and the reply
-    try:
-        data = json.loads(thread_data_message)
-        assert data.get("type") == "thread_data", "Incorrect message type"
-        assert data.get("thread_id") == thread_id, "Incorrect thread ID"
-        
-        comments = data.get("comments", [])
-        assert len(comments) == 2, "Thread should contain 2 comments (initial + reply)"
-        
-        # Verify the comments are in the correct order (initial first, reply second)
-        assert comments[0].get("content") == comment_text, "First comment should be the initial comment"
-        assert comments[1].get("content") == reply_text, "Second comment should be the reply"
-    except json.JSONDecodeError:
-        pytest.fail("Received thread data is not valid JSON")
-    except (KeyError, IndexError) as e:
-        pytest.fail(f"Error verifying thread structure: {e}")
+    assert found_comment is not None, f"Comment {comment_id} not found in client 2's comments"
+    assert found_comment["content"] == comment_content, "Comment content not synchronized correctly"
+    assert found_comment["authorId"] == "user1", "Comment author not synchronized correctly"
+    assert found_comment["authorName"] == "User One", "Comment author name not synchronized correctly"
+    assert found_comment["cellId"] == cell_id, "Comment cell ID not synchronized correctly"
 
 
 @pytest.mark.asyncio
-async def test_comment_resolution_workflow(jp_ws_client, create_collaborative_session):
+async def test_comment_thread_replies(jp_serverapp, jp_ws_client):
+    """
+    Test that users can reply to comments and form threads.
+    
+    Verifies that comment threads with replies are properly synchronized between clients.
+    """
+    # Create two clients connected to the same document
+    client1 = await jp_ws_client(user_id="user1", display_name="User One")
+    client2 = await jp_ws_client(user_id="user2", display_name="User Two")
+    
+    # Both clients subscribe to the same document
+    doc_id = "test-comment-replies-doc"
+    await client1.subscribe_document(doc_id)
+    await client2.subscribe_document(doc_id)
+    
+    # Wait for initial synchronization
+    await asyncio.sleep(0.5)
+    
+    # Client 1 adds a cell
+    cell_id = "cell1"
+    cell_content = "# Test cell for comment replies"
+    await client1.add_cell(doc_id, cell_id, cell_content, "markdown")
+    
+    # Wait for synchronization
+    await asyncio.sleep(0.5)
+    
+    # Client 1 creates a comment on the cell
+    root_comment_content = "This is the root comment from User One"
+    root_comment_id = await client1.add_comment(doc_id, cell_id, root_comment_content)
+    
+    # Wait for synchronization
+    await asyncio.sleep(0.5)
+    
+    # Client 2 replies to the comment
+    reply_content = "This is a reply from User Two"
+    reply_id = await client2.add_comment_reply(doc_id, root_comment_id, reply_content)
+    
+    # Wait for synchronization
+    await asyncio.sleep(0.5)
+    
+    # Client 1 adds another reply
+    reply2_content = "This is a second reply from User One"
+    reply2_id = await client1.add_comment_reply(doc_id, root_comment_id, reply2_content)
+    
+    # Wait for synchronization
+    await asyncio.sleep(0.5)
+    
+    # Verify both clients can see the complete thread
+    threads1 = await client1.get_comment_threads(doc_id)
+    threads2 = await client2.get_comment_threads(doc_id)
+    
+    # Find the thread in client 1's view
+    thread1 = None
+    for thread in threads1:
+        if thread["id"] == root_comment_id:
+            thread1 = thread
+            break
+    
+    # Find the thread in client 2's view
+    thread2 = None
+    for thread in threads2:
+        if thread["id"] == root_comment_id:
+            thread2 = thread
+            break
+    
+    # Verify thread exists in both clients
+    assert thread1 is not None, "Thread not found in client 1's view"
+    assert thread2 is not None, "Thread not found in client 2's view"
+    
+    # Verify thread has the correct structure
+    assert thread1["rootComment"]["id"] == root_comment_id, "Root comment ID mismatch in client 1"
+    assert thread2["rootComment"]["id"] == root_comment_id, "Root comment ID mismatch in client 2"
+    
+    # Verify thread has the correct number of replies
+    assert len(thread1["replies"]) == 2, "Incorrect number of replies in client 1"
+    assert len(thread2["replies"]) == 2, "Incorrect number of replies in client 2"
+    
+    # Verify reply content is correct
+    reply_contents1 = [reply["content"] for reply in thread1["replies"]]
+    reply_contents2 = [reply["content"] for reply in thread2["replies"]]
+    
+    assert reply_content in reply_contents1, "First reply content missing in client 1"
+    assert reply2_content in reply_contents1, "Second reply content missing in client 1"
+    assert reply_content in reply_contents2, "First reply content missing in client 2"
+    assert reply2_content in reply_contents2, "Second reply content missing in client 2"
+    
+    # Verify reply authors are correct
+    for reply in thread1["replies"]:
+        if reply["content"] == reply_content:
+            assert reply["authorId"] == "user2", "First reply author incorrect in client 1"
+        elif reply["content"] == reply2_content:
+            assert reply["authorId"] == "user1", "Second reply author incorrect in client 1"
+    
+    for reply in thread2["replies"]:
+        if reply["content"] == reply_content:
+            assert reply["authorId"] == "user2", "First reply author incorrect in client 2"
+        elif reply["content"] == reply2_content:
+            assert reply["authorId"] == "user1", "Second reply author incorrect in client 2"
+
+
+@pytest.mark.asyncio
+async def test_comment_resolution_workflow(jp_serverapp, jp_ws_client):
     """
     Test the comment resolution workflow.
     
-    This test verifies that users can mark comment threads as resolved or reopen them,
-    and that these status changes are properly synchronized across clients.
+    Verifies that comments can be resolved and reopened, and that these status
+    changes are synchronized between clients.
     """
-    # Create a collaborative session with 2 clients
-    document_path, clients = await create_collaborative_session(num_clients=2)
-    user1_client, user2_client = clients
+    # Create two clients connected to the same document
+    client1 = await jp_ws_client(user_id="user1", display_name="User One")
+    client2 = await jp_ws_client(user_id="user2", display_name="User Two")
     
-    # Clear any existing messages
-    user1_client.clear_received_messages()
-    user2_client.clear_received_messages()
+    # Both clients subscribe to the same document
+    doc_id = "test-comment-resolution-doc"
+    await client1.subscribe_document(doc_id)
+    await client2.subscribe_document(doc_id)
     
-    # User 1 creates a comment thread
-    cell_id = "cell-1"
-    thread_id = str(uuid.uuid4())
-    comment_text = "This is a comment that will be resolved"
+    # Wait for initial synchronization
+    await asyncio.sleep(0.5)
     
-    # Create the thread
-    await user1_client.send({
-        "type": "thread_create",
-        "cell_id": cell_id,
-        "thread_id": thread_id,
-        "content": comment_text,
-        "timestamp": int(time.time() * 1000)
-    })
+    # Client 1 adds a cell
+    cell_id = "cell1"
+    cell_content = "# Test cell for comment resolution"
+    await client1.add_cell(doc_id, cell_id, cell_content, "markdown")
     
-    # Wait for the thread to be synchronized to user 2
-    await user2_client.wait_for_message_containing(thread_id, timeout=TIMEOUT)
+    # Wait for synchronization
+    await asyncio.sleep(0.5)
     
-    # User 2 resolves the thread
-    resolution_timestamp = int(time.time() * 1000)
-    await user2_client.send({
-        "type": "thread_resolve",
-        "thread_id": thread_id,
-        "resolved": True,
-        "resolved_by": user2_client.user_id,
-        "timestamp": resolution_timestamp
-    })
+    # Client 1 creates a comment on the cell
+    comment_content = "This needs to be fixed"
+    comment_id = await client1.add_comment(doc_id, cell_id, comment_content)
     
-    # Wait for the resolution to be synchronized to user 1
-    resolution_message = await user1_client.wait_for_message_containing("thread_status", timeout=TIMEOUT)
-    assert resolution_message is not None, "Thread resolution was not synchronized to user 1"
+    # Wait for synchronization
+    await asyncio.sleep(0.5)
     
-    # Verify the resolution message
-    try:
-        data = json.loads(resolution_message)
-        assert data.get("type") == "thread_status", "Incorrect message type"
-        assert data.get("thread_id") == thread_id, "Incorrect thread ID"
-        assert data.get("resolved") is True, "Thread should be marked as resolved"
-        assert data.get("resolved_by") == user2_client.user_id, "Incorrect resolver"
-        assert data.get("timestamp") == resolution_timestamp, "Incorrect resolution timestamp"
-    except json.JSONDecodeError:
-        pytest.fail("Received message is not valid JSON")
-    except KeyError as e:
-        pytest.fail(f"Missing expected field in resolution message: {e}")
+    # Client 2 replies to the comment
+    reply_content = "I've fixed it"
+    reply_id = await client2.add_comment_reply(doc_id, comment_id, reply_content)
     
-    # User 1 reopens the thread
-    reopen_timestamp = int(time.time() * 1000)
-    await user1_client.send({
-        "type": "thread_resolve",
-        "thread_id": thread_id,
-        "resolved": False,
-        "resolved_by": user1_client.user_id,
-        "timestamp": reopen_timestamp
-    })
+    # Wait for synchronization
+    await asyncio.sleep(0.5)
     
-    # Wait for the reopen action to be synchronized to user 2
-    reopen_message = await user2_client.wait_for_message_containing("thread_status", timeout=TIMEOUT)
-    assert reopen_message is not None, "Thread reopen was not synchronized to user 2"
+    # Client 1 resolves the comment thread
+    await client1.resolve_comment_thread(doc_id, comment_id)
     
-    # Verify the reopen message
-    try:
-        data = json.loads(reopen_message)
-        assert data.get("type") == "thread_status", "Incorrect message type"
-        assert data.get("thread_id") == thread_id, "Incorrect thread ID"
-        assert data.get("resolved") is False, "Thread should be marked as not resolved"
-        assert data.get("resolved_by") == user1_client.user_id, "Incorrect resolver"
-        assert data.get("timestamp") == reopen_timestamp, "Incorrect reopen timestamp"
-    except json.JSONDecodeError:
-        pytest.fail("Received message is not valid JSON")
-    except KeyError as e:
-        pytest.fail(f"Missing expected field in reopen message: {e}")
+    # Wait for synchronization
+    await asyncio.sleep(0.5)
+    
+    # Verify both clients see the thread as resolved
+    threads1 = await client1.get_comment_threads(doc_id)
+    threads2 = await client2.get_comment_threads(doc_id)
+    
+    # Find the thread in both clients
+    thread1 = next((t for t in threads1 if t["id"] == comment_id), None)
+    thread2 = next((t for t in threads2 if t["id"] == comment_id), None)
+    
+    assert thread1 is not None, "Thread not found in client 1's view"
+    assert thread2 is not None, "Thread not found in client 2's view"
+    
+    # Verify thread is marked as resolved in both clients
+    assert thread1["status"] == CommentStatus.Resolved, "Thread not marked as resolved in client 1"
+    assert thread2["status"] == CommentStatus.Resolved, "Thread not marked as resolved in client 2"
+    
+    # Client 2 reopens the thread
+    await client2.reopen_comment_thread(doc_id, comment_id)
+    
+    # Wait for synchronization
+    await asyncio.sleep(0.5)
+    
+    # Verify both clients see the thread as reopened
+    threads1 = await client1.get_comment_threads(doc_id)
+    threads2 = await client2.get_comment_threads(doc_id)
+    
+    # Find the thread in both clients
+    thread1 = next((t for t in threads1 if t["id"] == comment_id), None)
+    thread2 = next((t for t in threads2 if t["id"] == comment_id), None)
+    
+    assert thread1 is not None, "Thread not found in client 1's view after reopening"
+    assert thread2 is not None, "Thread not found in client 2's view after reopening"
+    
+    # Verify thread is marked as active in both clients
+    assert thread1["status"] == CommentStatus.Active, "Thread not marked as active in client 1"
+    assert thread2["status"] == CommentStatus.Active, "Thread not marked as active in client 2"
+    
+    # Client 1 changes the status to a question
+    await client1.update_comment_status(doc_id, comment_id, CommentStatus.Question)
+    
+    # Wait for synchronization
+    await asyncio.sleep(0.5)
+    
+    # Verify both clients see the thread as a question
+    threads1 = await client1.get_comment_threads(doc_id)
+    threads2 = await client2.get_comment_threads(doc_id)
+    
+    # Find the thread in both clients
+    thread1 = next((t for t in threads1 if t["id"] == comment_id), None)
+    thread2 = next((t for t in threads2 if t["id"] == comment_id), None)
+    
+    # Verify thread is marked as a question in both clients
+    assert thread1["status"] == CommentStatus.Question, "Thread not marked as a question in client 1"
+    assert thread2["status"] == CommentStatus.Question, "Thread not marked as a question in client 2"
 
 
 @pytest.mark.asyncio
-async def test_comment_notifications(jp_ws_client, create_collaborative_session):
+async def test_comment_notifications(jp_serverapp, jp_ws_client):
     """
     Test that comment notifications are delivered to relevant users.
     
-    This test verifies that when a user is mentioned in a comment or when a comment is added
-    to a thread they're participating in, they receive appropriate notifications.
+    Verifies that users receive notifications for new comments, replies, and mentions.
     """
-    # Create a collaborative session with 3 clients (to test targeted notifications)
-    document_path, clients = await create_collaborative_session(num_clients=3)
-    user1_client, user2_client, user3_client = clients
+    # Create three clients connected to the same document
+    client1 = await jp_ws_client(user_id="user1", display_name="User One")
+    client2 = await jp_ws_client(user_id="user2", display_name="User Two")
+    client3 = await jp_ws_client(user_id="user3", display_name="User Three")
     
-    # Clear any existing messages
-    for client in clients:
-        client.clear_received_messages()
+    # All clients subscribe to the same document
+    doc_id = "test-comment-notifications-doc"
+    await client1.subscribe_document(doc_id)
+    await client2.subscribe_document(doc_id)
+    await client3.subscribe_document(doc_id)
     
-    # User 1 creates a comment thread
-    cell_id = "cell-1"
-    thread_id = str(uuid.uuid4())
-    comment_text = "Initial comment by User 1"
+    # Wait for initial synchronization
+    await asyncio.sleep(0.5)
     
-    await user1_client.send({
-        "type": "thread_create",
-        "cell_id": cell_id,
-        "thread_id": thread_id,
-        "content": comment_text,
-        "timestamp": int(time.time() * 1000)
-    })
+    # Client 1 adds a cell
+    cell_id = "cell1"
+    cell_content = "# Test cell for comment notifications"
+    await client1.add_cell(doc_id, cell_id, cell_content, "markdown")
     
-    # Wait for the thread to be synchronized to all users
-    for client in [user2_client, user3_client]:
-        await client.wait_for_message_containing(thread_id, timeout=TIMEOUT)
+    # Wait for synchronization
+    await asyncio.sleep(0.5)
     
-    # User 2 replies with a mention of User 3
-    mention_id = str(uuid.uuid4())
-    mention_text = f"Hey @{user3_client.user_id}, can you take a look at this?"
+    # Clear any existing notifications
+    await client1.clear_notifications()
+    await client2.clear_notifications()
+    await client3.clear_notifications()
     
-    await user2_client.send({
-        "type": "comment_reply",
-        "thread_id": thread_id,
-        "comment_id": mention_id,
-        "content": mention_text,
-        "mentions": [user3_client.user_id],
-        "timestamp": int(time.time() * 1000)
-    })
+    # Client 1 creates a comment on the cell
+    comment_content = "This is a comment from User One"
+    comment_id = await client1.add_comment(doc_id, cell_id, comment_content)
     
-    # Wait for the mention notification to be delivered to User 3
-    mention_notification = await user3_client.wait_for_message_containing("notification", timeout=TIMEOUT)
-    assert mention_notification is not None, "Mention notification was not delivered to User 3"
+    # Wait for synchronization
+    await asyncio.sleep(0.5)
     
-    # Verify the mention notification
-    try:
-        data = json.loads(mention_notification)
-        assert data.get("type") == "notification", "Incorrect message type"
-        assert data.get("notification_type") == "mention", "Incorrect notification type"
-        assert data.get("thread_id") == thread_id, "Incorrect thread ID"
-        assert data.get("comment_id") == mention_id, "Incorrect comment ID"
-        assert data.get("mentioned_by") == user2_client.user_id, "Incorrect mentioner"
-    except json.JSONDecodeError:
-        pytest.fail("Received notification is not valid JSON")
-    except KeyError as e:
-        pytest.fail(f"Missing expected field in notification message: {e}")
+    # Client 2 replies to the comment
+    reply_content = "This is a reply from User Two"
+    reply_id = await client2.add_comment_reply(doc_id, comment_id, reply_content)
     
-    # User 3 replies to the thread
-    reply_id = str(uuid.uuid4())
-    reply_text = "I'll take a look at it."
+    # Wait for synchronization
+    await asyncio.sleep(0.5)
     
-    await user3_client.send({
-        "type": "comment_reply",
-        "thread_id": thread_id,
-        "comment_id": reply_id,
-        "content": reply_text,
-        "timestamp": int(time.time() * 1000)
-    })
+    # Client 3 adds a reply with @mentions
+    mention_reply_content = "@User One and @User Two, please check this"
+    mention_reply_id = await client3.add_comment_reply(doc_id, comment_id, mention_reply_content)
     
-    # Both User 1 and User 2 should receive thread activity notifications
-    # since they're participants in the thread
-    for client, name in [(user1_client, "User 1"), (user2_client, "User 2")]:
-        activity_notification = await client.wait_for_message_containing("notification", timeout=TIMEOUT)
-        assert activity_notification is not None, f"Thread activity notification was not delivered to {name}"
-        
-        # Verify the activity notification
-        try:
-            data = json.loads(activity_notification)
-            assert data.get("type") == "notification", "Incorrect message type"
-            assert data.get("notification_type") == "thread_activity", "Incorrect notification type"
-            assert data.get("thread_id") == thread_id, "Incorrect thread ID"
-            assert data.get("comment_id") == reply_id, "Incorrect comment ID"
-            assert data.get("author") == user3_client.user_id, "Incorrect author"
-        except json.JSONDecodeError:
-            pytest.fail("Received notification is not valid JSON")
-        except KeyError as e:
-            pytest.fail(f"Missing expected field in notification message: {e}")
+    # Wait for synchronization
+    await asyncio.sleep(0.5)
+    
+    # Verify client 1 received notifications for the replies
+    notifications1 = await client1.get_notifications()
+    
+    # Should have at least 2 notifications: one for client2's reply and one for the @mention
+    assert len(notifications1) >= 2, "Client 1 did not receive expected notifications"
+    
+    # Check for reply notification
+    reply_notification = None
+    for notification in notifications1:
+        if notification["commentId"] == reply_id and notification["type"] == "reply":
+            reply_notification = notification
+            break
+    
+    assert reply_notification is not None, "Client 1 did not receive notification for reply"
+    
+    # Check for mention notification
+    mention_notification = None
+    for notification in notifications1:
+        if notification["commentId"] == mention_reply_id and notification["type"] == "mention":
+            mention_notification = notification
+            break
+    
+    assert mention_notification is not None, "Client 1 did not receive notification for @mention"
+    
+    # Verify client 2 received notification for the @mention
+    notifications2 = await client2.get_notifications()
+    
+    mention_notification2 = None
+    for notification in notifications2:
+        if notification["commentId"] == mention_reply_id and notification["type"] == "mention":
+            mention_notification2 = notification
+            break
+    
+    assert mention_notification2 is not None, "Client 2 did not receive notification for @mention"
+    
+    # Client 1 marks a notification as read
+    if reply_notification:
+        await client1.mark_notification_read(reply_notification["commentId"])
+    
+    # Wait for synchronization
+    await asyncio.sleep(0.5)
+    
+    # Verify the notification is marked as read
+    notifications1_after = await client1.get_unread_notifications()
+    
+    # The reply notification should no longer be in the unread list
+    reply_notification_after = None
+    for notification in notifications1_after:
+        if notification["commentId"] == reply_id and notification["type"] == "reply":
+            reply_notification_after = notification
+            break
+    
+    assert reply_notification_after is None, "Notification still marked as unread after being read"
 
 
 @pytest.mark.asyncio
-async def test_comment_persistence_across_sessions(jp_ws_client, create_collaborative_session, simulate_server_restart):
+async def test_comment_persistence_across_sessions(jp_serverapp, jp_ws_client):
     """
-    Test that comments persist across sessions and server restarts.
+    Test that comments persist across sessions.
     
-    This test verifies that comment threads and their content are properly persisted
-    and can be retrieved after disconnection and reconnection or server restarts.
+    Verifies that comments are stored persistently and can be retrieved when
+    reconnecting to a document.
     """
-    # Create a collaborative session with 2 clients
-    document_path, clients = await create_collaborative_session(num_clients=2)
-    user1_client, user2_client = clients
-    document_name = os.path.basename(document_path)
+    # Create a client and add comments
+    client1 = await jp_ws_client(user_id="user1", display_name="User One")
     
-    # Clear any existing messages
-    user1_client.clear_received_messages()
-    user2_client.clear_received_messages()
+    # Subscribe to a document
+    doc_id = "test-comment-persistence-doc"
+    await client1.subscribe_document(doc_id)
     
-    # User 1 creates a comment thread
-    cell_id = "cell-1"
-    thread_id = str(uuid.uuid4())
-    comment_text = "This comment should persist across sessions"
+    # Wait for initial synchronization
+    await asyncio.sleep(0.5)
     
-    await user1_client.send({
-        "type": "thread_create",
-        "cell_id": cell_id,
-        "thread_id": thread_id,
-        "content": comment_text,
-        "timestamp": int(time.time() * 1000)
-    })
+    # Add a cell
+    cell_id = "cell1"
+    cell_content = "# Test cell for comment persistence"
+    await client1.add_cell(doc_id, cell_id, cell_content, "markdown")
     
-    # Wait for the thread to be synchronized to user 2
-    await user2_client.wait_for_message_containing(thread_id, timeout=TIMEOUT)
+    # Wait for synchronization
+    await asyncio.sleep(0.5)
     
-    # User 2 adds a reply
-    reply_id = str(uuid.uuid4())
-    reply_text = "This reply should also persist"
+    # Add a comment
+    comment_content = "This is a persistent comment"
+    comment_id = await client1.add_comment(doc_id, cell_id, comment_content)
     
-    await user2_client.send({
-        "type": "comment_reply",
-        "thread_id": thread_id,
-        "comment_id": reply_id,
-        "content": reply_text,
-        "timestamp": int(time.time() * 1000)
-    })
+    # Wait for synchronization
+    await asyncio.sleep(0.5)
     
-    # Wait for the reply to be synchronized to user 1
-    await user1_client.wait_for_message_containing(reply_id, timeout=TIMEOUT)
+    # Disconnect client1
+    await client1.disconnect()
     
-    # Disconnect both clients
-    await user1_client.disconnect()
-    await user2_client.disconnect()
+    # Wait for disconnection to complete
+    await asyncio.sleep(0.5)
     
-    # Simulate a server restart
-    restart_successful = await simulate_server_restart()
-    assert restart_successful, "Server restart simulation failed"
+    # Create a new client with the same user ID
+    client1_reconnected = await jp_ws_client(user_id="user1", display_name="User One")
     
-    # Create new clients and reconnect to the same document
-    new_user1_client = await jp_ws_client(user_id=user1_client.user_id)
-    new_user2_client = await jp_ws_client(user_id=user2_client.user_id)
+    # Subscribe to the same document
+    await client1_reconnected.subscribe_document(doc_id)
     
-    await new_user1_client.connect(document_name)
-    await new_user2_client.connect(document_name)
+    # Wait for synchronization
+    await asyncio.sleep(0.5)
     
-    # Request all comment threads for the document
-    await new_user1_client.send({
-        "type": "get_document_threads",
-        "document_id": document_name
-    })
+    # Verify the comment is still there
+    comments = await client1_reconnected.get_comments(doc_id)
     
-    # Wait for the threads response
-    threads_message = await new_user1_client.wait_for_message_containing("document_threads", timeout=TIMEOUT)
-    assert threads_message is not None, "Failed to retrieve document threads after reconnection"
+    # Find the comment by ID
+    found_comment = None
+    for comment in comments:
+        if comment["id"] == comment_id:
+            found_comment = comment
+            break
     
-    # Verify that the thread and comments are present in the response
-    try:
-        data = json.loads(threads_message)
-        assert data.get("type") == "document_threads", "Incorrect message type"
-        
-        threads = data.get("threads", [])
-        assert len(threads) > 0, "No threads found after reconnection"
-        
-        # Find our test thread
-        test_thread = None
-        for thread in threads:
-            if thread.get("thread_id") == thread_id:
-                test_thread = thread
-                break
-                
-        assert test_thread is not None, "Test thread not found after reconnection"
-        assert test_thread.get("cell_id") == cell_id, "Incorrect cell ID in persisted thread"
-        
-        # Verify the comments in the thread
-        comments = test_thread.get("comments", [])
-        assert len(comments) == 2, "Thread should contain 2 comments after reconnection"
-        
-        # Verify the initial comment
-        assert comments[0].get("content") == comment_text, "Initial comment content not preserved"
-        assert comments[0].get("author") == user1_client.user_id, "Initial comment author not preserved"
-        
-        # Verify the reply
-        assert comments[1].get("content") == reply_text, "Reply content not preserved"
-        assert comments[1].get("author") == user2_client.user_id, "Reply author not preserved"
-        assert comments[1].get("comment_id") == reply_id, "Reply ID not preserved"
-    except json.JSONDecodeError:
-        pytest.fail("Received message is not valid JSON")
-    except (KeyError, IndexError) as e:
-        pytest.fail(f"Error verifying persisted comments: {e}")
+    assert found_comment is not None, "Comment not persisted across sessions"
+    assert found_comment["content"] == comment_content, "Comment content changed after reconnection"
+    
+    # Create a completely new client
+    client2 = await jp_ws_client(user_id="user2", display_name="User Two")
+    
+    # Subscribe to the same document
+    await client2.subscribe_document(doc_id)
+    
+    # Wait for synchronization
+    await asyncio.sleep(0.5)
+    
+    # Verify the new client can see the comment
+    comments2 = await client2.get_comments(doc_id)
+    
+    # Find the comment by ID
+    found_comment2 = None
+    for comment in comments2:
+        if comment["id"] == comment_id:
+            found_comment2 = comment
+            break
+    
+    assert found_comment2 is not None, "New client cannot see persisted comment"
+    assert found_comment2["content"] == comment_content, "Comment content incorrect for new client"
 
 
 @pytest.mark.asyncio
-async def test_comment_editing_and_deletion(jp_ws_client, create_collaborative_session):
+async def test_comment_editing_and_deletion(jp_serverapp, jp_ws_client):
     """
-    Test that users can edit and delete their own comments.
+    Test that comments can be edited and deleted.
     
-    This test verifies that users can edit and delete their own comments, and that these
-    changes are properly synchronized to other users.
+    Verifies that comment edits and deletions are synchronized between clients.
     """
-    # Create a collaborative session with 2 clients
-    document_path, clients = await create_collaborative_session(num_clients=2)
-    user1_client, user2_client = clients
+    # Create two clients connected to the same document
+    client1 = await jp_ws_client(user_id="user1", display_name="User One")
+    client2 = await jp_ws_client(user_id="user2", display_name="User Two")
     
-    # Clear any existing messages
-    user1_client.clear_received_messages()
-    user2_client.clear_received_messages()
+    # Both clients subscribe to the same document
+    doc_id = "test-comment-editing-doc"
+    await client1.subscribe_document(doc_id)
+    await client2.subscribe_document(doc_id)
     
-    # User 1 creates a comment thread
-    cell_id = "cell-1"
-    thread_id = str(uuid.uuid4())
-    comment_id = str(uuid.uuid4())
-    original_text = "This is the original comment text"
+    # Wait for initial synchronization
+    await asyncio.sleep(0.5)
     
-    await user1_client.send({
-        "type": "comment_create",
-        "cell_id": cell_id,
-        "thread_id": thread_id,
-        "comment_id": comment_id,
-        "content": original_text,
-        "timestamp": int(time.time() * 1000)
-    })
+    # Client 1 adds a cell
+    cell_id = "cell1"
+    cell_content = "# Test cell for comment editing"
+    await client1.add_cell(doc_id, cell_id, cell_content, "markdown")
     
-    # Wait for the comment to be synchronized to user 2
-    await user2_client.wait_for_message_containing(comment_id, timeout=TIMEOUT)
+    # Wait for synchronization
+    await asyncio.sleep(0.5)
     
-    # User 1 edits their comment
-    edited_text = "This is the edited comment text"
-    edit_timestamp = int(time.time() * 1000)
+    # Client 1 creates a comment on the cell
+    original_content = "This is the original comment"
+    comment_id = await client1.add_comment(doc_id, cell_id, original_content)
     
-    await user1_client.send({
-        "type": "comment_edit",
-        "thread_id": thread_id,
-        "comment_id": comment_id,
-        "content": edited_text,
-        "timestamp": edit_timestamp
-    })
+    # Client 2 creates a comment on the cell
+    client2_content = "This is a comment from client 2"
+    client2_comment_id = await client2.add_comment(doc_id, cell_id, client2_content)
     
-    # Wait for the edit to be synchronized to user 2
-    edit_message = await user2_client.wait_for_message_containing("comment_edit", timeout=TIMEOUT)
-    assert edit_message is not None, "Comment edit was not synchronized to user 2"
+    # Wait for synchronization
+    await asyncio.sleep(0.5)
     
-    # Verify the edit message
-    try:
-        data = json.loads(edit_message)
-        assert data.get("type") == "comment_update", "Incorrect message type"
-        assert data.get("thread_id") == thread_id, "Incorrect thread ID"
-        assert data.get("comment_id") == comment_id, "Incorrect comment ID"
-        assert data.get("content") == edited_text, "Incorrect edited content"
-        assert data.get("edited") is True, "Comment should be marked as edited"
-        assert data.get("edited_at") == edit_timestamp, "Incorrect edit timestamp"
-    except json.JSONDecodeError:
-        pytest.fail("Received message is not valid JSON")
-    except KeyError as e:
-        pytest.fail(f"Missing expected field in edit message: {e}")
+    # Client 1 edits their comment
+    edited_content = "This is the edited comment"
+    await client1.update_comment(doc_id, comment_id, edited_content)
     
-    # User 1 deletes their comment
-    await user1_client.send({
-        "type": "comment_delete",
-        "thread_id": thread_id,
-        "comment_id": comment_id,
-        "timestamp": int(time.time() * 1000)
-    })
+    # Wait for synchronization
+    await asyncio.sleep(0.5)
     
-    # Wait for the deletion to be synchronized to user 2
-    delete_message = await user2_client.wait_for_message_containing("comment_delete", timeout=TIMEOUT)
-    assert delete_message is not None, "Comment deletion was not synchronized to user 2"
+    # Verify client 2 sees the edited comment
+    comments = await client2.get_comments(doc_id)
     
-    # Verify the deletion message
-    try:
-        data = json.loads(delete_message)
-        assert data.get("type") == "comment_delete", "Incorrect message type"
-        assert data.get("thread_id") == thread_id, "Incorrect thread ID"
-        assert data.get("comment_id") == comment_id, "Incorrect comment ID"
-        assert data.get("deleted_by") == user1_client.user_id, "Incorrect deleter"
-    except json.JSONDecodeError:
-        pytest.fail("Received message is not valid JSON")
-    except KeyError as e:
-        pytest.fail(f"Missing expected field in deletion message: {e}")
+    # Find the comment by ID
+    found_comment = None
+    for comment in comments:
+        if comment["id"] == comment_id:
+            found_comment = comment
+            break
     
-    # Verify the comment is no longer in the thread
-    await user2_client.send({
-        "type": "get_thread",
-        "thread_id": thread_id
-    })
+    assert found_comment is not None, "Edited comment not found in client 2's view"
+    assert found_comment["content"] == edited_content, "Comment edit not synchronized correctly"
     
-    # Wait for the thread data response
-    thread_data_message = await user2_client.wait_for_message_containing("thread_data", timeout=TIMEOUT)
-    assert thread_data_message is not None, "Failed to retrieve thread data"
+    # Client 2 tries to edit client 1's comment (should fail due to permissions)
+    unauthorized_edit = "This edit should fail"
+    edit_success = await client2.update_comment(doc_id, comment_id, unauthorized_edit)
     
-    # Verify the comment is marked as deleted or removed from the thread
-    try:
-        data = json.loads(thread_data_message)
-        comments = data.get("comments", [])
-        
-        # Either the comment should be gone, or it should be marked as deleted
-        deleted_comment = None
-        for comment in comments:
-            if comment.get("comment_id") == comment_id:
-                deleted_comment = comment
-                break
-                
-        if deleted_comment is not None:
-            # If the comment is still in the list, it should be marked as deleted
-            assert deleted_comment.get("deleted") is True, "Comment should be marked as deleted"
-        else:
-            # If the comment is not in the list, that's also acceptable behavior
-            pass
-    except json.JSONDecodeError:
-        pytest.fail("Received thread data is not valid JSON")
-    except KeyError as e:
-        pytest.fail(f"Error verifying deleted comment: {e}")
+    # This should return False or raise an exception
+    assert not edit_success, "Client 2 was able to edit Client 1's comment"
+    
+    # Wait for synchronization
+    await asyncio.sleep(0.5)
+    
+    # Verify the comment still has client 1's edit
+    comments = await client1.get_comments(doc_id)
+    found_comment = next((c for c in comments if c["id"] == comment_id), None)
+    assert found_comment is not None, "Comment disappeared after failed edit attempt"
+    assert found_comment["content"] == edited_content, "Comment content changed after failed edit attempt"
+    
+    # Client 2 deletes their own comment
+    await client2.delete_comment(doc_id, client2_comment_id)
+    
+    # Wait for synchronization
+    await asyncio.sleep(0.5)
+    
+    # Verify the comment is deleted for both clients
+    comments1 = await client1.get_comments(doc_id)
+    comments2 = await client2.get_comments(doc_id)
+    
+    assert not any(c["id"] == client2_comment_id for c in comments1), "Deleted comment still visible to client 1"
+    assert not any(c["id"] == client2_comment_id for c in comments2), "Deleted comment still visible to client 2"
+    
+    # Client 2 tries to delete client 1's comment (should fail due to permissions)
+    delete_success = await client2.delete_comment(doc_id, comment_id)
+    
+    # This should return False or raise an exception
+    assert not delete_success, "Client 2 was able to delete Client 1's comment"
+    
+    # Wait for synchronization
+    await asyncio.sleep(0.5)
+    
+    # Verify client 1's comment still exists
+    comments = await client1.get_comments(doc_id)
+    assert any(c["id"] == comment_id for c in comments), "Comment incorrectly deleted after failed deletion attempt"
+
+
+@pytest.mark.asyncio
+async def test_multiple_comment_threads_per_cell(jp_serverapp, jp_ws_client):
+    """
+    Test that multiple comment threads can be created on a single cell.
+    
+    Verifies that multiple threads on the same cell are properly managed and synchronized.
+    """
+    # Create two clients connected to the same document
+    client1 = await jp_ws_client(user_id="user1", display_name="User One")
+    client2 = await jp_ws_client(user_id="user2", display_name="User Two")
+    
+    # Both clients subscribe to the same document
+    doc_id = "test-multiple-threads-doc"
+    await client1.subscribe_document(doc_id)
+    await client2.subscribe_document(doc_id)
+    
+    # Wait for initial synchronization
+    await asyncio.sleep(0.5)
+    
+    # Client 1 adds a cell
+    cell_id = "cell1"
+    cell_content = "# Test cell for multiple comment threads"
+    await client1.add_cell(doc_id, cell_id, cell_content, "markdown")
+    
+    # Wait for synchronization
+    await asyncio.sleep(0.5)
+    
+    # Client 1 creates first comment thread
+    thread1_content = "This is the first thread"
+    thread1_id = await client1.add_comment(doc_id, cell_id, thread1_content)
+    
+    # Client 2 creates second comment thread
+    thread2_content = "This is the second thread"
+    thread2_id = await client2.add_comment(doc_id, cell_id, thread2_content)
+    
+    # Client 1 creates third comment thread
+    thread3_content = "This is the third thread"
+    thread3_id = await client1.add_comment(doc_id, cell_id, thread3_content)
+    
+    # Wait for synchronization
+    await asyncio.sleep(0.5)
+    
+    # Verify both clients can see all three threads
+    threads1 = await client1.get_comment_threads(doc_id)
+    threads2 = await client2.get_comment_threads(doc_id)
+    
+    # Filter threads for the specific cell
+    cell_threads1 = [t for t in threads1 if t["cellId"] == cell_id]
+    cell_threads2 = [t for t in threads2 if t["cellId"] == cell_id]
+    
+    # Verify both clients see the same number of threads
+    assert len(cell_threads1) == 3, "Client 1 does not see all three threads"
+    assert len(cell_threads2) == 3, "Client 2 does not see all three threads"
+    
+    # Verify thread IDs match
+    thread_ids1 = [t["id"] for t in cell_threads1]
+    thread_ids2 = [t["id"] for t in cell_threads2]
+    
+    assert thread1_id in thread_ids1, "Thread 1 missing from client 1's view"
+    assert thread2_id in thread_ids1, "Thread 2 missing from client 1's view"
+    assert thread3_id in thread_ids1, "Thread 3 missing from client 1's view"
+    
+    assert thread1_id in thread_ids2, "Thread 1 missing from client 2's view"
+    assert thread2_id in thread_ids2, "Thread 2 missing from client 2's view"
+    assert thread3_id in thread_ids2, "Thread 3 missing from client 2's view"
+    
+    # Client 1 resolves their threads
+    await client1.resolve_comment_thread(doc_id, thread1_id)
+    await client1.resolve_comment_thread(doc_id, thread3_id)
+    
+    # Wait for synchronization
+    await asyncio.sleep(0.5)
+    
+    # Verify resolution status is synchronized
+    threads1 = await client1.get_comment_threads(doc_id)
+    threads2 = await client2.get_comment_threads(doc_id)
+    
+    # Check thread 1 status
+    thread1_client1 = next((t for t in threads1 if t["id"] == thread1_id), None)
+    thread1_client2 = next((t for t in threads2 if t["id"] == thread1_id), None)
+    
+    assert thread1_client1["status"] == CommentStatus.Resolved, "Thread 1 not resolved in client 1's view"
+    assert thread1_client2["status"] == CommentStatus.Resolved, "Thread 1 not resolved in client 2's view"
+    
+    # Check thread 2 status (should still be active)
+    thread2_client1 = next((t for t in threads1 if t["id"] == thread2_id), None)
+    thread2_client2 = next((t for t in threads2 if t["id"] == thread2_id), None)
+    
+    assert thread2_client1["status"] == CommentStatus.Active, "Thread 2 incorrectly resolved in client 1's view"
+    assert thread2_client2["status"] == CommentStatus.Active, "Thread 2 incorrectly resolved in client 2's view"
+    
+    # Check thread 3 status
+    thread3_client1 = next((t for t in threads1 if t["id"] == thread3_id), None)
+    thread3_client2 = next((t for t in threads2 if t["id"] == thread3_id), None)
+    
+    assert thread3_client1["status"] == CommentStatus.Resolved, "Thread 3 not resolved in client 1's view"
+    assert thread3_client2["status"] == CommentStatus.Resolved, "Thread 3 not resolved in client 2's view"
+
+
+@pytest.mark.asyncio
+async def test_comment_filtering(jp_serverapp, jp_ws_client):
+    """
+    Test that comments can be filtered by status, cell, and author.
+    
+    Verifies that the comment filtering functionality works correctly.
+    """
+    # Create two clients connected to the same document
+    client1 = await jp_ws_client(user_id="user1", display_name="User One")
+    client2 = await jp_ws_client(user_id="user2", display_name="User Two")
+    
+    # Both clients subscribe to the same document
+    doc_id = "test-comment-filtering-doc"
+    await client1.subscribe_document(doc_id)
+    await client2.subscribe_document(doc_id)
+    
+    # Wait for initial synchronization
+    await asyncio.sleep(0.5)
+    
+    # Client 1 adds two cells
+    cell1_id = "cell1"
+    cell2_id = "cell2"
+    await client1.add_cell(doc_id, cell1_id, "# Cell 1", "markdown")
+    await client1.add_cell(doc_id, cell2_id, "# Cell 2", "markdown")
+    
+    # Wait for synchronization
+    await asyncio.sleep(0.5)
+    
+    # Create various comments with different statuses, cells, and authors
+    # Cell 1, User 1, Active
+    comment1_id = await client1.add_comment(doc_id, cell1_id, "Comment 1 from User 1 on Cell 1")
+    
+    # Cell 1, User 2, Active
+    comment2_id = await client2.add_comment(doc_id, cell1_id, "Comment 2 from User 2 on Cell 1")
+    
+    # Cell 2, User 1, Active
+    comment3_id = await client1.add_comment(doc_id, cell2_id, "Comment 3 from User 1 on Cell 2")
+    
+    # Cell 2, User 2, Active
+    comment4_id = await client2.add_comment(doc_id, cell2_id, "Comment 4 from User 2 on Cell 2")
+    
+    # Wait for synchronization
+    await asyncio.sleep(0.5)
+    
+    # Resolve some comments
+    await client1.resolve_comment_thread(doc_id, comment1_id)
+    await client2.resolve_comment_thread(doc_id, comment4_id)
+    
+    # Wait for synchronization
+    await asyncio.sleep(0.5)
+    
+    # Mark one comment as a question
+    await client1.update_comment_status(doc_id, comment3_id, CommentStatus.Question)
+    
+    # Wait for synchronization
+    await asyncio.sleep(0.5)
+    
+    # Test filtering by cell
+    cell1_threads = await client1.get_cell_comment_threads(doc_id, cell1_id)
+    assert len(cell1_threads) == 2, "Incorrect number of threads for cell 1"
+    cell1_thread_ids = [t["id"] for t in cell1_threads]
+    assert comment1_id in cell1_thread_ids, "Comment 1 missing from cell 1 threads"
+    assert comment2_id in cell1_thread_ids, "Comment 2 missing from cell 1 threads"
+    
+    cell2_threads = await client1.get_cell_comment_threads(doc_id, cell2_id)
+    assert len(cell2_threads) == 2, "Incorrect number of threads for cell 2"
+    cell2_thread_ids = [t["id"] for t in cell2_threads]
+    assert comment3_id in cell2_thread_ids, "Comment 3 missing from cell 2 threads"
+    assert comment4_id in cell2_thread_ids, "Comment 4 missing from cell 2 threads"
+    
+    # Test filtering by status
+    active_threads = await client1.get_comment_threads_by_status(doc_id, CommentStatus.Active)
+    active_thread_ids = [t["id"] for t in active_threads]
+    assert comment2_id in active_thread_ids, "Comment 2 missing from active threads"
+    assert comment1_id not in active_thread_ids, "Resolved comment 1 incorrectly in active threads"
+    
+    resolved_threads = await client1.get_comment_threads_by_status(doc_id, CommentStatus.Resolved)
+    resolved_thread_ids = [t["id"] for t in resolved_threads]
+    assert comment1_id in resolved_thread_ids, "Comment 1 missing from resolved threads"
+    assert comment4_id in resolved_thread_ids, "Comment 4 missing from resolved threads"
+    
+    question_threads = await client1.get_comment_threads_by_status(doc_id, CommentStatus.Question)
+    question_thread_ids = [t["id"] for t in question_threads]
+    assert comment3_id in question_thread_ids, "Comment 3 missing from question threads"
+    
+    # Test filtering by author
+    user1_threads = await client1.get_comment_threads_by_author(doc_id, "user1")
+    user1_thread_ids = [t["id"] for t in user1_threads]
+    assert comment1_id in user1_thread_ids, "Comment 1 missing from user1 threads"
+    assert comment3_id in user1_thread_ids, "Comment 3 missing from user1 threads"
+    assert comment2_id not in user1_thread_ids, "Comment 2 incorrectly in user1 threads"
+    
+    user2_threads = await client1.get_comment_threads_by_author(doc_id, "user2")
+    user2_thread_ids = [t["id"] for t in user2_threads]
+    assert comment2_id in user2_thread_ids, "Comment 2 missing from user2 threads"
+    assert comment4_id in user2_thread_ids, "Comment 4 missing from user2 threads"
+    assert comment1_id not in user2_thread_ids, "Comment 1 incorrectly in user2 threads"
+    
+    # Test combined filtering (cell + status)
+    cell1_resolved_threads = await client1.get_cell_comment_threads_by_status(
+        doc_id, cell1_id, CommentStatus.Resolved
+    )
+    assert len(cell1_resolved_threads) == 1, "Incorrect number of resolved threads for cell 1"
+    assert cell1_resolved_threads[0]["id"] == comment1_id, "Wrong thread in cell1 resolved threads"
