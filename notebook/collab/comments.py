@@ -1,1207 +1,1031 @@
-"""Server-side component of the comment and review system for Jupyter Notebook v7.
+"""Comment and review system for collaborative notebooks.
 
-This module implements the server-side functionality for managing comments and review threads
-attached to specific notebook cells. It provides APIs for creating, retrieving, updating, and
-deleting comments, as well as managing comment threads and their resolution status.
-
-The comment system enables users to discuss specific cells in a notebook, provide feedback,
-and track the resolution of issues or suggestions. Comments are synchronized across all
-connected clients in real-time, enabling collaborative code review and discussion.
-
-Classes:
-    CommentManager: Main class for managing comment threads and comments.
-    CommentThread: Represents a thread of comments attached to a specific cell.
-    Comment: Represents an individual comment within a thread.
-    CommentNotification: Handles notification delivery for new comments.
+This module implements the server-side component of the comment and review system,
+managing the creation, storage, and synchronization of comments attached to specific
+notebook cells. It handles comment threads, notifications, and resolution status tracking.
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
-import time
-import uuid
+import typing as t
 from datetime import datetime
-from enum import Enum
-from typing import Any, Dict, List, Optional, Set, Tuple, Union, cast
+from uuid import uuid4
 
-from jupyter_server.auth import Authorizer
 from jupyter_server.base.handlers import JupyterHandler
-from tornado import web
-from traitlets import Bool, Dict as TDict, Instance, Int, Unicode, default
-from traitlets.config import LoggingConfigurable
+from tornado import web, websocket
+from traitlets.config import Configurable
+from traitlets import Instance, Dict, Bool, Int, default
 
-# Local imports
-from notebook.collab.persistence import CollaborationPersistence
+from notebook.collab.permissions import (
+    NotebookPermissionManager, PermissionAction, collaborative_authorized
+)
+
+# Type definitions
+DocumentId = str  # Unique identifier for a document
+CellId = str  # Unique identifier for a cell
+ThreadId = str  # Unique identifier for a comment thread
+CommentId = str  # Unique identifier for a comment
+UserId = str  # Unique identifier for a user
+ClientId = str  # Unique identifier for a client
+
+# Comment thread status options
+class ThreadStatus:
+    """Status options for comment threads."""
+    OPEN = "open"  # Thread is active and unresolved
+    RESOLVED = "resolved"  # Thread has been marked as resolved
+    ARCHIVED = "archived"  # Thread has been archived (hidden but preserved)
 
 
-class CommentStatus(str, Enum):
-    """Enum representing the status of a comment thread."""
-    OPEN = "open"
-    RESOLVED = "resolved"
-    ARCHIVED = "archived"
-
-
-class Comment:
-    """Represents an individual comment within a thread.
+class CommentManager(Configurable):
+    """Manages comments and review threads for collaborative notebooks.
     
-    Attributes:
-        comment_id: Unique identifier for the comment.
-        thread_id: Identifier of the thread this comment belongs to.
-        user_id: Identifier of the user who created the comment.
-        content: Text content of the comment.
-        created_at: Timestamp when the comment was created.
-        updated_at: Timestamp when the comment was last updated.
-        metadata: Additional information about the comment (mentions, formatting, etc.).
+    This class provides methods for creating, retrieving, updating, and resolving
+    comment threads attached to specific notebook cells. It handles persistence,
+    notifications, and access control for the comment system.
     """
     
-    def __init__(
-        self,
-        thread_id: str,
-        user_id: str,
-        content: str,
-        comment_id: Optional[str] = None,
-        created_at: Optional[float] = None,
-        updated_at: Optional[float] = None,
-        metadata: Optional[Dict[str, Any]] = None
-    ) -> None:
-        """Initialize a new Comment instance.
+    # Configuration parameters
+    persistence_manager = Instance(
+        'notebook.collab.persistence.PersistenceManager',
+        allow_none=True,
+        help="The persistence manager for storing comments"
+    ).tag(config=True)
+    
+    permission_manager = Instance(
+        'notebook.collab.permissions.NotebookPermissionManager',
+        allow_none=True,
+        help="The permission manager for checking comment permissions"
+    ).tag(config=True)
+    
+    enable_notifications = Bool(
+        default_value=True,
+        help="Whether to enable notifications for new comments"
+    ).tag(config=True)
+    
+    notification_debounce_ms = Int(
+        default_value=2000,  # 2 seconds
+        help="Debounce time in milliseconds for batching notifications"
+    ).tag(config=True)
+    
+    # In-memory cache of active comment threads
+    _comment_cache = Dict(help="Cache of active comment threads").tag(config=False)
+    
+    def __init__(self, **kwargs):
+        """Initialize the comment manager.
         
         Args:
-            thread_id: Identifier of the thread this comment belongs to.
-            user_id: Identifier of the user who created the comment.
-            content: Text content of the comment.
-            comment_id: Unique identifier for the comment. If None, a new UUID is generated.
-            created_at: Timestamp when the comment was created. If None, current time is used.
-            updated_at: Timestamp when the comment was last updated. If None, same as created_at.
-            metadata: Additional information about the comment.
-        """
-        self.comment_id = comment_id or str(uuid.uuid4())
-        self.thread_id = thread_id
-        self.user_id = user_id
-        self.content = content
-        self.created_at = created_at or time.time()
-        self.updated_at = updated_at or self.created_at
-        self.metadata = metadata or {}
-    
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert the comment to a dictionary representation.
-        
-        Returns:
-            Dictionary representation of the comment.
-        """
-        return {
-            "comment_id": self.comment_id,
-            "thread_id": self.thread_id,
-            "user_id": self.user_id,
-            "content": self.content,
-            "created_at": self.created_at,
-            "updated_at": self.updated_at,
-            "metadata": self.metadata
-        }
-    
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> Comment:
-        """Create a Comment instance from a dictionary.
-        
-        Args:
-            data: Dictionary containing comment data.
-            
-        Returns:
-            A new Comment instance.
-        """
-        return cls(
-            thread_id=data["thread_id"],
-            user_id=data["user_id"],
-            content=data["content"],
-            comment_id=data["comment_id"],
-            created_at=data["created_at"],
-            updated_at=data["updated_at"],
-            metadata=data["metadata"]
-        )
-    
-    def update_content(self, content: str) -> None:
-        """Update the content of the comment.
-        
-        Args:
-            content: New content for the comment.
-        """
-        self.content = content
-        self.updated_at = time.time()
-    
-    def update_metadata(self, metadata: Dict[str, Any]) -> None:
-        """Update the metadata of the comment.
-        
-        Args:
-            metadata: New metadata for the comment.
-        """
-        self.metadata.update(metadata)
-        self.updated_at = time.time()
-
-
-class CommentThread:
-    """Represents a thread of comments attached to a specific cell.
-    
-    Attributes:
-        thread_id: Unique identifier for the thread.
-        session_id: Identifier of the collaboration session.
-        cell_id: Identifier of the cell the thread is attached to.
-        created_at: Timestamp when the thread was created.
-        status: Status of the thread (open, resolved, archived).
-        metadata: Additional information about the thread.
-        comments: List of comments in the thread.
-    """
-    
-    def __init__(
-        self,
-        session_id: str,
-        cell_id: str,
-        thread_id: Optional[str] = None,
-        created_at: Optional[float] = None,
-        status: CommentStatus = CommentStatus.OPEN,
-        metadata: Optional[Dict[str, Any]] = None,
-        comments: Optional[List[Comment]] = None
-    ) -> None:
-        """Initialize a new CommentThread instance.
-        
-        Args:
-            session_id: Identifier of the collaboration session.
-            cell_id: Identifier of the cell the thread is attached to.
-            thread_id: Unique identifier for the thread. If None, a new UUID is generated.
-            created_at: Timestamp when the thread was created. If None, current time is used.
-            status: Status of the thread.
-            metadata: Additional information about the thread.
-            comments: List of comments in the thread.
-        """
-        self.thread_id = thread_id or str(uuid.uuid4())
-        self.session_id = session_id
-        self.cell_id = cell_id
-        self.created_at = created_at or time.time()
-        self.status = status
-        self.metadata = metadata or {}
-        self.comments = comments or []
-    
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert the thread to a dictionary representation.
-        
-        Returns:
-            Dictionary representation of the thread.
-        """
-        return {
-            "thread_id": self.thread_id,
-            "session_id": self.session_id,
-            "cell_id": self.cell_id,
-            "created_at": self.created_at,
-            "status": self.status.value,
-            "metadata": self.metadata,
-            "comments": [comment.to_dict() for comment in self.comments]
-        }
-    
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> CommentThread:
-        """Create a CommentThread instance from a dictionary.
-        
-        Args:
-            data: Dictionary containing thread data.
-            
-        Returns:
-            A new CommentThread instance.
-        """
-        comments = [Comment.from_dict(comment_data) for comment_data in data.get("comments", [])]
-        return cls(
-            session_id=data["session_id"],
-            cell_id=data["cell_id"],
-            thread_id=data["thread_id"],
-            created_at=data["created_at"],
-            status=CommentStatus(data["status"]),
-            metadata=data["metadata"],
-            comments=comments
-        )
-    
-    def add_comment(self, user_id: str, content: str, metadata: Optional[Dict[str, Any]] = None) -> Comment:
-        """Add a new comment to the thread.
-        
-        Args:
-            user_id: Identifier of the user creating the comment.
-            content: Text content of the comment.
-            metadata: Additional information about the comment.
-            
-        Returns:
-            The newly created Comment instance.
-        """
-        comment = Comment(
-            thread_id=self.thread_id,
-            user_id=user_id,
-            content=content,
-            metadata=metadata
-        )
-        self.comments.append(comment)
-        return comment
-    
-    def get_comment(self, comment_id: str) -> Optional[Comment]:
-        """Get a comment by its ID.
-        
-        Args:
-            comment_id: Identifier of the comment to retrieve.
-            
-        Returns:
-            The Comment instance if found, None otherwise.
-        """
-        for comment in self.comments:
-            if comment.comment_id == comment_id:
-                return comment
-        return None
-    
-    def update_comment(self, comment_id: str, content: str) -> Optional[Comment]:
-        """Update the content of a comment.
-        
-        Args:
-            comment_id: Identifier of the comment to update.
-            content: New content for the comment.
-            
-        Returns:
-            The updated Comment instance if found, None otherwise.
-        """
-        comment = self.get_comment(comment_id)
-        if comment:
-            comment.update_content(content)
-        return comment
-    
-    def delete_comment(self, comment_id: str) -> bool:
-        """Delete a comment from the thread.
-        
-        Args:
-            comment_id: Identifier of the comment to delete.
-            
-        Returns:
-            True if the comment was deleted, False otherwise.
-        """
-        for i, comment in enumerate(self.comments):
-            if comment.comment_id == comment_id:
-                del self.comments[i]
-                return True
-        return False
-    
-    def set_status(self, status: CommentStatus) -> None:
-        """Set the status of the thread.
-        
-        Args:
-            status: New status for the thread.
-        """
-        self.status = status
-    
-    def update_metadata(self, metadata: Dict[str, Any]) -> None:
-        """Update the metadata of the thread.
-        
-        Args:
-            metadata: New metadata for the thread.
-        """
-        self.metadata.update(metadata)
-
-
-class CommentNotification:
-    """Handles notification delivery for new comments.
-    
-    This class is responsible for notifying users about new comments or updates
-    to existing comments in threads they are participating in or watching.
-    
-    Attributes:
-        thread_id: Identifier of the thread the notification is for.
-        comment_id: Identifier of the comment that triggered the notification.
-        user_id: Identifier of the user who created the comment.
-        recipients: Set of user IDs to notify.
-        created_at: Timestamp when the notification was created.
-        metadata: Additional information about the notification.
-    """
-    
-    def __init__(
-        self,
-        thread_id: str,
-        comment_id: str,
-        user_id: str,
-        recipients: Optional[Set[str]] = None,
-        created_at: Optional[float] = None,
-        metadata: Optional[Dict[str, Any]] = None
-    ) -> None:
-        """Initialize a new CommentNotification instance.
-        
-        Args:
-            thread_id: Identifier of the thread the notification is for.
-            comment_id: Identifier of the comment that triggered the notification.
-            user_id: Identifier of the user who created the comment.
-            recipients: Set of user IDs to notify. If None, an empty set is used.
-            created_at: Timestamp when the notification was created. If None, current time is used.
-            metadata: Additional information about the notification.
-        """
-        self.thread_id = thread_id
-        self.comment_id = comment_id
-        self.user_id = user_id
-        self.recipients = recipients or set()
-        self.created_at = created_at or time.time()
-        self.metadata = metadata or {}
-    
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert the notification to a dictionary representation.
-        
-        Returns:
-            Dictionary representation of the notification.
-        """
-        return {
-            "thread_id": self.thread_id,
-            "comment_id": self.comment_id,
-            "user_id": self.user_id,
-            "recipients": list(self.recipients),
-            "created_at": self.created_at,
-            "metadata": self.metadata
-        }
-    
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> CommentNotification:
-        """Create a CommentNotification instance from a dictionary.
-        
-        Args:
-            data: Dictionary containing notification data.
-            
-        Returns:
-            A new CommentNotification instance.
-        """
-        return cls(
-            thread_id=data["thread_id"],
-            comment_id=data["comment_id"],
-            user_id=data["user_id"],
-            recipients=set(data["recipients"]),
-            created_at=data["created_at"],
-            metadata=data["metadata"]
-        )
-    
-    def add_recipient(self, user_id: str) -> None:
-        """Add a recipient to the notification.
-        
-        Args:
-            user_id: Identifier of the user to add as a recipient.
-        """
-        self.recipients.add(user_id)
-    
-    def remove_recipient(self, user_id: str) -> None:
-        """Remove a recipient from the notification.
-        
-        Args:
-            user_id: Identifier of the user to remove as a recipient.
-        """
-        if user_id in self.recipients:
-            self.recipients.remove(user_id)
-
-
-class CommentManager(LoggingConfigurable):
-    """Manages comment threads and comments for collaborative notebooks.
-    
-    This class provides methods for creating, retrieving, updating, and deleting
-    comment threads and comments. It also handles notification delivery for new comments.
-    
-    Attributes:
-        persistence: Instance of CollaborationPersistence for storing comments.
-        authorizer: Instance of Authorizer for checking user permissions.
-        notification_enabled: Whether comment notifications are enabled.
-        notification_debounce_ms: Debounce time for notifications in milliseconds.
-        max_comments_per_thread: Maximum number of comments allowed in a thread.
-    """
-    
-    persistence = Instance(CollaborationPersistence, help="Persistence layer for storing comments")
-    authorizer = Instance(Authorizer, help="Authorizer for checking user permissions")
-    
-    notification_enabled = Bool(True, help="Whether comment notifications are enabled").tag(config=True)
-    notification_debounce_ms = Int(1000, help="Debounce time for notifications in milliseconds").tag(config=True)
-    max_comments_per_thread = Int(100, help="Maximum number of comments allowed in a thread").tag(config=True)
-    
-    # Internal state
-    _threads = TDict(help="In-memory cache of comment threads").tag(config=False)
-    _notifications = TDict(help="In-memory queue of pending notifications").tag(config=False)
-    _notification_tasks = TDict(help="Map of notification tasks").tag(config=False)
-    
-    @default("_threads")
-    def _default_threads(self) -> Dict[str, CommentThread]:
-        return {}
-    
-    @default("_notifications")
-    def _default_notifications(self) -> Dict[str, List[CommentNotification]]:
-        return {}
-    
-    @default("_notification_tasks")
-    def _default_notification_tasks(self) -> Dict[str, asyncio.Task]:
-        return {}
-    
-    def __init__(self, **kwargs: Any) -> None:
-        """Initialize the CommentManager.
-        
-        Args:
-            **kwargs: Additional keyword arguments passed to the parent class.
+            **kwargs: Configuration parameters
         """
         super().__init__(**kwargs)
-        self.log.debug("Initializing CommentManager")
-    
-    async def initialize(self) -> None:
-        """Initialize the CommentManager.
+        self.logger = logging.getLogger(__name__)
+        self._comment_cache = {}
+        self._notification_queue = {}
         
-        This method loads all comment threads from the persistence layer.
-        """
-        self.log.debug("Loading comment threads from persistence layer")
-        try:
-            # Load all threads from persistence
-            threads = await self.persistence.get_all_comment_threads()
-            for thread in threads:
-                self._threads[thread.thread_id] = thread
-            self.log.info(f"Loaded {len(threads)} comment threads from persistence layer")
-        except Exception as e:
-            self.log.error(f"Error loading comment threads: {e}")
-            raise
-    
-    async def create_thread(
-        self,
-        session_id: str,
-        cell_id: str,
-        user_id: str,
-        initial_comment: Optional[str] = None,
-        metadata: Optional[Dict[str, Any]] = None
-    ) -> CommentThread:
-        """Create a new comment thread.
+    def create_thread(self, session_id: str, cell_id: CellId, user_id: UserId, 
+                     content: str, metadata: t.Optional[t.Dict[str, t.Any]] = None) -> t.Dict[str, t.Any]:
+        """Create a new comment thread with an initial comment.
         
         Args:
-            session_id: Identifier of the collaboration session.
-            cell_id: Identifier of the cell to attach the thread to.
-            user_id: Identifier of the user creating the thread.
-            initial_comment: Optional initial comment text.
-            metadata: Additional information about the thread.
+            session_id: The collaboration session ID
+            cell_id: The cell ID to attach the comment to
+            user_id: The user creating the comment
+            content: The comment content
+            metadata: Additional metadata for the thread (e.g., selection range)
             
         Returns:
-            The newly created CommentThread instance.
+            A dictionary containing the thread and comment information
             
         Raises:
-            ValueError: If the session_id or cell_id is invalid.
-            PermissionError: If the user does not have permission to create a thread.
+            ValueError: If required parameters are missing
+            PermissionError: If the user doesn't have permission to comment
         """
-        # Check if the session exists
-        if not await self.persistence.session_exists(session_id):
-            raise ValueError(f"Invalid session ID: {session_id}")
+        if not session_id or not cell_id or not user_id or not content:
+            raise ValueError("Missing required parameters for creating a comment thread")
         
-        # Create the thread
-        thread = CommentThread(
-            session_id=session_id,
-            cell_id=cell_id,
-            metadata=metadata
-        )
+        # Check permissions if permission manager is available
+        if self.permission_manager:
+            user_identity = {"name": user_id}
+            if not self.permission_manager.has_cell_permission(
+                session_id, cell_id, user_identity, PermissionAction.COMMENT_CELL
+            ):
+                raise PermissionError(f"User {user_id} does not have permission to comment on cell {cell_id}")
         
-        # Add initial comment if provided
-        if initial_comment:
-            thread.add_comment(user_id, initial_comment)
-        
-        # Store the thread in memory and persistence
-        self._threads[thread.thread_id] = thread
-        await self.persistence.save_comment_thread(thread)
-        
-        self.log.info(f"Created comment thread {thread.thread_id} for cell {cell_id} in session {session_id}")
-        return thread
+        # Create thread with persistence manager
+        if not self.persistence_manager:
+            self.logger.warning("No persistence manager available for comment storage")
+            # Create in-memory thread
+            thread_id = str(uuid4())
+            comment_id = str(uuid4())
+            timestamp = datetime.utcnow().isoformat()
+            
+            thread_data = {
+                'thread_id': thread_id,
+                'session_id': session_id,
+                'cell_id': cell_id,
+                'created_at': timestamp,
+                'status': ThreadStatus.OPEN,
+                'metadata': metadata or {},
+                'comments': [{
+                    'comment_id': comment_id,
+                    'user_id': user_id,
+                    'content': content,
+                    'created_at': timestamp,
+                    'updated_at': timestamp,
+                    'metadata': {}
+                }]
+            }
+            
+            # Cache the thread
+            if session_id not in self._comment_cache:
+                self._comment_cache[session_id] = {}
+            if cell_id not in self._comment_cache[session_id]:
+                self._comment_cache[session_id][cell_id] = {}
+            self._comment_cache[session_id][cell_id][thread_id] = thread_data
+            
+            return thread_data
+        else:
+            # Create thread with persistence manager
+            thread_data = self.persistence_manager.create_comment_thread(
+                session_id, cell_id, user_id, content, metadata
+            )
+            
+            # Queue notification
+            self._queue_notification(session_id, 'thread_created', thread_data)
+            
+            return thread_data
     
-    async def get_thread(self, thread_id: str) -> Optional[CommentThread]:
-        """Get a comment thread by its ID.
+    def add_comment(self, thread_id: ThreadId, user_id: UserId, content: str, 
+                   metadata: t.Optional[t.Dict[str, t.Any]] = None) -> t.Dict[str, t.Any]:
+        """Add a comment to an existing thread.
         
         Args:
-            thread_id: Identifier of the thread to retrieve.
+            thread_id: The thread ID to add the comment to
+            user_id: The user creating the comment
+            content: The comment content
+            metadata: Additional metadata for the comment
             
         Returns:
-            The CommentThread instance if found, None otherwise.
+            A dictionary containing the comment information
+            
+        Raises:
+            ValueError: If required parameters are missing
+            PermissionError: If the user doesn't have permission to comment
+            KeyError: If the thread doesn't exist
         """
-        # Check in-memory cache first
-        if thread_id in self._threads:
-            return self._threads[thread_id]
+        if not thread_id or not user_id or not content:
+            raise ValueError("Missing required parameters for adding a comment")
         
-        # Try to load from persistence
-        thread = await self.persistence.get_comment_thread(thread_id)
-        if thread:
-            self._threads[thread_id] = thread
+        # Get thread info to check permissions
+        thread_info = self.get_thread(thread_id)
+        if not thread_info:
+            raise KeyError(f"Thread {thread_id} not found")
         
-        return thread
+        session_id = thread_info['session_id']
+        cell_id = thread_info['cell_id']
+        
+        # Check permissions if permission manager is available
+        if self.permission_manager:
+            user_identity = {"name": user_id}
+            if not self.permission_manager.has_cell_permission(
+                session_id, cell_id, user_identity, PermissionAction.COMMENT_CELL
+            ):
+                raise PermissionError(f"User {user_id} does not have permission to comment on cell {cell_id}")
+        
+        # Add comment with persistence manager
+        if not self.persistence_manager:
+            self.logger.warning("No persistence manager available for comment storage")
+            # Add in-memory comment
+            comment_id = str(uuid4())
+            timestamp = datetime.utcnow().isoformat()
+            
+            comment_data = {
+                'comment_id': comment_id,
+                'thread_id': thread_id,
+                'user_id': user_id,
+                'content': content,
+                'created_at': timestamp,
+                'updated_at': timestamp,
+                'metadata': metadata or {}
+            }
+            
+            # Find thread in cache
+            for session_cache in self._comment_cache.values():
+                for cell_cache in session_cache.values():
+                    if thread_id in cell_cache:
+                        # Add comment to thread
+                        cell_cache[thread_id]['comments'].append(comment_data)
+                        # Reopen thread if it was resolved
+                        if cell_cache[thread_id]['status'] == ThreadStatus.RESOLVED:
+                            cell_cache[thread_id]['status'] = ThreadStatus.OPEN
+                        return comment_data
+            
+            raise KeyError(f"Thread {thread_id} not found in cache")
+        else:
+            # Add comment with persistence manager
+            comment_data = self.persistence_manager.add_comment(
+                thread_id, user_id, content, metadata
+            )
+            
+            if not comment_data:
+                raise KeyError(f"Thread {thread_id} not found in persistence manager")
+            
+            # Queue notification
+            notification_data = {
+                'thread_id': thread_id,
+                'comment': comment_data,
+                'session_id': session_id,
+                'cell_id': cell_id
+            }
+            self._queue_notification(session_id, 'comment_added', notification_data)
+            
+            return comment_data
     
-    async def get_threads_for_cell(self, session_id: str, cell_id: str) -> List[CommentThread]:
+    def get_thread(self, thread_id: ThreadId) -> t.Optional[t.Dict[str, t.Any]]:
+        """Get a comment thread by ID.
+        
+        Args:
+            thread_id: The thread ID to retrieve
+            
+        Returns:
+            A dictionary containing the thread information, or None if not found
+        """
+        # Try to find in cache first
+        for session_cache in self._comment_cache.values():
+            for cell_cache in session_cache.values():
+                if thread_id in cell_cache:
+                    return cell_cache[thread_id]
+        
+        # If not in cache and persistence manager is available, try there
+        if self.persistence_manager:
+            # We need to find the session ID for this thread
+            # This is a limitation of the current API design
+            # In a real implementation, we would have a direct lookup method
+            # For now, we'll query all sessions and look for this thread
+            
+            # This is inefficient but works for demonstration purposes
+            # In a real implementation, we would have a better way to look up threads by ID
+            sessions = self.persistence_manager.get_session()
+            try:
+                # Use SQLAlchemy directly to find the thread
+                from notebook.collab.persistence import CommentThread
+                thread = sessions.query(CommentThread).filter(
+                    CommentThread.thread_id == thread_id
+                ).first()
+                
+                if thread:
+                    # Get the full thread with comments
+                    threads = self.persistence_manager.get_comment_threads(
+                        str(thread.session_id), thread.cell_id
+                    )
+                    for t in threads:
+                        if t['thread_id'] == thread_id:
+                            return t
+            finally:
+                sessions.close()
+        
+        return None
+    
+    def get_threads_for_cell(self, session_id: str, cell_id: CellId, 
+                           status: t.Optional[str] = None) -> t.List[t.Dict[str, t.Any]]:
         """Get all comment threads for a specific cell.
         
         Args:
-            session_id: Identifier of the collaboration session.
-            cell_id: Identifier of the cell to get threads for.
+            session_id: The collaboration session ID
+            cell_id: The cell ID to get comments for
+            status: Optional filter by thread status
             
         Returns:
-            List of CommentThread instances for the cell.
+            A list of thread dictionaries
         """
-        # Load threads from persistence to ensure we have the latest data
-        threads = await self.persistence.get_comment_threads_for_cell(session_id, cell_id)
+        # Check cache first
+        if session_id in self._comment_cache and cell_id in self._comment_cache[session_id]:
+            threads = list(self._comment_cache[session_id][cell_id].values())
+            if status:
+                threads = [t for t in threads if t['status'] == status]
+            return threads
         
-        # Update in-memory cache
-        for thread in threads:
-            self._threads[thread.thread_id] = thread
+        # If not in cache and persistence manager is available, try there
+        if self.persistence_manager:
+            return self.persistence_manager.get_comment_threads(session_id, cell_id, status)
         
-        return threads
+        return []
     
-    async def get_threads_for_session(self, session_id: str) -> List[CommentThread]:
-        """Get all comment threads for a collaboration session.
+    def get_threads_for_document(self, session_id: str, 
+                              status: t.Optional[str] = None) -> t.List[t.Dict[str, t.Any]]:
+        """Get all comment threads for a document.
         
         Args:
-            session_id: Identifier of the collaboration session.
+            session_id: The collaboration session ID
+            status: Optional filter by thread status
             
         Returns:
-            List of CommentThread instances for the session.
+            A list of thread dictionaries
         """
-        # Load threads from persistence to ensure we have the latest data
-        threads = await self.persistence.get_comment_threads_for_session(session_id)
+        # Check cache first
+        if session_id in self._comment_cache:
+            threads = []
+            for cell_threads in self._comment_cache[session_id].values():
+                threads.extend(cell_threads.values())
+            
+            if status:
+                threads = [t for t in threads if t['status'] == status]
+            return threads
         
-        # Update in-memory cache
-        for thread in threads:
-            self._threads[thread.thread_id] = thread
+        # If not in cache and persistence manager is available, try there
+        if self.persistence_manager:
+            return self.persistence_manager.get_comment_threads(session_id, None, status)
         
-        return threads
+        return []
     
-    async def add_comment(
-        self,
-        thread_id: str,
-        user_id: str,
-        content: str,
-        metadata: Optional[Dict[str, Any]] = None
-    ) -> Comment:
-        """Add a comment to a thread.
+    def update_thread_status(self, thread_id: ThreadId, status: str, 
+                           user_id: UserId) -> bool:
+        """Update the status of a comment thread.
         
         Args:
-            thread_id: Identifier of the thread to add the comment to.
-            user_id: Identifier of the user creating the comment.
-            content: Text content of the comment.
-            metadata: Additional information about the comment.
+            thread_id: The thread ID to update
+            status: The new status (open, resolved, archived)
+            user_id: The user updating the status
             
         Returns:
-            The newly created Comment instance.
+            True if successful, False otherwise
             
         Raises:
-            ValueError: If the thread_id is invalid or the thread has reached the maximum number of comments.
-            PermissionError: If the user does not have permission to add a comment.
+            ValueError: If the status is invalid
+            PermissionError: If the user doesn't have permission to update the thread
         """
-        # Get the thread
-        thread = await self.get_thread(thread_id)
-        if not thread:
-            raise ValueError(f"Invalid thread ID: {thread_id}")
+        if status not in [ThreadStatus.OPEN, ThreadStatus.RESOLVED, ThreadStatus.ARCHIVED]:
+            raise ValueError(f"Invalid thread status: {status}")
         
-        # Check if the thread has reached the maximum number of comments
-        if len(thread.comments) >= self.max_comments_per_thread:
-            raise ValueError(f"Thread {thread_id} has reached the maximum number of comments")
-        
-        # Add the comment to the thread
-        comment = thread.add_comment(user_id, content, metadata)
-        
-        # Save the updated thread
-        await self.persistence.save_comment_thread(thread)
-        
-        # Create a notification for the comment
-        if self.notification_enabled:
-            await self._create_notification(thread, comment)
-        
-        self.log.info(f"Added comment {comment.comment_id} to thread {thread_id} by user {user_id}")
-        return comment
-    
-    async def update_comment(
-        self,
-        thread_id: str,
-        comment_id: str,
-        user_id: str,
-        content: str
-    ) -> Optional[Comment]:
-        """Update a comment in a thread.
-        
-        Args:
-            thread_id: Identifier of the thread containing the comment.
-            comment_id: Identifier of the comment to update.
-            user_id: Identifier of the user updating the comment.
-            content: New text content for the comment.
-            
-        Returns:
-            The updated Comment instance if found, None otherwise.
-            
-        Raises:
-            ValueError: If the thread_id or comment_id is invalid.
-            PermissionError: If the user does not have permission to update the comment.
-        """
-        # Get the thread
-        thread = await self.get_thread(thread_id)
-        if not thread:
-            raise ValueError(f"Invalid thread ID: {thread_id}")
-        
-        # Get the comment
-        comment = thread.get_comment(comment_id)
-        if not comment:
-            raise ValueError(f"Invalid comment ID: {comment_id}")
-        
-        # Check if the user is the author of the comment
-        if comment.user_id != user_id:
-            raise PermissionError(f"User {user_id} does not have permission to update comment {comment_id}")
-        
-        # Update the comment
-        comment.update_content(content)
-        
-        # Save the updated thread
-        await self.persistence.save_comment_thread(thread)
-        
-        self.log.info(f"Updated comment {comment_id} in thread {thread_id} by user {user_id}")
-        return comment
-    
-    async def delete_comment(
-        self,
-        thread_id: str,
-        comment_id: str,
-        user_id: str
-    ) -> bool:
-        """Delete a comment from a thread.
-        
-        Args:
-            thread_id: Identifier of the thread containing the comment.
-            comment_id: Identifier of the comment to delete.
-            user_id: Identifier of the user deleting the comment.
-            
-        Returns:
-            True if the comment was deleted, False otherwise.
-            
-        Raises:
-            ValueError: If the thread_id or comment_id is invalid.
-            PermissionError: If the user does not have permission to delete the comment.
-        """
-        # Get the thread
-        thread = await self.get_thread(thread_id)
-        if not thread:
-            raise ValueError(f"Invalid thread ID: {thread_id}")
-        
-        # Get the comment
-        comment = thread.get_comment(comment_id)
-        if not comment:
-            raise ValueError(f"Invalid comment ID: {comment_id}")
-        
-        # Check if the user is the author of the comment
-        if comment.user_id != user_id:
-            raise PermissionError(f"User {user_id} does not have permission to delete comment {comment_id}")
-        
-        # Delete the comment
-        result = thread.delete_comment(comment_id)
-        
-        # Save the updated thread if the comment was deleted
-        if result:
-            await self.persistence.save_comment_thread(thread)
-            self.log.info(f"Deleted comment {comment_id} from thread {thread_id} by user {user_id}")
-        
-        return result
-    
-    async def set_thread_status(
-        self,
-        thread_id: str,
-        user_id: str,
-        status: CommentStatus
-    ) -> Optional[CommentThread]:
-        """Set the status of a comment thread.
-        
-        Args:
-            thread_id: Identifier of the thread to update.
-            user_id: Identifier of the user updating the thread status.
-            status: New status for the thread.
-            
-        Returns:
-            The updated CommentThread instance if found, None otherwise.
-            
-        Raises:
-            ValueError: If the thread_id is invalid.
-            PermissionError: If the user does not have permission to update the thread status.
-        """
-        # Get the thread
-        thread = await self.get_thread(thread_id)
-        if not thread:
-            raise ValueError(f"Invalid thread ID: {thread_id}")
-        
-        # Set the thread status
-        thread.set_status(status)
-        
-        # Save the updated thread
-        await self.persistence.save_comment_thread(thread)
-        
-        self.log.info(f"Set thread {thread_id} status to {status.value} by user {user_id}")
-        return thread
-    
-    async def delete_thread(
-        self,
-        thread_id: str,
-        user_id: str
-    ) -> bool:
-        """Delete a comment thread.
-        
-        Args:
-            thread_id: Identifier of the thread to delete.
-            user_id: Identifier of the user deleting the thread.
-            
-        Returns:
-            True if the thread was deleted, False otherwise.
-            
-        Raises:
-            ValueError: If the thread_id is invalid.
-            PermissionError: If the user does not have permission to delete the thread.
-        """
-        # Get the thread
-        thread = await self.get_thread(thread_id)
-        if not thread:
+        # Get thread info to check permissions
+        thread_info = self.get_thread(thread_id)
+        if not thread_info:
             return False
         
-        # Delete the thread from persistence
-        result = await self.persistence.delete_comment_thread(thread_id)
+        session_id = thread_info['session_id']
+        cell_id = thread_info['cell_id']
         
-        # Remove from in-memory cache if deleted successfully
-        if result:
-            if thread_id in self._threads:
-                del self._threads[thread_id]
-            self.log.info(f"Deleted thread {thread_id} by user {user_id}")
+        # Check permissions if permission manager is available
+        if self.permission_manager:
+            user_identity = {"name": user_id}
+            # Need RESOLVE_THREAD permission to change status
+            if not self.permission_manager.has_cell_permission(
+                session_id, cell_id, user_identity, PermissionAction.RESOLVE_THREAD
+            ):
+                raise PermissionError(f"User {user_id} does not have permission to update thread status")
         
-        return result
+        # Update status
+        if not self.persistence_manager:
+            self.logger.warning("No persistence manager available for thread status update")
+            # Update in-memory status
+            for session_cache in self._comment_cache.values():
+                for cell_cache in session_cache.values():
+                    if thread_id in cell_cache:
+                        # Update thread status
+                        cell_cache[thread_id]['status'] = status
+                        
+                        # Add status change to metadata
+                        if 'status_history' not in cell_cache[thread_id]['metadata']:
+                            cell_cache[thread_id]['metadata']['status_history'] = []
+                        
+                        cell_cache[thread_id]['metadata']['status_history'].append({
+                            'status': status,
+                            'changed_by': user_id,
+                            'timestamp': datetime.utcnow().isoformat()
+                        })
+                        
+                        return True
+            
+            return False
+        else:
+            # Update with persistence manager
+            success = self.persistence_manager.update_thread_status(thread_id, status, user_id)
+            
+            if success:
+                # Queue notification
+                notification_data = {
+                    'thread_id': thread_id,
+                    'status': status,
+                    'updated_by': user_id,
+                    'session_id': session_id,
+                    'cell_id': cell_id
+                }
+                self._queue_notification(session_id, 'thread_status_updated', notification_data)
+            
+            return success
     
-    async def _create_notification(
-        self,
-        thread: CommentThread,
-        comment: Comment
-    ) -> CommentNotification:
-        """Create a notification for a new comment.
+    def delete_comment(self, comment_id: CommentId, user_id: UserId) -> bool:
+        """Delete a comment.
         
         Args:
-            thread: The thread containing the new comment.
-            comment: The new comment to notify about.
+            comment_id: The comment ID to delete
+            user_id: The user deleting the comment
             
         Returns:
-            The created CommentNotification instance.
+            True if successful, False otherwise
+            
+        Raises:
+            PermissionError: If the user doesn't have permission to delete the comment
         """
-        # Determine recipients (all users who have commented in the thread except the author)
-        recipients = set()
-        for existing_comment in thread.comments:
-            if existing_comment.user_id != comment.user_id:
-                recipients.add(existing_comment.user_id)
+        # This is a placeholder implementation
+        # In a real implementation, we would need to:
+        # 1. Find the comment in the database
+        # 2. Check if the user is the comment author or has admin permissions
+        # 3. Soft-delete the comment (mark as deleted but keep in database)
+        # 4. Send notification about the deletion
         
-        # Create the notification
-        notification = CommentNotification(
-            thread_id=thread.thread_id,
-            comment_id=comment.comment_id,
-            user_id=comment.user_id,
-            recipients=recipients
-        )
-        
-        # Add to notification queue
-        if thread.thread_id not in self._notifications:
-            self._notifications[thread.thread_id] = []
-        self._notifications[thread.thread_id].append(notification)
-        
-        # Schedule notification delivery with debounce
-        await self._schedule_notification_delivery(thread.thread_id)
-        
-        return notification
+        self.logger.warning("Comment deletion not fully implemented")
+        return False
     
-    async def _schedule_notification_delivery(self, thread_id: str) -> None:
-        """Schedule delivery of notifications for a thread with debounce.
+    def edit_comment(self, comment_id: CommentId, user_id: UserId, 
+                    new_content: str) -> t.Optional[t.Dict[str, t.Any]]:
+        """Edit a comment.
         
         Args:
-            thread_id: Identifier of the thread to deliver notifications for.
+            comment_id: The comment ID to edit
+            user_id: The user editing the comment
+            new_content: The new comment content
+            
+        Returns:
+            The updated comment data if successful, None otherwise
+            
+        Raises:
+            PermissionError: If the user doesn't have permission to edit the comment
         """
-        # Cancel existing task if any
-        if thread_id in self._notification_tasks and not self._notification_tasks[thread_id].done():
-            self._notification_tasks[thread_id].cancel()
+        # This is a placeholder implementation
+        # In a real implementation, we would need to:
+        # 1. Find the comment in the database
+        # 2. Check if the user is the comment author
+        # 3. Update the comment content
+        # 4. Send notification about the edit
         
-        # Create a new task with debounce
-        task = asyncio.create_task(self._deliver_notifications_with_debounce(thread_id))
-        self._notification_tasks[thread_id] = task
+        self.logger.warning("Comment editing not fully implemented")
+        return None
     
-    async def _deliver_notifications_with_debounce(self, thread_id: str) -> None:
-        """Deliver notifications for a thread after a debounce period.
+    def _queue_notification(self, session_id: str, event_type: str, 
+                          data: t.Dict[str, t.Any]) -> None:
+        """Queue a notification for delivery to clients.
         
         Args:
-            thread_id: Identifier of the thread to deliver notifications for.
+            session_id: The collaboration session ID
+            event_type: The type of event (thread_created, comment_added, etc.)
+            data: The event data
         """
-        try:
-            # Wait for debounce period
-            await asyncio.sleep(self.notification_debounce_ms / 1000)
-            
-            # Get notifications for the thread
-            if thread_id not in self._notifications or not self._notifications[thread_id]:
-                return
-            
-            notifications = self._notifications[thread_id]
-            self._notifications[thread_id] = []
-            
-            # Deliver notifications
-            await self._deliver_notifications(notifications)
-        except asyncio.CancelledError:
-            # Task was cancelled, likely due to a new notification being added
-            pass
-        except Exception as e:
-            self.log.error(f"Error delivering notifications for thread {thread_id}: {e}")
-    
-    async def _deliver_notifications(self, notifications: List[CommentNotification]) -> None:
-        """Deliver a list of notifications to their recipients.
-        
-        Args:
-            notifications: List of notifications to deliver.
-        """
-        if not notifications:
+        if not self.enable_notifications:
             return
         
-        # Group notifications by recipient for efficient delivery
-        recipient_notifications: Dict[str, List[CommentNotification]] = {}
-        for notification in notifications:
-            for recipient in notification.recipients:
-                if recipient not in recipient_notifications:
-                    recipient_notifications[recipient] = []
-                recipient_notifications[recipient].append(notification)
+        if session_id not in self._notification_queue:
+            self._notification_queue[session_id] = []
         
-        # Deliver notifications to each recipient
-        for recipient, recipient_notifs in recipient_notifications.items():
-            try:
-                # Store notifications in persistence for retrieval by clients
-                await self.persistence.save_comment_notifications(recipient, recipient_notifs)
-                
-                # Broadcast notification to connected clients (handled by WebSocket handlers)
-                # This will be implemented in the WebSocket handlers module
-                
-                self.log.debug(f"Delivered {len(recipient_notifs)} notifications to user {recipient}")
-            except Exception as e:
-                self.log.error(f"Error delivering notifications to user {recipient}: {e}")
+        self._notification_queue[session_id].append({
+            'event': event_type,
+            'data': data,
+            'timestamp': datetime.utcnow().isoformat()
+        })
+        
+        # In a real implementation, we would use a debounce mechanism
+        # to batch notifications and send them periodically
+        # For now, we'll just log that a notification was queued
+        self.logger.debug(f"Queued {event_type} notification for session {session_id}")
     
-    async def get_notifications_for_user(
-        self,
-        user_id: str,
-        mark_as_read: bool = False
-    ) -> List[CommentNotification]:
-        """Get all notifications for a user.
+    def get_pending_notifications(self, session_id: str) -> t.List[t.Dict[str, t.Any]]:
+        """Get pending notifications for a session.
         
         Args:
-            user_id: Identifier of the user to get notifications for.
-            mark_as_read: Whether to mark the notifications as read.
+            session_id: The collaboration session ID
             
         Returns:
-            List of CommentNotification instances for the user.
+            A list of notification dictionaries
         """
-        # Get notifications from persistence
-        notifications = await self.persistence.get_comment_notifications_for_user(user_id)
+        if session_id not in self._notification_queue:
+            return []
         
-        # Mark as read if requested
-        if mark_as_read and notifications:
-            await self.persistence.mark_comment_notifications_as_read(user_id, [n.comment_id for n in notifications])
-        
+        notifications = self._notification_queue[session_id]
+        self._notification_queue[session_id] = []
         return notifications
+    
+    def clear_cache(self, session_id: t.Optional[str] = None) -> None:
+        """Clear the comment cache.
+        
+        Args:
+            session_id: Optional session ID to clear cache for.
+                       If None, clear cache for all sessions.
+        """
+        if session_id is None:
+            self._comment_cache = {}
+        elif session_id in self._comment_cache:
+            del self._comment_cache[session_id]
+
+
+class CommentWebSocketHandler(websocket.WebSocketHandler):
+    """WebSocket handler for real-time comment updates.
+    
+    This handler manages WebSocket connections for delivering real-time
+    comment notifications to clients. It handles subscription to comment
+    events and delivers updates when comments are created or modified.
+    """
+    
+    def initialize(self, comment_manager=None, permission_manager=None):
+        """Initialize the handler.
+        
+        Args:
+            comment_manager: The comment manager instance
+            permission_manager: The permission manager instance
+        """
+        self.logger = logging.getLogger(__name__)
+        self.comment_manager = comment_manager
+        self.permission_manager = permission_manager
+        self.session_id = None
+        self.user_id = None
+        self.client_id = None
+    
+    def open(self, session_id=None):
+        """Handle WebSocket connection opening.
+        
+        Args:
+            session_id: The collaboration session ID from the URL
+        """
+        self.logger.info(f"Comment WebSocket opened for session {session_id}")
+        self.session_id = session_id
+    
+    def on_message(self, message):
+        """Handle incoming WebSocket messages.
+        
+        Args:
+            message: The message received from the client
+        """
+        try:
+            data = json.loads(message)
+            action = data.get('action')
+            
+            if action == 'subscribe':
+                self._handle_subscribe(data)
+            elif action == 'create_thread':
+                self._handle_create_thread(data)
+            elif action == 'add_comment':
+                self._handle_add_comment(data)
+            elif action == 'update_status':
+                self._handle_update_status(data)
+            elif action == 'get_threads':
+                self._handle_get_threads(data)
+            else:
+                self.logger.warning(f"Unknown action: {action}")
+                self.write_message(json.dumps({
+                    'error': f"Unknown action: {action}"
+                }))
+        except json.JSONDecodeError:
+            self.logger.error("Invalid JSON message")
+            self.write_message(json.dumps({
+                'error': "Invalid JSON message"
+            }))
+        except Exception as e:
+            self.logger.exception(f"Error handling message: {e}")
+            self.write_message(json.dumps({
+                'error': str(e)
+            }))
+    
+    def _handle_subscribe(self, data):
+        """Handle subscription request.
+        
+        Args:
+            data: The subscription request data
+        """
+        self.user_id = data.get('user_id')
+        self.client_id = data.get('client_id')
+        
+        if not self.user_id or not self.client_id:
+            self.write_message(json.dumps({
+                'error': "Missing user_id or client_id in subscribe request"
+            }))
+            return
+        
+        # Check if user has permission to view comments
+        if self.permission_manager and self.session_id:
+            user_identity = {"name": self.user_id}
+            document_id = self.session_id  # In this simple implementation, session_id is document_id
+            
+            if not self.permission_manager.has_permission(
+                document_id, user_identity, PermissionAction.VIEW_DOCUMENT
+            ):
+                self.write_message(json.dumps({
+                    'error': "You don't have permission to view comments in this document"
+                }))
+                return
+        
+        self.write_message(json.dumps({
+            'event': 'subscribed',
+            'session_id': self.session_id,
+            'user_id': self.user_id,
+            'client_id': self.client_id
+        }))
+        
+        # Send any pending notifications
+        if self.comment_manager and self.session_id:
+            notifications = self.comment_manager.get_pending_notifications(self.session_id)
+            if notifications:
+                self.write_message(json.dumps({
+                    'event': 'notifications',
+                    'notifications': notifications
+                }))
+    
+    def _handle_create_thread(self, data):
+        """Handle thread creation request.
+        
+        Args:
+            data: The thread creation request data
+        """
+        if not self.comment_manager or not self.session_id or not self.user_id:
+            self.write_message(json.dumps({
+                'error': "Not properly initialized or subscribed"
+            }))
+            return
+        
+        cell_id = data.get('cell_id')
+        content = data.get('content')
+        metadata = data.get('metadata', {})
+        
+        if not cell_id or not content:
+            self.write_message(json.dumps({
+                'error': "Missing cell_id or content in create_thread request"
+            }))
+            return
+        
+        try:
+            thread = self.comment_manager.create_thread(
+                self.session_id, cell_id, self.user_id, content, metadata
+            )
+            
+            self.write_message(json.dumps({
+                'event': 'thread_created',
+                'thread': thread
+            }))
+            
+            # In a real implementation, we would broadcast this to all clients
+            # subscribed to this session
+        except PermissionError as e:
+            self.write_message(json.dumps({
+                'error': str(e)
+            }))
+        except Exception as e:
+            self.logger.exception(f"Error creating thread: {e}")
+            self.write_message(json.dumps({
+                'error': f"Error creating thread: {str(e)}"
+            }))
+    
+    def _handle_add_comment(self, data):
+        """Handle comment addition request.
+        
+        Args:
+            data: The comment addition request data
+        """
+        if not self.comment_manager or not self.user_id:
+            self.write_message(json.dumps({
+                'error': "Not properly initialized or subscribed"
+            }))
+            return
+        
+        thread_id = data.get('thread_id')
+        content = data.get('content')
+        metadata = data.get('metadata', {})
+        
+        if not thread_id or not content:
+            self.write_message(json.dumps({
+                'error': "Missing thread_id or content in add_comment request"
+            }))
+            return
+        
+        try:
+            comment = self.comment_manager.add_comment(
+                thread_id, self.user_id, content, metadata
+            )
+            
+            self.write_message(json.dumps({
+                'event': 'comment_added',
+                'comment': comment
+            }))
+            
+            # In a real implementation, we would broadcast this to all clients
+            # subscribed to this session
+        except PermissionError as e:
+            self.write_message(json.dumps({
+                'error': str(e)
+            }))
+        except Exception as e:
+            self.logger.exception(f"Error adding comment: {e}")
+            self.write_message(json.dumps({
+                'error': f"Error adding comment: {str(e)}"
+            }))
+    
+    def _handle_update_status(self, data):
+        """Handle thread status update request.
+        
+        Args:
+            data: The status update request data
+        """
+        if not self.comment_manager or not self.user_id:
+            self.write_message(json.dumps({
+                'error': "Not properly initialized or subscribed"
+            }))
+            return
+        
+        thread_id = data.get('thread_id')
+        status = data.get('status')
+        
+        if not thread_id or not status:
+            self.write_message(json.dumps({
+                'error': "Missing thread_id or status in update_status request"
+            }))
+            return
+        
+        try:
+            success = self.comment_manager.update_thread_status(
+                thread_id, status, self.user_id
+            )
+            
+            if success:
+                self.write_message(json.dumps({
+                    'event': 'status_updated',
+                    'thread_id': thread_id,
+                    'status': status
+                }))
+            else:
+                self.write_message(json.dumps({
+                    'error': f"Failed to update thread status"
+                }))
+            
+            # In a real implementation, we would broadcast this to all clients
+            # subscribed to this session
+        except PermissionError as e:
+            self.write_message(json.dumps({
+                'error': str(e)
+            }))
+        except Exception as e:
+            self.logger.exception(f"Error updating thread status: {e}")
+            self.write_message(json.dumps({
+                'error': f"Error updating thread status: {str(e)}"
+            }))
+    
+    def _handle_get_threads(self, data):
+        """Handle thread retrieval request.
+        
+        Args:
+            data: The thread retrieval request data
+        """
+        if not self.comment_manager or not self.session_id:
+            self.write_message(json.dumps({
+                'error': "Not properly initialized or subscribed"
+            }))
+            return
+        
+        cell_id = data.get('cell_id')
+        status = data.get('status')
+        
+        try:
+            if cell_id:
+                threads = self.comment_manager.get_threads_for_cell(
+                    self.session_id, cell_id, status
+                )
+            else:
+                threads = self.comment_manager.get_threads_for_document(
+                    self.session_id, status
+                )
+            
+            self.write_message(json.dumps({
+                'event': 'threads_retrieved',
+                'threads': threads,
+                'cell_id': cell_id,
+                'status': status
+            }))
+        except Exception as e:
+            self.logger.exception(f"Error retrieving threads: {e}")
+            self.write_message(json.dumps({
+                'error': f"Error retrieving threads: {str(e)}"
+            }))
+    
+    def on_close(self):
+        """Handle WebSocket connection closing."""
+        self.logger.info(f"Comment WebSocket closed for session {self.session_id}")
+    
+    def check_origin(self, origin):
+        """Check if the origin is allowed.
+        
+        Args:
+            origin: The origin of the WebSocket connection
+            
+        Returns:
+            True if the origin is allowed, False otherwise
+        """
+        # In a production environment, this should be more restrictive
+        return True
 
 
 class CommentHandler(JupyterHandler):
-    """Handler for comment-related HTTP requests.
+    """HTTP handler for comment operations.
     
-    This handler provides REST API endpoints for managing comment threads and comments.
+    This handler provides REST API endpoints for comment operations,
+    allowing clients to create, retrieve, update, and delete comments
+    using standard HTTP methods.
     """
     
-    @web.authenticated
-    async def get(self, path: str) -> None:
-        """Handle GET requests for comments.
+    def initialize(self, comment_manager=None, permission_manager=None):
+        """Initialize the handler.
         
         Args:
-            path: Request path.
+            comment_manager: The comment manager instance
+            permission_manager: The permission manager instance
         """
-        # Get the comment manager from the application
-        comment_manager = self.settings.get("comment_manager")
-        if not comment_manager:
-            raise web.HTTPError(500, "Comment manager not available")
-        
-        # Parse the path to determine the action
-        parts = path.strip("/").split("/")
-        
-        if not parts or parts[0] == "":
-            # Get all threads for the current user
-            user_id = self.current_user.name
-            threads = await comment_manager.get_threads_for_session(user_id)
-            self.write({"threads": [thread.to_dict() for thread in threads]})
-            return
-        
-        if parts[0] == "thread":
-            if len(parts) < 2:
-                raise web.HTTPError(400, "Thread ID required")
-            
-            thread_id = parts[1]
-            thread = await comment_manager.get_thread(thread_id)
-            
-            if not thread:
-                raise web.HTTPError(404, f"Thread {thread_id} not found")
-            
-            self.write(thread.to_dict())
-            return
-        
-        if parts[0] == "cell":
-            if len(parts) < 3:
-                raise web.HTTPError(400, "Session ID and cell ID required")
-            
-            session_id = parts[1]
-            cell_id = parts[2]
-            
-            threads = await comment_manager.get_threads_for_cell(session_id, cell_id)
-            self.write({"threads": [thread.to_dict() for thread in threads]})
-            return
-        
-        if parts[0] == "session":
-            if len(parts) < 2:
-                raise web.HTTPError(400, "Session ID required")
-            
-            session_id = parts[1]
-            threads = await comment_manager.get_threads_for_session(session_id)
-            self.write({"threads": [thread.to_dict() for thread in threads]})
-            return
-        
-        if parts[0] == "notifications":
-            user_id = self.current_user.name
-            mark_as_read = self.get_argument("mark_as_read", "false").lower() == "true"
-            
-            notifications = await comment_manager.get_notifications_for_user(user_id, mark_as_read)
-            self.write({"notifications": [notification.to_dict() for notification in notifications]})
-            return
-        
-        raise web.HTTPError(404, f"Unknown comment endpoint: {path}")
+        self.logger = logging.getLogger(__name__)
+        self.comment_manager = comment_manager
+        self.permission_manager = permission_manager
     
     @web.authenticated
-    async def post(self, path: str) -> None:
-        """Handle POST requests for comments.
+    @collaborative_authorized("CREATE_THREAD")
+    async def post(self, session_id, cell_id=None):
+        """Handle POST requests to create a new comment thread.
         
         Args:
-            path: Request path.
+            session_id: The collaboration session ID from the URL
+            cell_id: The cell ID from the URL (optional)
         """
-        # Get the comment manager from the application
-        comment_manager = self.settings.get("comment_manager")
-        if not comment_manager:
+        if not self.comment_manager:
             raise web.HTTPError(500, "Comment manager not available")
         
-        # Parse the request body
+        # Get user ID from current user
+        user_id = self.current_user.get('name', None)
+        if not user_id:
+            raise web.HTTPError(401, "User not authenticated")
+        
+        # Parse request body
         try:
-            data = json.loads(self.request.body.decode("utf-8"))
+            data = json.loads(self.request.body)
         except json.JSONDecodeError:
             raise web.HTTPError(400, "Invalid JSON in request body")
         
-        # Parse the path to determine the action
-        parts = path.strip("/").split("/")
+        # If cell_id not in URL, get from request body
+        if not cell_id:
+            cell_id = data.get('cell_id')
         
-        if not parts or parts[0] == "":
-            # Create a new thread
-            if "session_id" not in data or "cell_id" not in data:
-                raise web.HTTPError(400, "Session ID and cell ID required")
-            
-            user_id = self.current_user.name
-            session_id = data["session_id"]
-            cell_id = data["cell_id"]
-            initial_comment = data.get("initial_comment")
-            metadata = data.get("metadata")
-            
-            try:
-                thread = await comment_manager.create_thread(
-                    session_id=session_id,
-                    cell_id=cell_id,
-                    user_id=user_id,
-                    initial_comment=initial_comment,
-                    metadata=metadata
-                )
-                self.write(thread.to_dict())
-            except ValueError as e:
-                raise web.HTTPError(400, str(e))
-            except PermissionError as e:
-                raise web.HTTPError(403, str(e))
-            
-            return
+        content = data.get('content')
+        metadata = data.get('metadata', {})
         
-        if parts[0] == "thread":
-            if len(parts) < 2:
-                raise web.HTTPError(400, "Thread ID required")
-            
-            thread_id = parts[1]
-            
-            if len(parts) >= 3 and parts[2] == "comment":
-                # Add a comment to a thread
-                if "content" not in data:
-                    raise web.HTTPError(400, "Comment content required")
-                
-                user_id = self.current_user.name
-                content = data["content"]
-                metadata = data.get("metadata")
-                
-                try:
-                    comment = await comment_manager.add_comment(
-                        thread_id=thread_id,
-                        user_id=user_id,
-                        content=content,
-                        metadata=metadata
-                    )
-                    self.write(comment.to_dict())
-                except ValueError as e:
-                    raise web.HTTPError(400, str(e))
-                except PermissionError as e:
-                    raise web.HTTPError(403, str(e))
-                
-                return
-            
-            if len(parts) >= 3 and parts[2] == "status":
-                # Set thread status
-                if "status" not in data:
-                    raise web.HTTPError(400, "Thread status required")
-                
-                user_id = self.current_user.name
-                status_str = data["status"]
-                
-                try:
-                    status = CommentStatus(status_str)
-                except ValueError:
-                    raise web.HTTPError(400, f"Invalid thread status: {status_str}")
-                
-                try:
-                    thread = await comment_manager.set_thread_status(
-                        thread_id=thread_id,
-                        user_id=user_id,
-                        status=status
-                    )
-                    if thread:
-                        self.write(thread.to_dict())
-                    else:
-                        raise web.HTTPError(404, f"Thread {thread_id} not found")
-                except ValueError as e:
-                    raise web.HTTPError(400, str(e))
-                except PermissionError as e:
-                    raise web.HTTPError(403, str(e))
-                
-                return
+        if not cell_id or not content:
+            raise web.HTTPError(400, "Missing cell_id or content in request")
         
-        raise web.HTTPError(404, f"Unknown comment endpoint: {path}")
+        try:
+            thread = self.comment_manager.create_thread(
+                session_id, cell_id, user_id, content, metadata
+            )
+            
+            self.set_status(201)  # Created
+            self.write(json.dumps(thread))
+        except PermissionError as e:
+            raise web.HTTPError(403, str(e))
+        except Exception as e:
+            self.logger.exception(f"Error creating thread: {e}")
+            raise web.HTTPError(500, f"Error creating thread: {str(e)}")
     
     @web.authenticated
-    async def put(self, path: str) -> None:
-        """Handle PUT requests for comments.
+    @collaborative_authorized("VIEW_DOCUMENT")
+    async def get(self, session_id, thread_id=None, cell_id=None):
+        """Handle GET requests to retrieve comment threads.
         
         Args:
-            path: Request path.
+            session_id: The collaboration session ID from the URL
+            thread_id: The thread ID from the URL (optional)
+            cell_id: The cell ID from the URL (optional)
         """
-        # Get the comment manager from the application
-        comment_manager = self.settings.get("comment_manager")
-        if not comment_manager:
+        if not self.comment_manager:
             raise web.HTTPError(500, "Comment manager not available")
         
-        # Parse the request body
+        # Get status filter from query parameters
+        status = self.get_query_argument('status', None)
+        
         try:
-            data = json.loads(self.request.body.decode("utf-8"))
+            if thread_id:
+                # Get specific thread
+                thread = self.comment_manager.get_thread(thread_id)
+                if not thread:
+                    raise web.HTTPError(404, f"Thread {thread_id} not found")
+                
+                self.write(json.dumps(thread))
+            elif cell_id:
+                # Get threads for cell
+                threads = self.comment_manager.get_threads_for_cell(
+                    session_id, cell_id, status
+                )
+                self.write(json.dumps(threads))
+            else:
+                # Get all threads for document
+                threads = self.comment_manager.get_threads_for_document(
+                    session_id, status
+                )
+                self.write(json.dumps(threads))
+        except Exception as e:
+            self.logger.exception(f"Error retrieving threads: {e}")
+            raise web.HTTPError(500, f"Error retrieving threads: {str(e)}")
+    
+    @web.authenticated
+    @collaborative_authorized("REPLY_THREAD")
+    async def put(self, session_id, thread_id):
+        """Handle PUT requests to add a comment to a thread or update thread status.
+        
+        Args:
+            session_id: The collaboration session ID from the URL
+            thread_id: The thread ID from the URL
+        """
+        if not self.comment_manager:
+            raise web.HTTPError(500, "Comment manager not available")
+        
+        # Get user ID from current user
+        user_id = self.current_user.get('name', None)
+        if not user_id:
+            raise web.HTTPError(401, "User not authenticated")
+        
+        # Parse request body
+        try:
+            data = json.loads(self.request.body)
         except json.JSONDecodeError:
             raise web.HTTPError(400, "Invalid JSON in request body")
         
-        # Parse the path to determine the action
-        parts = path.strip("/").split("/")
+        action = data.get('action')
         
-        if parts[0] == "thread" and len(parts) >= 4 and parts[2] == "comment":
-            # Update a comment
-            thread_id = parts[1]
-            comment_id = parts[3]
-            
-            if "content" not in data:
-                raise web.HTTPError(400, "Comment content required")
-            
-            user_id = self.current_user.name
-            content = data["content"]
-            
-            try:
-                comment = await comment_manager.update_comment(
-                    thread_id=thread_id,
-                    comment_id=comment_id,
-                    user_id=user_id,
-                    content=content
+        try:
+            if action == 'add_comment':
+                content = data.get('content')
+                metadata = data.get('metadata', {})
+                
+                if not content:
+                    raise web.HTTPError(400, "Missing content in request")
+                
+                comment = self.comment_manager.add_comment(
+                    thread_id, user_id, content, metadata
                 )
-                if comment:
-                    self.write(comment.to_dict())
-                else:
-                    raise web.HTTPError(404, f"Comment {comment_id} not found in thread {thread_id}")
-            except ValueError as e:
-                raise web.HTTPError(400, str(e))
-            except PermissionError as e:
-                raise web.HTTPError(403, str(e))
-            
-            return
-        
-        raise web.HTTPError(404, f"Unknown comment endpoint: {path}")
-    
-    @web.authenticated
-    async def delete(self, path: str) -> None:
-        """Handle DELETE requests for comments.
-        
-        Args:
-            path: Request path.
-        """
-        # Get the comment manager from the application
-        comment_manager = self.settings.get("comment_manager")
-        if not comment_manager:
-            raise web.HTTPError(500, "Comment manager not available")
-        
-        # Parse the path to determine the action
-        parts = path.strip("/").split("/")
-        
-        if parts[0] == "thread" and len(parts) >= 2:
-            thread_id = parts[1]
-            
-            if len(parts) == 2:
-                # Delete a thread
-                user_id = self.current_user.name
                 
-                try:
-                    result = await comment_manager.delete_thread(
-                        thread_id=thread_id,
-                        user_id=user_id
-                    )
-                    if result:
-                        self.write({"success": True})
-                    else:
-                        raise web.HTTPError(404, f"Thread {thread_id} not found")
-                except ValueError as e:
-                    raise web.HTTPError(400, str(e))
-                except PermissionError as e:
-                    raise web.HTTPError(403, str(e))
+                self.write(json.dumps(comment))
+            elif action == 'update_status':
+                status = data.get('status')
                 
-                return
-            
-            if len(parts) >= 4 and parts[2] == "comment":
-                # Delete a comment
-                comment_id = parts[3]
-                user_id = self.current_user.name
+                if not status:
+                    raise web.HTTPError(400, "Missing status in request")
                 
-                try:
-                    result = await comment_manager.delete_comment(
-                        thread_id=thread_id,
-                        comment_id=comment_id,
-                        user_id=user_id
-                    )
-                    if result:
-                        self.write({"success": True})
-                    else:
-                        raise web.HTTPError(404, f"Comment {comment_id} not found in thread {thread_id}")
-                except ValueError as e:
-                    raise web.HTTPError(400, str(e))
-                except PermissionError as e:
-                    raise web.HTTPError(403, str(e))
+                success = self.comment_manager.update_thread_status(
+                    thread_id, status, user_id
+                )
                 
-                return
-        
-        raise web.HTTPError(404, f"Unknown comment endpoint: {path}")
+                if not success:
+                    raise web.HTTPError(404, f"Thread {thread_id} not found")
+                
+                self.write(json.dumps({'success': True, 'status': status}))
+            else:
+                raise web.HTTPError(400, f"Unknown action: {action}")
+        except PermissionError as e:
+            raise web.HTTPError(403, str(e))
+        except KeyError as e:
+            raise web.HTTPError(404, str(e))
+        except ValueError as e:
+            raise web.HTTPError(400, str(e))
+        except Exception as e:
+            self.logger.exception(f"Error processing request: {e}")
+            raise web.HTTPError(500, f"Error processing request: {str(e)}")
 
 
-def setup_comment_handlers(web_app: web.Application, comment_manager: CommentManager) -> None:
-    """Set up the comment handlers for the web application.
+def setup_handlers(web_app, comment_manager=None, permission_manager=None):
+    """Set up the comment handlers for the Jupyter web application.
     
     Args:
-        web_app: The Tornado web application.
-        comment_manager: The CommentManager instance.
+        web_app: The Jupyter web application
+        comment_manager: The comment manager instance
+        permission_manager: The permission manager instance
     """
     host_pattern = ".*$"
-    base_url = web_app.settings["base_url"]
     
-    # Add the comment manager to the application settings
-    web_app.settings["comment_manager"] = comment_manager
+    # HTTP handlers
+    comment_handlers = [
+        # Get all threads for a document
+        (r"/api/collaboration/sessions/([^/]+)/comments", CommentHandler, {
+            'comment_manager': comment_manager,
+            'permission_manager': permission_manager
+        }),
+        # Get all threads for a cell
+        (r"/api/collaboration/sessions/([^/]+)/cells/([^/]+)/comments", CommentHandler, {
+            'comment_manager': comment_manager,
+            'permission_manager': permission_manager
+        }),
+        # Get/update a specific thread
+        (r"/api/collaboration/sessions/([^/]+)/comments/([^/]+)", CommentHandler, {
+            'comment_manager': comment_manager,
+            'permission_manager': permission_manager
+        }),
+    ]
     
-    # Register the comment handler
-    comment_pattern = url_path_join(base_url, "api", "comments", "(.*)")
-    handlers = [(comment_pattern, CommentHandler)]
+    # WebSocket handler
+    websocket_handlers = [
+        (r"/api/collaboration/sessions/([^/]+)/comments/ws", CommentWebSocketHandler, {
+            'comment_manager': comment_manager,
+            'permission_manager': permission_manager
+        }),
+    ]
     
-    web_app.add_handlers(host_pattern, handlers)
+    web_app.add_handlers(host_pattern, comment_handlers)
+    web_app.add_handlers(host_pattern, websocket_handlers)
