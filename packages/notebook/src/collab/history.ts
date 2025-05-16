@@ -1,1132 +1,1170 @@
 // Copyright (c) Jupyter Development Team.
 // Distributed under the terms of the Modified BSD License.
 
-import { ISignal, Signal } from '@lumino/signaling';
 import { INotebookModel } from '../model';
+import { ISignal, Signal } from '@lumino/signaling';
+import { Token } from '@lumino/coreutils';
 import * as Y from 'yjs';
-import { ICellModel } from '@jupyterlab/cells';
+import { ICollaborationProvider } from './provider';
 
 /**
- * Interface for a version history entry.
+ * The version history token.
+ *
+ * This token is used to provide a version history service for collaborative notebooks.
+ * The version history service tracks changes to the notebook and allows users to
+ * view, compare, and restore previous versions.
  */
-export interface IVersionEntry {
+export const IVersionHistory = new Token<IVersionHistory>(
+  '@jupyterlab/notebook:IVersionHistory'
+);
+
+/**
+ * Interface for a version snapshot.
+ *
+ * A version snapshot represents the state of a notebook at a specific point in time.
+ * It includes metadata about the version (timestamp, author) and the state of the
+ * document at that time.
+ */
+export interface IVersionSnapshot {
   /**
    * The unique identifier for this version.
    */
-  readonly id: string;
+  id: string;
 
   /**
    * The timestamp when this version was created.
    */
-  readonly timestamp: number;
+  timestamp: number;
 
   /**
    * The user who created this version.
    */
-  readonly user: {
+  author: {
+    /**
+     * The user ID.
+     */
     id: string;
+
+    /**
+     * The user name.
+     */
     name: string;
-    color?: string;
-    avatar?: string;
+
+    /**
+     * The user color.
+     */
+    color: string;
   };
 
   /**
    * A description of the changes in this version.
    */
-  readonly description: string;
+  description: string;
 
   /**
-   * The encoded snapshot of the document at this version.
+   * The Yjs document state vector at this version.
    */
-  readonly snapshot: Uint8Array;
+  stateVector: Uint8Array;
 
   /**
-   * The encoded snapshot of the document before this version.
+   * The Yjs document update that led to this version.
    */
-  readonly prevSnapshot?: Uint8Array;
+  update: Uint8Array;
 
   /**
-   * Whether this version is a named checkpoint.
+   * Whether this version is a major version (e.g., explicitly saved by a user).
    */
-  readonly isCheckpoint: boolean;
+  isMajorVersion: boolean;
 
   /**
-   * Optional metadata for this version.
+   * Cell-specific changes in this version.
    */
-  readonly metadata?: { [key: string]: any };
+  cellChanges: ICellChange[];
 }
 
 /**
- * Interface for a cell change in the diff.
+ * Interface for a cell change.
+ */
+export interface ICellChange {
+  /**
+   * The cell ID.
+   */
+  cellId: string;
+
+  /**
+   * The type of change.
+   */
+  changeType: 'added' | 'modified' | 'removed' | 'moved';
+
+  /**
+   * The previous index of the cell (for moves).
+   */
+  previousIndex?: number;
+
+  /**
+   * The new index of the cell (for moves).
+   */
+  newIndex?: number;
+
+  /**
+   * The previous content of the cell (for modifications).
+   */
+  previousContent?: string;
+
+  /**
+   * The new content of the cell (for modifications).
+   */
+  newContent?: string;
+}
+
+/**
+ * Interface for a version comparison result.
+ */
+export interface IVersionComparison {
+  /**
+   * The older version being compared.
+   */
+  oldVersion: IVersionSnapshot;
+
+  /**
+   * The newer version being compared.
+   */
+  newVersion: IVersionSnapshot;
+
+  /**
+   * The differences between the versions.
+   */
+  differences: {
+    /**
+     * Cells that were added.
+     */
+    added: ICellDiff[];
+
+    /**
+     * Cells that were removed.
+     */
+    removed: ICellDiff[];
+
+    /**
+     * Cells that were modified.
+     */
+    modified: ICellDiff[];
+
+    /**
+     * Cells that were moved.
+     */
+    moved: ICellDiff[];
+
+    /**
+     * Changes to notebook metadata.
+     */
+    metadataChanges: IMetadataDiff[];
+  };
+}
+
+/**
+ * Interface for a cell difference.
  */
 export interface ICellDiff {
   /**
    * The cell ID.
    */
-  readonly cellId: string;
+  cellId: string;
 
   /**
    * The cell type.
    */
-  readonly cellType: 'code' | 'markdown' | 'raw';
+  cellType: string;
+
+  /**
+   * The index of the cell in the old version.
+   */
+  oldIndex?: number;
+
+  /**
+   * The index of the cell in the new version.
+   */
+  newIndex?: number;
+
+  /**
+   * The content of the cell in the old version.
+   */
+  oldContent?: string;
+
+  /**
+   * The content of the cell in the new version.
+   */
+  newContent?: string;
+
+  /**
+   * The line-by-line differences in the cell content.
+   */
+  contentDiff?: ILineDiff[];
+
+  /**
+   * The metadata of the cell in the old version.
+   */
+  oldMetadata?: any;
+
+  /**
+   * The metadata of the cell in the new version.
+   */
+  newMetadata?: any;
+
+  /**
+   * The metadata differences.
+   */
+  metadataDiff?: IMetadataDiff[];
+
+  /**
+   * The outputs of the cell in the old version (for code cells).
+   */
+  oldOutputs?: any[];
+
+  /**
+   * The outputs of the cell in the new version (for code cells).
+   */
+  newOutputs?: any[];
+}
+
+/**
+ * Interface for a line difference.
+ */
+export interface ILineDiff {
+  /**
+   * The type of difference.
+   */
+  type: 'added' | 'removed' | 'unchanged';
+
+  /**
+   * The line content.
+   */
+  content: string;
+
+  /**
+   * The line number in the old version.
+   */
+  oldLineNumber?: number;
+
+  /**
+   * The line number in the new version.
+   */
+  newLineNumber?: number;
+}
+
+/**
+ * Interface for a metadata difference.
+ */
+export interface IMetadataDiff {
+  /**
+   * The key of the metadata property.
+   */
+  key: string;
+
+  /**
+   * The old value of the metadata property.
+   */
+  oldValue?: any;
+
+  /**
+   * The new value of the metadata property.
+   */
+  newValue?: any;
 
   /**
    * The type of change.
    */
-  readonly changeType: 'added' | 'removed' | 'modified' | 'unchanged';
-
-  /**
-   * The index of the cell in the previous version.
-   */
-  readonly prevIndex?: number;
-
-  /**
-   * The index of the cell in the current version.
-   */
-  readonly currentIndex?: number;
-
-  /**
-   * The previous content of the cell.
-   */
-  readonly prevContent?: string;
-
-  /**
-   * The current content of the cell.
-   */
-  readonly currentContent?: string;
-
-  /**
-   * The user who made the change.
-   */
-  readonly user?: {
-    id: string;
-    name: string;
-    color?: string;
-    avatar?: string;
-  };
-
-  /**
-   * The timestamp of the change.
-   */
-  readonly timestamp?: number;
-
-  /**
-   * For code cells, the changes in outputs.
-   */
-  readonly outputChanges?: {
-    changeType: 'added' | 'removed' | 'modified' | 'unchanged';
-    prevOutput?: any;
-    currentOutput?: any;
-  }[];
-
-  /**
-   * For code cells, the change in execution count.
-   */
-  readonly executionCountChange?: {
-    prev: number | null;
-    current: number | null;
-  };
-
-  /**
-   * Changes in cell metadata.
-   */
-  readonly metadataChanges?: {
-    key: string;
-    changeType: 'added' | 'removed' | 'modified';
-    prevValue?: any;
-    currentValue?: any;
-  }[];
+  changeType: 'added' | 'removed' | 'modified';
 }
 
 /**
- * Interface for a document diff between two versions.
- */
-export interface IVersionDiff {
-  /**
-   * The ID of the previous version.
-   */
-  readonly prevVersionId: string;
-
-  /**
-   * The ID of the current version.
-   */
-  readonly currentVersionId: string;
-
-  /**
-   * The timestamp of the previous version.
-   */
-  readonly prevTimestamp: number;
-
-  /**
-   * The timestamp of the current version.
-   */
-  readonly currentTimestamp: number;
-
-  /**
-   * The user who created the current version.
-   */
-  readonly user: {
-    id: string;
-    name: string;
-    color?: string;
-    avatar?: string;
-  };
-
-  /**
-   * The cell changes in this diff.
-   */
-  readonly cellDiffs: ICellDiff[];
-
-  /**
-   * Changes in notebook metadata.
-   */
-  readonly metadataChanges: {
-    key: string;
-    changeType: 'added' | 'removed' | 'modified';
-    prevValue?: any;
-    currentValue?: any;
-  }[];
-
-  /**
-   * A summary of the changes.
-   */
-  readonly summary: string;
-}
-
-/**
- * Interface for version history options.
- */
-export interface IVersionHistoryOptions {
-  /**
-   * The maximum number of versions to keep.
-   * If not specified, all versions are kept.
-   */
-  maxVersions?: number;
-
-  /**
-   * The minimum time interval (in milliseconds) between automatic snapshots.
-   * Default is 60000 (1 minute).
-   */
-  snapshotInterval?: number;
-
-  /**
-   * Whether to automatically create snapshots when changes occur.
-   * Default is true.
-   */
-  autoSnapshot?: boolean;
-
-  /**
-   * Whether to track cell-level changes.
-   * Default is true.
-   */
-  trackCellChanges?: boolean;
-
-  /**
-   * The current user information.
-   */
-  currentUser?: {
-    id: string;
-    name: string;
-    color?: string;
-    avatar?: string;
-  };
-}
-
-/**
- * Interface for the version history service.
+ * Interface for a version history service.
+ *
+ * The version history service tracks changes to a collaborative notebook and
+ * allows users to view, compare, and restore previous versions.
  */
 export interface IVersionHistory {
   /**
    * A signal emitted when a new version is created.
    */
-  readonly versionCreated: ISignal<IVersionHistory, IVersionEntry>;
+  readonly versionCreated: ISignal<IVersionHistory, IVersionSnapshot>;
 
   /**
-   * A signal emitted when the current version changes.
+   * Get all versions of the document.
+   *
+   * @returns A promise that resolves to an array of version snapshots.
    */
-  readonly currentVersionChanged: ISignal<IVersionHistory, IVersionEntry>;
+  getVersions(): Promise<IVersionSnapshot[]>;
 
   /**
-   * A signal emitted when versions are loaded.
+   * Get a specific version of the document.
+   *
+   * @param versionId - The ID of the version to retrieve.
+   * @returns A promise that resolves to the version snapshot, or undefined if not found.
    */
-  readonly versionsLoaded: ISignal<IVersionHistory, IVersionEntry[]>;
-
-  /**
-   * The current version entry.
-   */
-  readonly currentVersion: IVersionEntry | null;
-
-  /**
-   * The list of all version entries.
-   */
-  readonly versions: ReadonlyArray<IVersionEntry>;
-
-  /**
-   * Connect this history tracker to a notebook document.
-   */
-  connectDocument(document: INotebookModel): void;
-
-  /**
-   * Disconnect this history tracker from a notebook document.
-   */
-  disconnectDocument(document: INotebookModel): void;
+  getVersion(versionId: string): Promise<IVersionSnapshot | undefined>;
 
   /**
    * Create a new version snapshot.
-   * 
+   *
    * @param description - A description of the changes in this version.
-   * @param isCheckpoint - Whether this version is a named checkpoint.
-   * @param metadata - Optional metadata for this version.
-   * @returns The created version entry.
+   * @param isMajorVersion - Whether this is a major version (e.g., explicitly saved by a user).
+   * @returns A promise that resolves to the created version snapshot.
    */
-  createVersion(description: string, isCheckpoint?: boolean, metadata?: { [key: string]: any }): Promise<IVersionEntry>;
+  createVersion(description: string, isMajorVersion?: boolean): Promise<IVersionSnapshot>;
 
   /**
-   * Get a specific version by ID.
-   * 
-   * @param versionId - The ID of the version to get.
-   * @returns The version entry, or null if not found.
+   * Compare two versions of the document.
+   *
+   * @param oldVersionId - The ID of the older version.
+   * @param newVersionId - The ID of the newer version.
+   * @returns A promise that resolves to the version comparison result.
    */
-  getVersion(versionId: string): IVersionEntry | null;
+  compareVersions(oldVersionId: string, newVersionId: string): Promise<IVersionComparison>;
 
   /**
-   * Restore the document to a specific version.
-   * 
-   * @param versionId - The ID of the version to restore to.
+   * Restore the document to a previous version.
+   *
+   * @param versionId - The ID of the version to restore.
    * @returns A promise that resolves when the restoration is complete.
    */
   restoreVersion(versionId: string): Promise<void>;
 
   /**
-   * Get the diff between two versions.
-   * 
-   * @param currentVersionId - The ID of the current version.
-   * @param prevVersionId - The ID of the previous version.
-   * @returns The diff between the two versions.
-   */
-  getDiff(currentVersionId: string, prevVersionId: string): IVersionDiff | null;
-
-  /**
-   * Get the diff between the current version and the previous version.
-   * 
-   * @returns The diff between the current and previous versions, or null if there is no previous version.
-   */
-  getCurrentDiff(): IVersionDiff | null;
-
-  /**
-   * Get the cell-level changes for a specific cell between two versions.
-   * 
+   * Get the changes made to a specific cell across versions.
+   *
    * @param cellId - The ID of the cell.
-   * @param currentVersionId - The ID of the current version.
-   * @param prevVersionId - The ID of the previous version.
-   * @returns The cell diff, or null if the cell doesn't exist in either version.
+   * @returns A promise that resolves to an array of cell changes.
    */
-  getCellDiff(cellId: string, currentVersionId: string, prevVersionId: string): ICellDiff | null;
+  getCellHistory(cellId: string): Promise<ICellChange[]>;
 
   /**
-   * Load versions from storage.
-   * 
-   * @returns A promise that resolves when versions are loaded.
+   * Get the document state at a specific version.
+   *
+   * @param versionId - The ID of the version.
+   * @returns A promise that resolves to a Yjs document with the state at that version.
    */
-  loadVersions(): Promise<IVersionEntry[]>;
-
-  /**
-   * Save versions to storage.
-   * 
-   * @returns A promise that resolves when versions are saved.
-   */
-  saveVersions(): Promise<void>;
-
-  /**
-   * Clear all versions.
-   * 
-   * @returns A promise that resolves when versions are cleared.
-   */
-  clearVersions(): Promise<void>;
+  getDocumentAtVersion(versionId: string): Promise<Y.Doc>;
 }
 
 /**
- * A class that implements version history tracking for collaborative notebooks.
+ * Implementation of the version history service for collaborative notebooks.
+ *
+ * This class tracks changes to a collaborative notebook using Yjs update events
+ * and provides methods to view, compare, and restore previous versions.
  */
 export class HistoryTracker implements IVersionHistory {
   /**
-   * Create a new HistoryTracker.
-   * 
+   * Construct a new HistoryTracker.
+   *
    * @param options - The options for the history tracker.
    */
-  constructor(options: IVersionHistoryOptions = {}) {
-    this._options = {
-      maxVersions: options.maxVersions,
-      snapshotInterval: options.snapshotInterval || 60000, // Default: 1 minute
-      autoSnapshot: options.autoSnapshot !== false, // Default: true
-      trackCellChanges: options.trackCellChanges !== false, // Default: true
-      currentUser: options.currentUser || {
-        id: 'anonymous',
-        name: 'Anonymous'
-      }
-    };
+  constructor(options: HistoryTracker.IOptions) {
+    this._collaborationProvider = options.collaborationProvider;
+    this._notebookModel = options.notebookModel;
+    this._maxVersions = options.maxVersions || 100;
+    this._snapshotInterval = options.snapshotInterval || 60000; // 1 minute by default
+
+    // Initialize the version history
+    this._initializeHistory();
+
+    // Set up update listeners
+    this._setupListeners();
+
+    // Start the snapshot timer
+    this._startSnapshotTimer();
   }
 
   /**
    * A signal emitted when a new version is created.
    */
-  get versionCreated(): ISignal<this, IVersionEntry> {
+  get versionCreated(): ISignal<IVersionHistory, IVersionSnapshot> {
     return this._versionCreated;
   }
 
   /**
-   * A signal emitted when the current version changes.
+   * Get all versions of the document.
+   *
+   * @returns A promise that resolves to an array of version snapshots.
    */
-  get currentVersionChanged(): ISignal<this, IVersionEntry> {
-    return this._currentVersionChanged;
+  async getVersions(): Promise<IVersionSnapshot[]> {
+    return [...this._versions];
   }
 
   /**
-   * A signal emitted when versions are loaded.
+   * Get a specific version of the document.
+   *
+   * @param versionId - The ID of the version to retrieve.
+   * @returns A promise that resolves to the version snapshot, or undefined if not found.
    */
-  get versionsLoaded(): ISignal<this, IVersionEntry[]> {
-    return this._versionsLoaded;
-  }
-
-  /**
-   * The current version entry.
-   */
-  get currentVersion(): IVersionEntry | null {
-    return this._currentVersion;
-  }
-
-  /**
-   * The list of all version entries.
-   */
-  get versions(): ReadonlyArray<IVersionEntry> {
-    return this._versions;
-  }
-
-  /**
-   * Connect this history tracker to a notebook document.
-   */
-  connectDocument(document: INotebookModel): void {
-    if (this._document === document) {
-      return;
-    }
-
-    // Disconnect from any existing document
-    this.disconnectDocument(this._document);
-
-    // Connect to the new document
-    this._document = document;
-
-    // Get the Yjs document from the collaboration provider
-    if (document.isCollaborative && document.collaborationProvider) {
-      this._ydoc = document.collaborationProvider.ydoc;
-
-      if (this._ydoc) {
-        // Listen for Yjs document updates
-        this._ydoc.on('update', this._onYDocUpdate.bind(this));
-
-        // Create an initial snapshot if no versions exist
-        if (this._versions.length === 0) {
-          this._createInitialSnapshot();
-        }
-
-        // Set up auto-snapshot timer if enabled
-        if (this._options.autoSnapshot) {
-          this._setupAutoSnapshot();
-        }
-      }
-    }
-
-    // Load existing versions
-    this.loadVersions().catch(error => {
-      console.error('Failed to load versions:', error);
-    });
-  }
-
-  /**
-   * Disconnect this history tracker from a notebook document.
-   */
-  disconnectDocument(document: INotebookModel | null): void {
-    if (!document || this._document !== document) {
-      return;
-    }
-
-    // Clear the auto-snapshot timer
-    if (this._autoSnapshotTimer) {
-      clearTimeout(this._autoSnapshotTimer);
-      this._autoSnapshotTimer = null;
-    }
-
-    // Remove Yjs document update listener
-    if (this._ydoc) {
-      this._ydoc.off('update', this._onYDocUpdate);
-      this._ydoc = null;
-    }
-
-    this._document = null;
+  async getVersion(versionId: string): Promise<IVersionSnapshot | undefined> {
+    return this._versions.find(version => version.id === versionId);
   }
 
   /**
    * Create a new version snapshot.
-   * 
+   *
    * @param description - A description of the changes in this version.
-   * @param isCheckpoint - Whether this version is a named checkpoint.
-   * @param metadata - Optional metadata for this version.
-   * @returns The created version entry.
+   * @param isMajorVersion - Whether this is a major version (e.g., explicitly saved by a user).
+   * @returns A promise that resolves to the created version snapshot.
    */
-  async createVersion(
-    description: string,
-    isCheckpoint: boolean = false,
-    metadata: { [key: string]: any } = {}
-  ): Promise<IVersionEntry> {
-    if (!this._document || !this._ydoc) {
-      throw new Error('No document connected to history tracker');
-    }
+  async createVersion(description: string, isMajorVersion = false): Promise<IVersionSnapshot> {
+    const ydoc = this._collaborationProvider.ydoc;
+    const awareness = this._collaborationProvider.awareness;
+    const localState = awareness.getLocalState() || {};
+    const user = localState.user || { id: 'unknown', name: 'Unknown User', color: '#000000' };
 
-    // Create a snapshot of the current document state
-    const snapshot = Y.encodeStateAsUpdate(this._ydoc);
-    
-    // Get the previous snapshot if available
-    const prevSnapshot = this._currentVersion?.snapshot;
+    // Create a state vector for this version
+    const stateVector = Y.encodeStateVector(ydoc);
 
-    // Create a new version entry
-    const versionEntry: IVersionEntry = {
-      id: `v-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+    // Create an update for this version
+    const update = Y.encodeStateAsUpdate(ydoc);
+
+    // Detect cell changes since the last version
+    const cellChanges = this._detectCellChanges();
+
+    // Create the version snapshot
+    const version: IVersionSnapshot = {
+      id: this._generateVersionId(),
       timestamp: Date.now(),
-      user: this._options.currentUser!,
+      author: {
+        id: user.id,
+        name: user.name,
+        color: user.color
+      },
       description,
-      snapshot,
-      prevSnapshot,
-      isCheckpoint,
-      metadata
+      stateVector,
+      update,
+      isMajorVersion,
+      cellChanges
     };
 
-    // Add the version to the list
-    this._versions.push(versionEntry);
-    this._currentVersion = versionEntry;
+    // Add the version to the history
+    this._versions.push(version);
 
-    // Enforce maximum versions limit if specified
-    if (this._options.maxVersions && this._versions.length > this._options.maxVersions) {
-      // Keep all checkpoint versions and remove oldest non-checkpoint versions
-      const checkpointVersions = this._versions.filter(v => v.isCheckpoint);
-      const nonCheckpointVersions = this._versions.filter(v => !v.isCheckpoint);
-      
-      const versionsToKeep = this._options.maxVersions - checkpointVersions.length;
-      if (versionsToKeep > 0 && nonCheckpointVersions.length > versionsToKeep) {
-        // Sort by timestamp (newest first) and keep only the newest ones
-        nonCheckpointVersions.sort((a, b) => b.timestamp - a.timestamp);
-        const versionsToRemove = nonCheckpointVersions.slice(versionsToKeep);
-        
-        // Update the versions list
-        this._versions = [
-          ...checkpointVersions,
-          ...nonCheckpointVersions.slice(0, versionsToKeep)
-        ].sort((a, b) => a.timestamp - b.timestamp);
-      }
+    // Limit the number of versions
+    if (this._versions.length > this._maxVersions) {
+      this._versions = this._versions.slice(this._versions.length - this._maxVersions);
     }
 
-    // Save versions to storage
-    await this.saveVersions();
+    // Update the last state for future change detection
+    this._updateLastState();
 
     // Emit the version created signal
-    this._versionCreated.emit(versionEntry);
-    this._currentVersionChanged.emit(versionEntry);
+    this._versionCreated.emit(version);
 
-    return versionEntry;
+    return version;
   }
 
   /**
-   * Get a specific version by ID.
-   * 
-   * @param versionId - The ID of the version to get.
-   * @returns The version entry, or null if not found.
+   * Compare two versions of the document.
+   *
+   * @param oldVersionId - The ID of the older version.
+   * @param newVersionId - The ID of the newer version.
+   * @returns A promise that resolves to the version comparison result.
    */
-  getVersion(versionId: string): IVersionEntry | null {
-    return this._versions.find(v => v.id === versionId) || null;
+  async compareVersions(oldVersionId: string, newVersionId: string): Promise<IVersionComparison> {
+    // Get the versions
+    const oldVersion = await this.getVersion(oldVersionId);
+    const newVersion = await this.getVersion(newVersionId);
+
+    if (!oldVersion || !newVersion) {
+      throw new Error('Version not found');
+    }
+
+    // Get the document states at these versions
+    const oldDoc = await this.getDocumentAtVersion(oldVersionId);
+    const newDoc = await this.getDocumentAtVersion(newVersionId);
+
+    // Compare the documents
+    const differences = this._compareDocuments(oldDoc, newDoc);
+
+    return {
+      oldVersion,
+      newVersion,
+      differences
+    };
   }
 
   /**
-   * Restore the document to a specific version.
-   * 
-   * @param versionId - The ID of the version to restore to.
+   * Restore the document to a previous version.
+   *
+   * @param versionId - The ID of the version to restore.
    * @returns A promise that resolves when the restoration is complete.
    */
   async restoreVersion(versionId: string): Promise<void> {
-    if (!this._document || !this._ydoc) {
-      throw new Error('No document connected to history tracker');
-    }
-
-    const version = this.getVersion(versionId);
+    const version = await this.getVersion(versionId);
     if (!version) {
-      throw new Error(`Version with ID ${versionId} not found`);
+      throw new Error('Version not found');
     }
 
-    // Create a snapshot of the current state before restoration
-    await this.createVersion(
-      `Snapshot before restoring to version ${version.description}`,
-      false,
-      { restorationPoint: true }
-    );
+    const ydoc = this._collaborationProvider.ydoc;
+    const restoredDoc = await this.getDocumentAtVersion(versionId);
 
-    // Apply the snapshot to restore the document state
-    Y.applyUpdate(this._ydoc, version.snapshot);
+    // Apply the state from the restored document to the current document
+    const update = Y.encodeStateAsUpdate(restoredDoc);
+    Y.applyUpdate(ydoc, update);
 
-    // Create a new version entry for the restored state
-    const restoredVersion = await this.createVersion(
-      `Restored to: ${version.description}`,
-      false,
-      { restoredFrom: version.id }
-    );
-
-    // Update the current version
-    this._currentVersion = restoredVersion;
-    this._currentVersionChanged.emit(restoredVersion);
+    // Create a new version to mark the restoration
+    await this.createVersion(`Restored to version from ${new Date(version.timestamp).toLocaleString()}`, true);
   }
 
   /**
-   * Get the diff between two versions.
-   * 
-   * @param currentVersionId - The ID of the current version.
-   * @param prevVersionId - The ID of the previous version.
-   * @returns The diff between the two versions.
+   * Get the changes made to a specific cell across versions.
+   *
+   * @param cellId - The ID of the cell.
+   * @returns A promise that resolves to an array of cell changes.
    */
-  getDiff(currentVersionId: string, prevVersionId: string): IVersionDiff | null {
-    const currentVersion = this.getVersion(currentVersionId);
-    const prevVersion = this.getVersion(prevVersionId);
+  async getCellHistory(cellId: string): Promise<ICellChange[]> {
+    const cellChanges: ICellChange[] = [];
 
-    if (!currentVersion || !prevVersion) {
-      return null;
+    // Collect all changes to this cell from all versions
+    for (const version of this._versions) {
+      const changes = version.cellChanges.filter(change => change.cellId === cellId);
+      cellChanges.push(...changes);
     }
 
-    // Create temporary Yjs documents to compute the diff
-    const currentDoc = new Y.Doc();
-    const prevDoc = new Y.Doc();
+    return cellChanges;
+  }
 
-    // Apply the snapshots to the temporary documents
-    Y.applyUpdate(currentDoc, currentVersion.snapshot);
-    Y.applyUpdate(prevDoc, prevVersion.snapshot);
-
-    // Get the notebook data from both documents
-    const currentNotebook = this._getNotebookDataFromYDoc(currentDoc);
-    const prevNotebook = this._getNotebookDataFromYDoc(prevDoc);
-
-    if (!currentNotebook || !prevNotebook) {
-      return null;
+  /**
+   * Get the document state at a specific version.
+   *
+   * @param versionId - The ID of the version.
+   * @returns A promise that resolves to a Yjs document with the state at that version.
+   */
+  async getDocumentAtVersion(versionId: string): Promise<Y.Doc> {
+    const version = await this.getVersion(versionId);
+    if (!version) {
+      throw new Error('Version not found');
     }
 
-    // Compute cell diffs
-    const cellDiffs: ICellDiff[] = [];
+    // Create a new document with the state at this version
+    const doc = new Y.Doc();
+    Y.applyUpdate(doc, version.update);
 
-    // Track cells that have been processed
-    const processedCellIds = new Set<string>();
+    return doc;
+  }
 
-    // First, process cells in the current version
-    for (let i = 0; i < currentNotebook.cells.length; i++) {
-      const currentCell = currentNotebook.cells[i];
-      const cellId = currentCell.id;
-      processedCellIds.add(cellId);
+  /**
+   * Initialize the version history.
+   */
+  private _initializeHistory(): void {
+    // Create an initial version
+    this._versions = [];
+    this._lastState = {
+      cells: new Map(),
+      metadata: {}
+    };
 
-      // Find the cell in the previous version
-      const prevCellIndex = prevNotebook.cells.findIndex(cell => cell.id === cellId);
-      
-      if (prevCellIndex === -1) {
+    // Create the initial version asynchronously
+    setTimeout(() => {
+      this.createVersion('Initial version', true).catch(error => {
+        console.error('Failed to create initial version:', error);
+      });
+    }, 0);
+  }
+
+  /**
+   * Set up listeners for document changes.
+   */
+  private _setupListeners(): void {
+    const ydoc = this._collaborationProvider.ydoc;
+
+    // Listen for Yjs document updates
+    ydoc.on('update', (update: Uint8Array, origin: any) => {
+      // Only track remote changes or local changes that aren't from this tracker
+      if (origin !== this) {
+        this._pendingChanges = true;
+        this._scheduleVersionCreation();
+      }
+    });
+
+    // Listen for notebook model changes
+    if (this._notebookModel) {
+      this._notebookModel.stateChanged.connect(this._onNotebookStateChanged, this);
+      this._notebookModel.cells.changed.connect(this._onCellsChanged, this);
+    }
+  }
+
+  /**
+   * Handle changes to the notebook state.
+   */
+  private _onNotebookStateChanged(sender: any, args: any): void {
+    this._pendingChanges = true;
+    this._scheduleVersionCreation();
+  }
+
+  /**
+   * Handle changes to the cells list.
+   */
+  private _onCellsChanged(sender: any, args: any): void {
+    this._pendingChanges = true;
+    this._scheduleVersionCreation();
+  }
+
+  /**
+   * Schedule the creation of a new version.
+   */
+  private _scheduleVersionCreation(): void {
+    if (this._versionCreationTimeout) {
+      clearTimeout(this._versionCreationTimeout);
+    }
+
+    // Create a version after a short delay to batch changes
+    this._versionCreationTimeout = setTimeout(() => {
+      if (this._pendingChanges) {
+        this._pendingChanges = false;
+        this.createVersion('Auto-saved changes').catch(error => {
+          console.error('Failed to create version:', error);
+        });
+      }
+    }, 2000); // 2 seconds delay
+  }
+
+  /**
+   * Start the timer for periodic snapshots.
+   */
+  private _startSnapshotTimer(): void {
+    this._snapshotTimer = setInterval(() => {
+      // Only create a snapshot if there have been changes
+      if (this._pendingChanges) {
+        this._pendingChanges = false;
+        this.createVersion('Periodic snapshot').catch(error => {
+          console.error('Failed to create snapshot:', error);
+        });
+      }
+    }, this._snapshotInterval);
+  }
+
+  /**
+   * Generate a unique version ID.
+   *
+   * @returns A unique version ID.
+   */
+  private _generateVersionId(): string {
+    return `version-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
+  }
+
+  /**
+   * Detect changes to cells since the last version.
+   *
+   * @returns An array of cell changes.
+   */
+  private _detectCellChanges(): ICellChange[] {
+    if (!this._notebookModel) {
+      return [];
+    }
+
+    const changes: ICellChange[] = [];
+    const currentCells = this._notebookModel.cells;
+    const lastCells = this._lastState.cells;
+
+    // Check for added, removed, and modified cells
+    const currentCellIds = new Set<string>();
+    for (let i = 0; i < currentCells.length; i++) {
+      const cell = currentCells.get(i);
+      if (!cell) continue;
+
+      const cellId = cell.id;
+      currentCellIds.add(cellId);
+
+      if (!lastCells.has(cellId)) {
         // Cell was added
-        cellDiffs.push({
+        changes.push({
           cellId,
-          cellType: currentCell.cell_type as any,
           changeType: 'added',
-          currentIndex: i,
-          currentContent: currentCell.source,
-          user: currentVersion.user,
-          timestamp: currentVersion.timestamp,
-          metadataChanges: this._computeMetadataChanges(undefined, currentCell.metadata)
+          newContent: cell.value.text
         });
       } else {
-        // Cell exists in both versions
-        const prevCell = prevNotebook.cells[prevCellIndex];
-        const contentChanged = prevCell.source !== currentCell.source;
-        const metadataChanges = this._computeMetadataChanges(prevCell.metadata, currentCell.metadata);
-        
-        // For code cells, check output changes
-        let outputChanges;
-        let executionCountChange;
-        
-        if (currentCell.cell_type === 'code' && prevCell.cell_type === 'code') {
-          outputChanges = this._computeOutputChanges(prevCell.outputs, currentCell.outputs);
-          
-          if (prevCell.execution_count !== currentCell.execution_count) {
-            executionCountChange = {
-              prev: prevCell.execution_count,
-              current: currentCell.execution_count
-            };
-          }
+        const lastCell = lastCells.get(cellId)!;
+        const lastIndex = lastCell.index;
+
+        if (i !== lastIndex) {
+          // Cell was moved
+          changes.push({
+            cellId,
+            changeType: 'moved',
+            previousIndex: lastIndex,
+            newIndex: i
+          });
         }
 
-        // Determine if the cell was modified
-        const isModified = contentChanged || 
-                          (metadataChanges && metadataChanges.length > 0) ||
-                          (outputChanges && outputChanges.some(change => change.changeType !== 'unchanged')) ||
-                          executionCountChange !== undefined;
-
-        if (isModified) {
-          cellDiffs.push({
+        if (cell.value.text !== lastCell.content) {
+          // Cell content was modified
+          changes.push({
             cellId,
-            cellType: currentCell.cell_type as any,
             changeType: 'modified',
-            prevIndex: prevCellIndex,
-            currentIndex: i,
-            prevContent: prevCell.source,
-            currentContent: currentCell.source,
-            user: currentVersion.user,
-            timestamp: currentVersion.timestamp,
-            outputChanges,
-            executionCountChange,
-            metadataChanges
-          });
-        } else {
-          cellDiffs.push({
-            cellId,
-            cellType: currentCell.cell_type as any,
-            changeType: 'unchanged',
-            prevIndex: prevCellIndex,
-            currentIndex: i
+            previousContent: lastCell.content,
+            newContent: cell.value.text
           });
         }
       }
     }
 
-    // Then, find cells that were in the previous version but not in the current version
-    for (let i = 0; i < prevNotebook.cells.length; i++) {
-      const prevCell = prevNotebook.cells[i];
-      const cellId = prevCell.id;
-      
-      if (!processedCellIds.has(cellId)) {
-        // Cell was removed
-        cellDiffs.push({
+    // Check for removed cells
+    for (const [cellId, cellInfo] of lastCells.entries()) {
+      if (!currentCellIds.has(cellId)) {
+        changes.push({
           cellId,
-          cellType: prevCell.cell_type as any,
           changeType: 'removed',
-          prevIndex: i,
-          prevContent: prevCell.source,
-          user: currentVersion.user,
-          timestamp: currentVersion.timestamp,
-          metadataChanges: this._computeMetadataChanges(prevCell.metadata, undefined)
+          previousContent: cellInfo.content
         });
       }
     }
 
-    // Compute metadata changes
-    const metadataChanges = this._computeMetadataChanges(prevNotebook.metadata, currentNotebook.metadata);
+    return changes;
+  }
 
-    // Generate a summary of the changes
-    const summary = this._generateDiffSummary(cellDiffs, metadataChanges);
+  /**
+   * Update the last state for future change detection.
+   */
+  private _updateLastState(): void {
+    if (!this._notebookModel) {
+      return;
+    }
+
+    const cells = new Map<string, { index: number; content: string; type: string; metadata: any }>(
+    );
+
+    // Store the current state of cells
+    for (let i = 0; i < this._notebookModel.cells.length; i++) {
+      const cell = this._notebookModel.cells.get(i);
+      if (cell) {
+        cells.set(cell.id, {
+          index: i,
+          content: cell.value.text,
+          type: cell.type,
+          metadata: { ...cell.metadata.toJSON() }
+        });
+      }
+    }
+
+    // Store the current metadata
+    const metadata = { ...this._notebookModel.metadata };
+
+    this._lastState = { cells, metadata };
+  }
+
+  /**
+   * Compare two Yjs documents to find differences.
+   *
+   * @param oldDoc - The older document.
+   * @param newDoc - The newer document.
+   * @returns The differences between the documents.
+   */
+  private _compareDocuments(oldDoc: Y.Doc, newDoc: Y.Doc): IVersionComparison['differences'] {
+    const oldCells = oldDoc.getArray('cells');
+    const newCells = newDoc.getArray('cells');
+    const oldMetadata = oldDoc.getMap('metadata');
+    const newMetadata = newDoc.getMap('metadata');
+
+    const added: ICellDiff[] = [];
+    const removed: ICellDiff[] = [];
+    const modified: ICellDiff[] = [];
+    const moved: ICellDiff[] = [];
+    const metadataChanges: IMetadataDiff[] = [];
+
+    // Find added, modified, and moved cells
+    const oldCellIds = new Map<string, number>();
+    for (let i = 0; i < oldCells.length; i++) {
+      const cell = oldCells.get(i) as Y.Map<any>;
+      const cellId = cell.get('id') as string;
+      oldCellIds.set(cellId, i);
+    }
+
+    const newCellIds = new Set<string>();
+    for (let i = 0; i < newCells.length; i++) {
+      const cell = newCells.get(i) as Y.Map<any>;
+      const cellId = cell.get('id') as string;
+      newCellIds.add(cellId);
+
+      if (!oldCellIds.has(cellId)) {
+        // Cell was added
+        added.push(this._createCellDiff(cell, undefined, i));
+      } else {
+        const oldIndex = oldCellIds.get(cellId)!;
+        const oldCell = oldCells.get(oldIndex) as Y.Map<any>;
+
+        if (i !== oldIndex) {
+          // Cell was moved
+          moved.push(this._createCellDiff(cell, oldCell, i, oldIndex));
+        }
+
+        // Check if cell was modified
+        if (this._isCellModified(oldCell, cell)) {
+          modified.push(this._createCellDiff(cell, oldCell, i, oldIndex));
+        }
+      }
+    }
+
+    // Find removed cells
+    for (let i = 0; i < oldCells.length; i++) {
+      const cell = oldCells.get(i) as Y.Map<any>;
+      const cellId = cell.get('id') as string;
+
+      if (!newCellIds.has(cellId)) {
+        // Cell was removed
+        removed.push(this._createCellDiff(undefined, cell, undefined, i));
+      }
+    }
+
+    // Compare metadata
+    const oldMetadataKeys = new Set(oldMetadata.keys());
+    const newMetadataKeys = new Set(newMetadata.keys());
+
+    // Find added and modified metadata
+    for (const key of newMetadataKeys) {
+      const newValue = newMetadata.get(key);
+
+      if (!oldMetadataKeys.has(key)) {
+        // Metadata was added
+        metadataChanges.push({
+          key,
+          newValue,
+          changeType: 'added'
+        });
+      } else {
+        const oldValue = oldMetadata.get(key);
+        if (JSON.stringify(oldValue) !== JSON.stringify(newValue)) {
+          // Metadata was modified
+          metadataChanges.push({
+            key,
+            oldValue,
+            newValue,
+            changeType: 'modified'
+          });
+        }
+      }
+    }
+
+    // Find removed metadata
+    for (const key of oldMetadataKeys) {
+      if (!newMetadataKeys.has(key)) {
+        // Metadata was removed
+        metadataChanges.push({
+          key,
+          oldValue: oldMetadata.get(key),
+          changeType: 'removed'
+        });
+      }
+    }
 
     return {
-      prevVersionId,
-      currentVersionId,
-      prevTimestamp: prevVersion.timestamp,
-      currentTimestamp: currentVersion.timestamp,
-      user: currentVersion.user,
-      cellDiffs,
-      metadataChanges,
-      summary
+      added,
+      removed,
+      modified,
+      moved,
+      metadataChanges
     };
   }
 
   /**
-   * Get the diff between the current version and the previous version.
-   * 
-   * @returns The diff between the current and previous versions, or null if there is no previous version.
+   * Check if a cell was modified.
+   *
+   * @param oldCell - The old cell.
+   * @param newCell - The new cell.
+   * @returns Whether the cell was modified.
    */
-  getCurrentDiff(): IVersionDiff | null {
-    if (!this._currentVersion || this._versions.length < 2) {
-      return null;
+  private _isCellModified(oldCell: Y.Map<any>, newCell: Y.Map<any>): boolean {
+    // Check if cell type changed
+    if (oldCell.get('cell_type') !== newCell.get('cell_type')) {
+      return true;
     }
 
-    // Find the index of the current version
-    const currentIndex = this._versions.findIndex(v => v.id === this._currentVersion!.id);
-    if (currentIndex <= 0) {
-      return null;
+    // Check if source changed
+    const oldSource = oldCell.get('source') as Y.Text;
+    const newSource = newCell.get('source') as Y.Text;
+    if (oldSource.toString() !== newSource.toString()) {
+      return true;
     }
 
-    // Get the previous version
-    const prevVersion = this._versions[currentIndex - 1];
-
-    return this.getDiff(this._currentVersion.id, prevVersion.id);
-  }
-
-  /**
-   * Get the cell-level changes for a specific cell between two versions.
-   * 
-   * @param cellId - The ID of the cell.
-   * @param currentVersionId - The ID of the current version.
-   * @param prevVersionId - The ID of the previous version.
-   * @returns The cell diff, or null if the cell doesn't exist in either version.
-   */
-  getCellDiff(cellId: string, currentVersionId: string, prevVersionId: string): ICellDiff | null {
-    const diff = this.getDiff(currentVersionId, prevVersionId);
-    if (!diff) {
-      return null;
+    // Check if metadata changed
+    const oldMetadata = oldCell.get('metadata') as Y.Map<any>;
+    const newMetadata = newCell.get('metadata') as Y.Map<any>;
+    if (JSON.stringify(oldMetadata.toJSON()) !== JSON.stringify(newMetadata.toJSON())) {
+      return true;
     }
 
-    return diff.cellDiffs.find(cellDiff => cellDiff.cellId === cellId) || null;
-  }
+    // For code cells, check if outputs changed
+    if (oldCell.get('cell_type') === 'code') {
+      const oldOutputs = oldCell.get('outputs') as Y.Array<any>;
+      const newOutputs = newCell.get('outputs') as Y.Array<any>;
 
-  /**
-   * Load versions from storage.
-   * 
-   * @returns A promise that resolves when versions are loaded.
-   */
-  async loadVersions(): Promise<IVersionEntry[]> {
-    // In a real implementation, this would load versions from a database or file system
-    // For now, we'll just return the in-memory versions
-    this._versionsLoaded.emit(this._versions);
-    return this._versions;
-  }
+      if (oldOutputs.length !== newOutputs.length) {
+        return true;
+      }
 
-  /**
-   * Save versions to storage.
-   * 
-   * @returns A promise that resolves when versions are saved.
-   */
-  async saveVersions(): Promise<void> {
-    // In a real implementation, this would save versions to a database or file system
-    // For now, we'll just do nothing
-    return;
-  }
+      for (let i = 0; i < oldOutputs.length; i++) {
+        const oldOutput = oldOutputs.get(i) as Y.Map<any>;
+        const newOutput = newOutputs.get(i) as Y.Map<any>;
 
-  /**
-   * Clear all versions.
-   * 
-   * @returns A promise that resolves when versions are cleared.
-   */
-  async clearVersions(): Promise<void> {
-    this._versions = [];
-    this._currentVersion = null;
-    await this.saveVersions();
-    this._versionsLoaded.emit([]);
-    return;
-  }
-
-  /**
-   * Handle Yjs document updates.
-   */
-  private _onYDocUpdate(update: Uint8Array, origin: any): void {
-    // Skip updates that originated from this history tracker
-    if (origin === this) {
-      return;
-    }
-
-    // Reset the auto-snapshot timer if enabled
-    if (this._options.autoSnapshot && this._autoSnapshotTimer) {
-      clearTimeout(this._autoSnapshotTimer);
-      this._setupAutoSnapshot();
-    }
-
-    // Track the update for potential future snapshot
-    this._pendingUpdates.push({
-      update,
-      timestamp: Date.now(),
-      origin
-    });
-
-    // If we have accumulated enough updates or enough time has passed,
-    // create a new snapshot automatically
-    const timeSinceLastSnapshot = Date.now() - (this._lastSnapshotTime || 0);
-    const updateCountThreshold = 10; // Create snapshot after 10 updates
-
-    if (this._options.autoSnapshot && 
-        (this._pendingUpdates.length >= updateCountThreshold || 
-         timeSinceLastSnapshot >= this._options.snapshotInterval)) {
-      this._createAutomaticSnapshot();
-    }
-  }
-
-  /**
-   * Set up the auto-snapshot timer.
-   */
-  private _setupAutoSnapshot(): void {
-    if (this._autoSnapshotTimer) {
-      clearTimeout(this._autoSnapshotTimer);
-    }
-
-    this._autoSnapshotTimer = setTimeout(() => {
-      this._createAutomaticSnapshot();
-    }, this._options.snapshotInterval);
-  }
-
-  /**
-   * Create an automatic snapshot if there are pending updates.
-   */
-  private _createAutomaticSnapshot(): void {
-    if (this._pendingUpdates.length === 0) {
-      return;
-    }
-
-    // Determine the origin of the updates for attribution
-    let origin = this._pendingUpdates[this._pendingUpdates.length - 1].origin;
-    let user = this._options.currentUser!;
-
-    // If the origin contains user information, use it
-    if (origin && typeof origin === 'object' && origin.user) {
-      user = origin.user;
-    }
-
-    // Create a description based on the number of updates
-    const description = `Automatic snapshot after ${this._pendingUpdates.length} update${this._pendingUpdates.length !== 1 ? 's' : ''}`;
-
-    // Create a new version
-    this.createVersion(description, false, { automatic: true }).catch(error => {
-      console.error('Failed to create automatic snapshot:', error);
-    });
-
-    // Clear pending updates and update last snapshot time
-    this._pendingUpdates = [];
-    this._lastSnapshotTime = Date.now();
-  }
-
-  /**
-   * Create an initial snapshot of the document.
-   */
-  private _createInitialSnapshot(): void {
-    if (!this._ydoc) {
-      return;
-    }
-
-    this.createVersion('Initial version', true).catch(error => {
-      console.error('Failed to create initial snapshot:', error);
-    });
-  }
-
-  /**
-   * Extract notebook data from a Yjs document.
-   */
-  private _getNotebookDataFromYDoc(ydoc: Y.Doc): any {
-    try {
-      // Get the notebook map from the Yjs document
-      const ynotebook = ydoc.getMap('notebook');
-      const ycells = ydoc.getArray('cells');
-      const ymetadata = ydoc.getMap('metadata');
-
-      // Extract notebook metadata
-      const metadata = ymetadata.toJSON();
-
-      // Extract cells
-      const cells: any[] = [];
-      for (let i = 0; i < ycells.length; i++) {
-        const ycell = ycells.get(i) as Y.Map<any>;
-        if (!ycell) continue;
-
-        const cellType = ycell.get('cell_type') as string;
-        const cellId = ycell.get('id') as string;
-        const ymetadata = ycell.get('metadata') as Y.Map<any>;
-        const ysource = ycell.get('source') as Y.Text;
-
-        const cell: any = {
-          id: cellId,
-          cell_type: cellType,
-          metadata: ymetadata ? ymetadata.toJSON() : {},
-          source: ysource ? ysource.toString() : ''
-        };
-
-        // Handle code cell specific properties
-        if (cellType === 'code') {
-          cell.execution_count = ycell.get('execution_count') as number | null;
-          
-          // Extract outputs
-          const youtputs = ycell.get('outputs') as Y.Array<any>;
-          if (youtputs) {
-            cell.outputs = [];
-            for (let j = 0; j < youtputs.length; j++) {
-              const youtput = youtputs.get(j) as Y.Map<any>;
-              if (youtput) {
-                cell.outputs.push(youtput.toJSON());
-              }
-            }
-          } else {
-            cell.outputs = [];
-          }
+        if (JSON.stringify(oldOutput.toJSON()) !== JSON.stringify(newOutput.toJSON())) {
+          return true;
         }
-
-        cells.push(cell);
       }
-
-      return {
-        metadata,
-        cells,
-        nbformat: ynotebook.get('nbformat') as number || 4,
-        nbformat_minor: ynotebook.get('nbformat_minor') as number || 0
-      };
-    } catch (error) {
-      console.error('Error extracting notebook data from Yjs document:', error);
-      return null;
     }
+
+    return false;
   }
 
   /**
-   * Compute the changes between two metadata objects.
+   * Create a cell diff object.
+   *
+   * @param newCell - The new cell, or undefined if the cell was removed.
+   * @param oldCell - The old cell, or undefined if the cell was added.
+   * @param newIndex - The index of the cell in the new document, or undefined if the cell was removed.
+   * @param oldIndex - The index of the cell in the old document, or undefined if the cell was added.
+   * @returns The cell diff object.
    */
-  private _computeMetadataChanges(prevMetadata: any = {}, currentMetadata: any = {}): {
-    key: string;
-    changeType: 'added' | 'removed' | 'modified';
-    prevValue?: any;
-    currentValue?: any;
-  }[] {
-    const changes: {
-      key: string;
-      changeType: 'added' | 'removed' | 'modified';
-      prevValue?: any;
-      currentValue?: any;
-    }[] = [];
+  private _createCellDiff(
+    newCell: Y.Map<any> | undefined,
+    oldCell: Y.Map<any> | undefined,
+    newIndex?: number,
+    oldIndex?: number
+  ): ICellDiff {
+    const cellId = (newCell?.get('id') || oldCell?.get('id')) as string;
+    const cellType = (newCell?.get('cell_type') || oldCell?.get('cell_type')) as string;
 
-    // Check for added or modified keys
-    for (const key in currentMetadata) {
-      if (!Object.prototype.hasOwnProperty.call(currentMetadata, key)) {
-        continue;
+    const diff: ICellDiff = {
+      cellId,
+      cellType,
+      oldIndex,
+      newIndex
+    };
+
+    // Add content information
+    if (oldCell) {
+      const oldSource = oldCell.get('source') as Y.Text;
+      diff.oldContent = oldSource.toString();
+    }
+
+    if (newCell) {
+      const newSource = newCell.get('source') as Y.Text;
+      diff.newContent = newSource.toString();
+    }
+
+    // Add content diff if both old and new content exist
+    if (diff.oldContent && diff.newContent) {
+      diff.contentDiff = this._createLineDiff(diff.oldContent, diff.newContent);
+    }
+
+    // Add metadata information
+    if (oldCell) {
+      const oldMetadata = oldCell.get('metadata') as Y.Map<any>;
+      diff.oldMetadata = oldMetadata.toJSON();
+    }
+
+    if (newCell) {
+      const newMetadata = newCell.get('metadata') as Y.Map<any>;
+      diff.newMetadata = newMetadata.toJSON();
+    }
+
+    // Add metadata diff if both old and new metadata exist
+    if (diff.oldMetadata && diff.newMetadata) {
+      diff.metadataDiff = this._createMetadataDiff(diff.oldMetadata, diff.newMetadata);
+    }
+
+    // Add outputs for code cells
+    if (cellType === 'code') {
+      if (oldCell) {
+        const oldOutputs = oldCell.get('outputs') as Y.Array<any>;
+        diff.oldOutputs = [];
+        for (let i = 0; i < oldOutputs.length; i++) {
+          const output = oldOutputs.get(i) as Y.Map<any>;
+          diff.oldOutputs.push(output.toJSON());
+        }
       }
 
-      if (!(key in prevMetadata)) {
-        // Key was added
-        changes.push({
-          key,
-          changeType: 'added',
-          currentValue: currentMetadata[key]
-        });
-      } else if (JSON.stringify(prevMetadata[key]) !== JSON.stringify(currentMetadata[key])) {
-        // Key was modified
-        changes.push({
-          key,
-          changeType: 'modified',
-          prevValue: prevMetadata[key],
-          currentValue: currentMetadata[key]
-        });
+      if (newCell) {
+        const newOutputs = newCell.get('outputs') as Y.Array<any>;
+        diff.newOutputs = [];
+        for (let i = 0; i < newOutputs.length; i++) {
+          const output = newOutputs.get(i) as Y.Map<any>;
+          diff.newOutputs.push(output.toJSON());
+        }
       }
     }
 
-    // Check for removed keys
-    for (const key in prevMetadata) {
-      if (!Object.prototype.hasOwnProperty.call(prevMetadata, key)) {
-        continue;
-      }
-
-      if (!(key in currentMetadata)) {
-        // Key was removed
-        changes.push({
-          key,
-          changeType: 'removed',
-          prevValue: prevMetadata[key]
-        });
-      }
-    }
-
-    return changes;
+    return diff;
   }
 
   /**
-   * Compute the changes between two sets of outputs.
+   * Create a line-by-line diff of two strings.
+   *
+   * @param oldContent - The old content.
+   * @param newContent - The new content.
+   * @returns The line-by-line diff.
    */
-  private _computeOutputChanges(prevOutputs: any[] = [], currentOutputs: any[] = []): {
-    changeType: 'added' | 'removed' | 'modified' | 'unchanged';
-    prevOutput?: any;
-    currentOutput?: any;
-  }[] {
-    const changes: {
-      changeType: 'added' | 'removed' | 'modified' | 'unchanged';
-      prevOutput?: any;
-      currentOutput?: any;
-    }[] = [];
+  private _createLineDiff(oldContent: string, newContent: string): ILineDiff[] {
+    const oldLines = oldContent.split('\n');
+    const newLines = newContent.split('\n');
+    const diff: ILineDiff[] = [];
 
-    // Use a simple approach for now: compare outputs by index
-    // A more sophisticated approach would be to use a diff algorithm
-    const maxLength = Math.max(prevOutputs.length, currentOutputs.length);
+    // Simple line-by-line diff implementation
+    // For a real implementation, you would use a more sophisticated diff algorithm
+    // like Myers diff algorithm or a library like diff-match-patch
 
-    for (let i = 0; i < maxLength; i++) {
-      const prevOutput = i < prevOutputs.length ? prevOutputs[i] : undefined;
-      const currentOutput = i < currentOutputs.length ? currentOutputs[i] : undefined;
+    // Find common prefix
+    let commonPrefixLength = 0;
+    const minLength = Math.min(oldLines.length, newLines.length);
+    while (
+      commonPrefixLength < minLength &&
+      oldLines[commonPrefixLength] === newLines[commonPrefixLength]
+    ) {
+      diff.push({
+        type: 'unchanged',
+        content: oldLines[commonPrefixLength],
+        oldLineNumber: commonPrefixLength + 1,
+        newLineNumber: commonPrefixLength + 1
+      });
+      commonPrefixLength++;
+    }
 
-      if (prevOutput === undefined) {
-        // Output was added
-        changes.push({
-          changeType: 'added',
-          currentOutput
+    // Find common suffix
+    let commonSuffixLength = 0;
+    while (
+      commonSuffixLength < minLength - commonPrefixLength &&
+      oldLines[oldLines.length - 1 - commonSuffixLength] ===
+        newLines[newLines.length - 1 - commonSuffixLength]
+    ) {
+      commonSuffixLength++;
+    }
+
+    // Add removed lines
+    for (
+      let i = commonPrefixLength;
+      i < oldLines.length - commonSuffixLength;
+      i++
+    ) {
+      diff.push({
+        type: 'removed',
+        content: oldLines[i],
+        oldLineNumber: i + 1
+      });
+    }
+
+    // Add added lines
+    for (
+      let i = commonPrefixLength;
+      i < newLines.length - commonSuffixLength;
+      i++
+    ) {
+      diff.push({
+        type: 'added',
+        content: newLines[i],
+        newLineNumber: i + 1
+      });
+    }
+
+    // Add common suffix
+    for (let i = 0; i < commonSuffixLength; i++) {
+      const oldIndex = oldLines.length - commonSuffixLength + i;
+      const newIndex = newLines.length - commonSuffixLength + i;
+      diff.push({
+        type: 'unchanged',
+        content: oldLines[oldIndex],
+        oldLineNumber: oldIndex + 1,
+        newLineNumber: newIndex + 1
+      });
+    }
+
+    // Sort by line numbers
+    diff.sort((a, b) => {
+      const aLine = a.oldLineNumber || a.newLineNumber || 0;
+      const bLine = b.oldLineNumber || b.newLineNumber || 0;
+      return aLine - bLine;
+    });
+
+    return diff;
+  }
+
+  /**
+   * Create a metadata diff.
+   *
+   * @param oldMetadata - The old metadata.
+   * @param newMetadata - The new metadata.
+   * @returns The metadata diff.
+   */
+  private _createMetadataDiff(oldMetadata: any, newMetadata: any): IMetadataDiff[] {
+    const diff: IMetadataDiff[] = [];
+
+    // Find added and modified metadata
+    for (const key in newMetadata) {
+      if (!(key in oldMetadata)) {
+        // Metadata was added
+        diff.push({
+          key,
+          newValue: newMetadata[key],
+          changeType: 'added'
         });
-      } else if (currentOutput === undefined) {
-        // Output was removed
-        changes.push({
-          changeType: 'removed',
-          prevOutput
-        });
-      } else if (JSON.stringify(prevOutput) !== JSON.stringify(currentOutput)) {
-        // Output was modified
-        changes.push({
-          changeType: 'modified',
-          prevOutput,
-          currentOutput
-        });
-      } else {
-        // Output is unchanged
-        changes.push({
-          changeType: 'unchanged',
-          prevOutput,
-          currentOutput
+      } else if (JSON.stringify(oldMetadata[key]) !== JSON.stringify(newMetadata[key])) {
+        // Metadata was modified
+        diff.push({
+          key,
+          oldValue: oldMetadata[key],
+          newValue: newMetadata[key],
+          changeType: 'modified'
         });
       }
     }
 
-    return changes;
+    // Find removed metadata
+    for (const key in oldMetadata) {
+      if (!(key in newMetadata)) {
+        // Metadata was removed
+        diff.push({
+          key,
+          oldValue: oldMetadata[key],
+          changeType: 'removed'
+        });
+      }
+    }
+
+    return diff;
   }
 
+  private _collaborationProvider: ICollaborationProvider;
+  private _notebookModel: INotebookModel | null;
+  private _versions: IVersionSnapshot[] = [];
+  private _lastState: {
+    cells: Map<string, { index: number; content: string; type: string; metadata: any }>;
+    metadata: any;
+  };
+  private _maxVersions: number;
+  private _snapshotInterval: number;
+  private _snapshotTimer: any;
+  private _pendingChanges = false;
+  private _versionCreationTimeout: any;
+  private _versionCreated = new Signal<IVersionHistory, IVersionSnapshot>(this);
+}
+
+/**
+ * Namespace for HistoryTracker.
+ */
+export namespace HistoryTracker {
   /**
-   * Generate a summary of the changes in a diff.
+   * Options for the HistoryTracker.
    */
-  private _generateDiffSummary(
-    cellDiffs: ICellDiff[],
-    metadataChanges: {
-      key: string;
-      changeType: 'added' | 'removed' | 'modified';
-      prevValue?: any;
-      currentValue?: any;
-    }[]
-  ): string {
-    const addedCells = cellDiffs.filter(diff => diff.changeType === 'added').length;
-    const removedCells = cellDiffs.filter(diff => diff.changeType === 'removed').length;
-    const modifiedCells = cellDiffs.filter(diff => diff.changeType === 'modified').length;
-    const metadataChangeCount = metadataChanges.length;
+  export interface IOptions {
+    /**
+     * The collaboration provider.
+     */
+    collaborationProvider: ICollaborationProvider;
 
-    const parts: string[] = [];
+    /**
+     * The notebook model.
+     */
+    notebookModel: INotebookModel | null;
 
-    if (addedCells > 0) {
-      parts.push(`${addedCells} cell${addedCells !== 1 ? 's' : ''} added`);
-    }
+    /**
+     * The maximum number of versions to keep.
+     */
+    maxVersions?: number;
 
-    if (removedCells > 0) {
-      parts.push(`${removedCells} cell${removedCells !== 1 ? 's' : ''} removed`);
-    }
-
-    if (modifiedCells > 0) {
-      parts.push(`${modifiedCells} cell${modifiedCells !== 1 ? 's' : ''} modified`);
-    }
-
-    if (metadataChangeCount > 0) {
-      parts.push(`${metadataChangeCount} metadata change${metadataChangeCount !== 1 ? 's' : ''}`);
-    }
-
-    if (parts.length === 0) {
-      return 'No changes';
-    }
-
-    return parts.join(', ');
+    /**
+     * The interval between automatic snapshots, in milliseconds.
+     */
+    snapshotInterval?: number;
   }
-
-  private _document: INotebookModel | null = null;
-  private _ydoc: Y.Doc | null = null;
-  private _versions: IVersionEntry[] = [];
-  private _currentVersion: IVersionEntry | null = null;
-  private _options: Required<Omit<IVersionHistoryOptions, 'maxVersions'>> & { maxVersions?: number };
-  private _autoSnapshotTimer: any = null;
-  private _lastSnapshotTime: number | null = null;
-  private _pendingUpdates: { update: Uint8Array; timestamp: number; origin: any }[] = [];
-
-  private _versionCreated = new Signal<this, IVersionEntry>(this);
-  private _currentVersionChanged = new Signal<this, IVersionEntry>(this);
-  private _versionsLoaded = new Signal<this, IVersionEntry[]>(this);
 }
