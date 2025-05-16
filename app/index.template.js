@@ -7,6 +7,11 @@ import { PageConfig, URLExt } from '@jupyterlab/coreutils';
 
 import { PluginRegistry } from '@lumino/coreutils';
 
+// Import Yjs and related libraries for collaborative editing
+import * as Y from 'yjs';
+import { WebsocketProvider } from 'y-websocket';
+import { Awareness } from 'y-protocols/awareness';
+
 require('./style.js');
 require('./extraStyle.js');
 
@@ -43,6 +48,87 @@ async function createModule(scope, module) {
       `Failed to create module: package: ${scope}; module: ${module}`
     );
     throw e;
+  }
+}
+
+/**
+ * Initialize Yjs document and providers for collaborative editing
+ */
+function initCollaboration(app) {
+  // Check if collaboration is enabled in configuration
+  const isCollabEnabled = (PageConfig.getOption('enableCollaboration') || '').toLowerCase() === 'true';
+  if (!isCollabEnabled) {
+    console.log('Collaborative editing is disabled. Enable it in server configuration.');
+    return null;
+  }
+
+  try {
+    // Create a Yjs document to store shared data
+    const ydoc = new Y.Doc();
+    
+    // Get the WebSocket URL from configuration or use default
+    const websocketUrl = PageConfig.getOption('collaborationWebsocketUrl') || 
+      `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/collaboration`;
+    
+    // Get the room name (notebook path) from configuration
+    const notebookPath = PageConfig.getOption('notebookPath') || 'unnamed-notebook';
+    
+    // Initialize the WebSocket provider for real-time synchronization
+    const websocketProvider = new WebsocketProvider(websocketUrl, notebookPath, ydoc, {
+      connect: true,
+      awareness: new Awareness(ydoc),
+      params: {
+        // Add authentication token if available
+        token: PageConfig.getToken() || ''
+      }
+    });
+    
+    // Set up event listeners for connection status
+    websocketProvider.on('status', event => {
+      console.log(`Collaboration status: ${event.status}`);
+      // Dispatch a custom event that UI components can listen for
+      window.dispatchEvent(new CustomEvent('collaboration-status-change', { 
+        detail: { status: event.status } 
+      }));
+    });
+    
+    // Handle connection errors
+    websocketProvider.on('connection-error', error => {
+      console.error('Collaboration connection error:', error);
+      window.dispatchEvent(new CustomEvent('collaboration-error', { 
+        detail: { error: error } 
+      }));
+    });
+    
+    // Handle connection close
+    websocketProvider.on('connection-close', event => {
+      console.log('Collaboration connection closed:', event);
+      // Try to reconnect if the connection was closed unexpectedly
+      if (event.code !== 1000) {
+        console.log('Attempting to reconnect...');
+        setTimeout(() => websocketProvider.connect(), 3000);
+      }
+    });
+    
+    // Make the collaboration objects available to the application
+    if (app) {
+      app.ydoc = ydoc;
+      app.websocketProvider = websocketProvider;
+      app.awareness = websocketProvider.awareness;
+    }
+    
+    // Return the collaboration objects for use elsewhere
+    return {
+      ydoc,
+      websocketProvider,
+      awareness: websocketProvider.awareness
+    };
+  } catch (error) {
+    console.error('Failed to initialize collaborative editing:', error);
+    window.dispatchEvent(new CustomEvent('collaboration-initialization-failed', { 
+      detail: { error: error } 
+    }));
+    return null;
   }
 }
 
@@ -237,8 +323,61 @@ async function main() {
   if (exposeAppInBrowser) {
     window.jupyterapp = app;
   }
+  
+  // Initialize collaborative editing after app is created but before it starts
+  const collaborationObjects = initCollaboration(app);
+  
+  // If collaboration is enabled and initialized successfully, make it available globally
+  // for extension components to access
+  if (collaborationObjects) {
+    // Register collaboration objects with the application
+    app.registerCollaborationObjects = () => {
+      return collaborationObjects;
+    };
+    
+    // Make collaboration objects available to extensions through a global registry
+    window._JUPYTER_COLLABORATION = collaborationObjects;
+    
+    console.log('Collaborative editing initialized successfully');
+    
+    // Discover and register collaborative UI components
+    try {
+      // Look for collaboration UI components in the federated extensions
+      const collaborationUIComponents = availablePlugins.filter(plugin => 
+        plugin.id.includes('collaboration') || 
+        (plugin.description && plugin.description.includes('collaboration'))
+      );
+      
+      if (collaborationUIComponents.length > 0) {
+        console.log(`Found ${collaborationUIComponents.length} collaboration UI components`);
+      } else {
+        console.log('No collaboration UI components found in available plugins');
+      }
+    } catch (error) {
+      console.error('Error discovering collaboration UI components:', error);
+    }
+  }
 
   await app.start();
 }
 
 window.addEventListener('load', main);
+
+// Handle collaboration cleanup when the window is closed or refreshed
+window.addEventListener('beforeunload', () => {
+  // Clean up Yjs document and WebSocket connection if they exist
+  if (window._JUPYTER_COLLABORATION) {
+    try {
+      const { websocketProvider, ydoc } = window._JUPYTER_COLLABORATION;
+      if (websocketProvider) {
+        websocketProvider.disconnect();
+      }
+      if (ydoc) {
+        ydoc.destroy();
+      }
+      console.log('Collaboration resources cleaned up');
+    } catch (error) {
+      console.error('Error cleaning up collaboration resources:', error);
+    }
+  }
+});
