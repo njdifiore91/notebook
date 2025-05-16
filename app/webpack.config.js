@@ -20,6 +20,9 @@ const baseConfig = require('@jupyterlab/builder/lib/webpack.config.base');
 
 const data = require('./package.json');
 
+// Define collaboration packages that need special handling
+const collaborationPackages = ['yjs', 'y-websocket', 'y-protocols'];
+
 const names = Object.keys(data.dependencies).filter((name) => {
   const packageData = require(path.join(name, 'package.json'));
   return packageData.jupyterlab !== undefined;
@@ -70,6 +73,27 @@ Handlebars.registerHelper('list_plugins', function () {
       `;
     }
   });
+  
+  // Add collaboration-specific plugins if they exist
+  // This ensures that collaboration plugins are loaded even if not explicitly listed
+  const collaborationExtensions = [
+    '@jupyter-notebook/collaboration-extension',
+    '@jupyter-notebook/collab-presence-extension',
+    '@jupyter-notebook/collab-comments-extension'
+  ];
+  
+  collaborationExtensions.forEach(ext => {
+    try {
+      // Check if the extension exists before requiring it
+      require.resolve(ext);
+      if (!Object.keys(page).includes(ext)) {
+        str += `require(\'${ext}\'),\n  `;
+      }
+    } catch (e) {
+      // Extension not found, skip it
+    }
+  });
+  
   return str;
 });
 
@@ -87,6 +111,13 @@ fs.writeFileSync(path.join(buildDir, 'index.js'), indexOut);
 const cssImports = path.resolve(__dirname, 'style.js');
 fs.copySync(cssImports, path.resolve(buildDir, 'extraStyle.js'));
 
+// Ensure proper handling of binary modules for CRDT protocol
+const nodeConfig = {
+  node: {
+    global: true
+  }
+};
+
 const extras = Build.ensureAssets({
   packageNames: names,
   output: buildDir,
@@ -103,6 +134,33 @@ function createShared(packageData) {
   // Make sure any resolutions are shared
   for (let [pkg, requiredVersion] of Object.entries(packageData.resolutions)) {
     shared[pkg] = { requiredVersion };
+  }
+
+  // Add Yjs and related collaboration packages to shared config
+  // These need to be singletons to ensure consistent CRDT operations
+  for (let pkg of collaborationPackages) {
+    try {
+      const version = require(`${pkg}/package.json`).version;
+      shared[pkg] = {
+        requiredVersion: version,
+        singleton: true,
+        strictVersion: true
+      };
+    } catch (e) {
+      // Package not found, skip it
+    }
+  }
+  
+  // Special handling for y-protocols/awareness which has a different package structure
+  try {
+    const version = require('y-protocols/package.json').version;
+    shared['y-protocols/awareness'] = {
+      requiredVersion: version,
+      singleton: true,
+      strictVersion: true
+    };
+  } catch (e) {
+    // Package not found, skip it
   }
 
   // Add any extension packages that are not in resolutions (i.e., installed from npm)
@@ -188,6 +246,19 @@ function createShared(packageData) {
       shared[pkg].singleton = true;
     }
   }
+  
+  // Ensure collaboration packages are always singletons
+  // This is critical for CRDT consistency across the application
+  for (let pkg of collaborationPackages) {
+    if (shared[pkg]) {
+      shared[pkg].singleton = true;
+    }
+  }
+  
+  // Special handling for y-protocols/awareness
+  if (shared['y-protocols/awareness']) {
+    shared['y-protocols/awareness'].singleton = true;
+  }
 
   return shared;
 }
@@ -204,6 +275,12 @@ if (process.env.NODE_ENV === 'production') {
 if (process.argv.includes('--analyze')) {
   extras.push(new BundleAnalyzerPlugin());
 }
+
+// Add special handling for binary CRDT protocol handlers
+extras.push(new webpack.DefinePlugin({
+  'process.env.NODE_DEBUG': JSON.stringify(process.env.NODE_DEBUG),
+  'global': 'window'
+}));
 
 const htmlPlugins = [];
 ['consoles', 'edit', 'error', 'notebooks', 'terminals', 'tree'].forEach(
@@ -226,7 +303,7 @@ const htmlPlugins = [];
 );
 
 module.exports = [
-  merge(baseConfig, {
+  merge(baseConfig, nodeConfig, {
     mode: 'development',
     entry: ['./publicpath.js', './' + path.relative(__dirname, entryPoint)],
     output: {
@@ -246,6 +323,12 @@ module.exports = [
             test: /[\\/]node_modules[\\/]@(jupyterlab|jupyter-notebook|lumino(?!\/datagrid))[\\/]/,
             name: 'notebook_core',
           },
+          // Add specific caching group for collaboration libraries
+          collab_libs: {
+            test: /[\\/]node_modules[\\/](yjs|y-websocket|y-protocols)[\\/]/,
+            name: 'collaboration_core',
+            priority: 10 // Higher priority than other groups
+          }
         },
       },
     },
