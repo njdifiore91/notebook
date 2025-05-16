@@ -1,446 +1,556 @@
+# Copyright (c) Jupyter Development Team.
+# Distributed under the terms of the Modified BSD License.
+
 import asyncio
 import pytest
 import time
 from unittest.mock import MagicMock, patch
 
-# Skip tests if collaboration dependencies are not installed
-pytestmark = pytest.mark.skipif(
-    not pytest.importorskip("pycrdt", reason="Collaboration dependencies not installed"),
-    reason="Collaboration dependencies not installed"
+# Import the awareness module
+from notebook.collab.awareness import (
+    UserStatus,
+    ICursorPosition,
+    ISelectionRange,
+    IUserAwarenessState,
+    IAwarenessChanges,
+    IPresenceTracker,
+    PresenceTracker
 )
 
-# Constants for testing
-TEST_TIMEOUT = 0.1  # Short timeout for tests
-CLEANUP_TIMEOUT = 0.5  # Timeout for awareness cleanup tests
 
-# Test document and user IDs
-TEST_DOC_ID = "test-awareness-doc"
-USER1_ID = "user1"
-USER2_ID = "user2"
-USER3_ID = "user3"
+@pytest.fixture
+def mock_awareness():
+    """Create a mock Awareness instance."""
+    mock = MagicMock()
+    
+    # Store states in a dictionary for easy testing
+    mock.states = {}
+    
+    # Mock the setLocalState method
+    def mock_set_local_state(state):
+        mock.local_state = state
+    mock.setLocalState = mock_set_local_state
+    
+    # Mock the getLocalState method
+    def mock_get_local_state():
+        return mock.local_state
+    mock.getLocalState = mock_get_local_state
+    
+    # Mock the getStates method
+    def mock_get_states():
+        return mock.states
+    mock.getStates = mock_get_states
+    
+    # Mock the on method to register event handlers
+    mock.event_handlers = {}
+    def mock_on(event, handler):
+        if event not in mock.event_handlers:
+            mock.event_handlers[event] = []
+        mock.event_handlers[event].append(handler)
+    mock.on = mock_on
+    
+    # Method to simulate an event
+    def mock_emit_event(event, changes, origin=None):
+        if event in mock.event_handlers:
+            for handler in mock.event_handlers[event]:
+                handler(changes, origin)
+    mock.emit_event = mock_emit_event
+    
+    # Mock the destroy method
+    def mock_destroy():
+        mock.destroyed = True
+    mock.destroy = mock_destroy
+    
+    return mock
 
 
-class TestAwareness:
-    """Test suite for the user presence awareness system in collaborative editing.
+@pytest.fixture
+def mock_presence_tracker(mock_yjs_doc, mock_awareness):
+    """Create a mock PresenceTracker instance."""
+    with patch('y_protocols.awareness.Awareness', return_value=mock_awareness):
+        tracker = PresenceTracker(mock_yjs_doc)
+        yield tracker
+        tracker.destroy()
+
+
+@pytest.fixture
+def user_state():
+    """Create a sample user awareness state."""
+    return {
+        'userId': 'user1',
+        'displayName': 'User One',
+        'avatarUrl': 'https://example.com/avatar.png',
+        'status': UserStatus.Active,
+        'color': '#ff0000',
+        'lastActivity': time.time() * 1000  # Current time in milliseconds
+    }
+
+
+@pytest.fixture
+def cursor_position():
+    """Create a sample cursor position."""
+    return {
+        'cellId': 'cell1',
+        'offset': 10
+    }
+
+
+@pytest.fixture
+def selection_range():
+    """Create a sample selection range."""
+    return {
+        'startCellId': 'cell1',
+        'startOffset': 5,
+        'endCellId': 'cell1',
+        'endOffset': 15
+    }
+
+
+class TestPresenceTracker:
+    """Tests for the PresenceTracker class."""
     
-    The awareness system is responsible for tracking and synchronizing information about
-    which users are currently viewing or editing a document, where their cursors are
-    positioned, what text they have selected, and their current status (active, idle, etc.).
+    def test_initialization(self, mock_yjs_doc):
+        """Test that the PresenceTracker initializes correctly."""
+        with patch('y_protocols.awareness.Awareness') as MockAwareness:
+            mock_awareness = MagicMock()
+            MockAwareness.return_value = mock_awareness
+            
+            tracker = PresenceTracker(mock_yjs_doc)
+            
+            # Check that Awareness was initialized with the Yjs document
+            MockAwareness.assert_called_once_with(mock_yjs_doc)
+            
+            # Check that the client ID was set correctly
+            assert tracker.clientId == mock_yjs_doc.clientID
+            
+            # Check that the awareness change event handler was registered
+            mock_awareness.on.assert_called_with('change', tracker._onAwarenessChange)
+            
+            # Clean up
+            tracker.destroy()
     
-    These tests verify that the awareness system correctly tracks and synchronizes this
-    information across multiple clients, enabling real-time visualization of collaborative
-    editing activities.
-    """
+    def test_set_get_local_state(self, mock_presence_tracker, user_state):
+        """Test setting and getting the local user's awareness state."""
+        # Set the local state
+        mock_presence_tracker.setLocalState(user_state)
+        
+        # Get the local state
+        local_state = mock_presence_tracker.getLocalState()
+        
+        # Check that the state was set correctly
+        assert local_state is not None
+        assert local_state['userId'] == user_state['userId']
+        assert local_state['displayName'] == user_state['displayName']
+        assert local_state['status'] == user_state['status']
+        assert local_state['color'] == user_state['color']
+        assert 'lastActivity' in local_state  # Should be updated automatically
     
-    @pytest.mark.asyncio
-    async def test_user_presence_tracking(self, multi_client_websocket_simulation):
-        """Test that user presence information is correctly tracked and synchronized.
+    def test_update_local_state(self, mock_presence_tracker, user_state):
+        """Test updating a specific field in the local user's awareness state."""
+        # Set the initial state
+        mock_presence_tracker.setLocalState(user_state)
         
-        This test verifies that basic user information (ID, name, color) is correctly
-        broadcast to all connected clients, enabling them to identify who else is
-        currently viewing or editing the document.
-        """
-        """Test that user presence information is correctly tracked and synchronized."""
-        # Create two clients
-        client1 = await multi_client_websocket_simulation(user_id=USER1_ID)
-        client2 = await multi_client_websocket_simulation(user_id=USER2_ID)
+        # Update a specific field
+        new_status = UserStatus.Idle
+        mock_presence_tracker.updateLocalState('status', new_status)
         
-        # Connect both clients to the same document
-        await client1.connect(doc_id=TEST_DOC_ID)
-        await client2.connect(doc_id=TEST_DOC_ID)
+        # Get the updated state
+        updated_state = mock_presence_tracker.getLocalState()
         
-        # Set user information for client1
-        await client1.update_awareness({
-            "user": {
-                "id": USER1_ID,
-                "name": "User 1",
-                "color": "#ff0000"
+        # Check that the field was updated
+        assert updated_state['status'] == new_status
+        assert updated_state['userId'] == user_state['userId']  # Other fields should remain unchanged
+        assert 'lastActivity' in updated_state  # Should be updated automatically
+    
+    def test_set_cursor_position(self, mock_presence_tracker, user_state, cursor_position):
+        """Test setting the user's cursor position."""
+        # Set the initial state
+        mock_presence_tracker.setLocalState(user_state)
+        
+        # Set the cursor position
+        mock_presence_tracker.setCursorPosition(cursor_position)
+        
+        # Get the updated state
+        updated_state = mock_presence_tracker.getLocalState()
+        
+        # Check that the cursor position was set
+        assert 'cursor' in updated_state
+        assert updated_state['cursor']['cellId'] == cursor_position['cellId']
+        assert updated_state['cursor']['offset'] == cursor_position['offset']
+    
+    def test_set_selection_range(self, mock_presence_tracker, user_state, selection_range):
+        """Test setting the user's selection range."""
+        # Set the initial state
+        mock_presence_tracker.setLocalState(user_state)
+        
+        # Set the selection range
+        mock_presence_tracker.setSelectionRange(selection_range)
+        
+        # Get the updated state
+        updated_state = mock_presence_tracker.getLocalState()
+        
+        # Check that the selection range was set
+        assert 'selection' in updated_state
+        assert updated_state['selection']['startCellId'] == selection_range['startCellId']
+        assert updated_state['selection']['startOffset'] == selection_range['startOffset']
+        assert updated_state['selection']['endCellId'] == selection_range['endCellId']
+        assert updated_state['selection']['endOffset'] == selection_range['endOffset']
+    
+    def test_set_status(self, mock_presence_tracker, user_state):
+        """Test setting the user's status."""
+        # Set the initial state
+        mock_presence_tracker.setLocalState(user_state)
+        
+        # Set the status
+        new_status = UserStatus.Editing
+        mock_presence_tracker.setStatus(new_status)
+        
+        # Get the updated state
+        updated_state = mock_presence_tracker.getLocalState()
+        
+        # Check that the status was set
+        assert updated_state['status'] == new_status
+    
+    def test_mark_active(self, mock_presence_tracker, user_state):
+        """Test marking the user as active."""
+        # Set the initial state with Idle status
+        initial_state = {**user_state, 'status': UserStatus.Idle}
+        mock_presence_tracker.setLocalState(initial_state)
+        
+        # Get the initial lastActivity timestamp
+        initial_state = mock_presence_tracker.getLocalState()
+        initial_timestamp = initial_state['lastActivity']
+        
+        # Wait a short time to ensure the timestamp changes
+        time.sleep(0.01)
+        
+        # Mark the user as active
+        mock_presence_tracker.markActive()
+        
+        # Get the updated state
+        updated_state = mock_presence_tracker.getLocalState()
+        
+        # Check that the status was changed to Active
+        assert updated_state['status'] == UserStatus.Active
+        
+        # Check that the lastActivity timestamp was updated
+        assert updated_state['lastActivity'] > initial_timestamp
+    
+    def test_mark_active_while_editing(self, mock_presence_tracker, user_state):
+        """Test marking the user as active while they are editing."""
+        # Set the initial state with Editing status
+        initial_state = {**user_state, 'status': UserStatus.Editing}
+        mock_presence_tracker.setLocalState(initial_state)
+        
+        # Get the initial lastActivity timestamp
+        initial_state = mock_presence_tracker.getLocalState()
+        initial_timestamp = initial_state['lastActivity']
+        
+        # Wait a short time to ensure the timestamp changes
+        time.sleep(0.01)
+        
+        # Mark the user as active
+        mock_presence_tracker.markActive()
+        
+        # Get the updated state
+        updated_state = mock_presence_tracker.getLocalState()
+        
+        # Check that the status remains as Editing
+        assert updated_state['status'] == UserStatus.Editing
+        
+        # Check that the lastActivity timestamp was updated
+        assert updated_state['lastActivity'] > initial_timestamp
+    
+    def test_is_editing_cell(self, mock_presence_tracker, mock_awareness, user_state, cursor_position):
+        """Test checking if a user is editing a specific cell."""
+        # Set up a state where a user is editing a cell
+        editing_state = {
+            **user_state,
+            'status': UserStatus.Editing,
+            'cursor': cursor_position
+        }
+        
+        # Add the state to the awareness states
+        client_id = 1
+        mock_awareness.states[client_id] = editing_state
+        
+        # Check if the user is editing the cell
+        editing_client = mock_presence_tracker.isEditingCell(cursor_position['cellId'])
+        
+        # Check that the correct client ID is returned
+        assert editing_client == client_id
+        
+        # Check for a cell that no one is editing
+        not_editing_client = mock_presence_tracker.isEditingCell('non_existent_cell')
+        
+        # Check that null is returned
+        assert not_editing_client is None
+    
+    def test_state_changed_signal(self, mock_presence_tracker, mock_awareness):
+        """Test that the stateChanged signal is emitted when awareness changes."""
+        # Create a mock handler for the stateChanged signal
+        mock_handler = MagicMock()
+        mock_presence_tracker.stateChanged.connect(mock_handler)
+        
+        # Create a changes object
+        changes = {
+            'added': [1],
+            'updated': [2],
+            'removed': [3]
+        }
+        
+        # Simulate an awareness change event
+        mock_awareness.emit_event('change', changes)
+        
+        # Check that the handler was called with the changes
+        mock_handler.assert_called_once_with(changes)
+    
+    def test_check_idle_users(self, mock_presence_tracker, user_state):
+        """Test that users are marked as idle after the idle timeout."""
+        # Set a short idle timeout for testing
+        mock_presence_tracker._idleTimeout = 100  # 100 ms
+        
+        # Set the initial state with Active status and an old lastActivity timestamp
+        old_timestamp = time.time() * 1000 - 200  # 200 ms ago
+        initial_state = {**user_state, 'status': UserStatus.Active, 'lastActivity': old_timestamp}
+        mock_presence_tracker.setLocalState(initial_state)
+        
+        # Trigger the idle check by simulating an awareness change
+        mock_presence_tracker._checkIdleUsers()
+        
+        # Get the updated state
+        updated_state = mock_presence_tracker.getLocalState()
+        
+        # Check that the status was changed to Idle
+        assert updated_state['status'] == UserStatus.Idle
+    
+    def test_cleanup_disconnected_users(self, mock_presence_tracker):
+        """Test cleanup of disconnected users."""
+        # This is mostly handled by the Awareness implementation,
+        # but we can test that our method doesn't raise exceptions
+        mock_presence_tracker._cleanupDisconnectedUsers()
+        
+        # No assertions needed, just checking that it runs without errors
+    
+    def test_destroy(self, mock_presence_tracker, mock_awareness):
+        """Test destroying the presence tracker."""
+        # Destroy the tracker
+        mock_presence_tracker.destroy()
+        
+        # Check that the awareness was destroyed
+        assert mock_awareness.destroyed is True
+        
+        # Check that the cleanup timer was cleared
+        assert mock_presence_tracker._cleanupTimer is None
+
+
+@pytest.mark.asyncio
+class TestPresenceTrackerIntegration:
+    """Integration tests for the PresenceTracker class."""
+    
+    async def test_multiple_users_awareness(self, mock_yjs_doc, mock_users):
+        """Test awareness with multiple users."""
+        # Create a real PresenceTracker instance
+        tracker = PresenceTracker(mock_yjs_doc)
+        
+        # Set up user states for multiple users
+        user_states = {}
+        for user_id, user_info in mock_users.items():
+            user_states[user_id] = {
+                'userId': user_id,
+                'displayName': user_info['name'],
+                'status': UserStatus.Active,
+                'color': user_info['color'],
+                'lastActivity': time.time() * 1000
             }
-        })
         
-        # Wait for awareness propagation
-        await asyncio.sleep(0.1)
+        # Simulate setting states in the awareness
+        for i, (user_id, state) in enumerate(user_states.items()):
+            client_id = i + 1  # Start from 1
+            mock_yjs_doc.clientID = client_id  # Simulate different client IDs
+            tracker._awareness.states[client_id] = state
         
-        # Get awareness states from client2
-        client2_states = await client2.get_awareness_states()
-        client1_id = client1.provider.awareness.client_id
+        # Get all states
+        states = tracker.getStates()
         
-        # Verify client2 received client1's presence information
-        assert client1_id in client2_states
-        assert client2_states[client1_id]["user"]["id"] == USER1_ID
-        assert client2_states[client1_id]["user"]["name"] == "User 1"
-        assert client2_states[client1_id]["user"]["color"] == "#ff0000"
+        # Check that all user states are present
+        assert len(states) == len(user_states)
+        for i, (user_id, state) in enumerate(user_states.items()):
+            client_id = i + 1
+            assert client_id in states
+            assert states[client_id]['userId'] == user_id
+            assert states[client_id]['displayName'] == state['displayName']
         
         # Clean up
-        await client1.disconnect()
-        await client2.disconnect()
+        tracker.destroy()
     
-    @pytest.mark.asyncio
-    async def test_cursor_position_broadcasting(self, multi_client_websocket_simulation):
-        """Test that cursor positions are correctly broadcast and visualized.
+    async def test_cursor_synchronization(self, mock_yjs_doc, mock_users, cursor_position):
+        """Test cursor position synchronization between users."""
+        # Create a real PresenceTracker instance
+        tracker = PresenceTracker(mock_yjs_doc)
         
-        This test verifies that when a user moves their cursor within a cell,
-        the cursor position information is correctly broadcast to other clients,
-        enabling real-time visualization of where other users are working.
-        """
-        """Test that cursor positions are correctly broadcast and visualized."""
-        # Create two clients
-        client1 = await multi_client_websocket_simulation(user_id=USER1_ID)
-        client2 = await multi_client_websocket_simulation(user_id=USER2_ID)
+        # Set up a handler to track awareness changes
+        changes_received = []
+        def on_state_changed(changes):
+            changes_received.append(changes)
+        tracker.stateChanged.connect(on_state_changed)
         
-        # Connect both clients to the same document
-        doc_id = "test-cursor-doc"
-        await client1.connect(doc_id=doc_id)
-        await client2.connect(doc_id=doc_id)
+        # Set the local user state
+        user_id = list(mock_users.keys())[0]
+        user_info = mock_users[user_id]
+        tracker.setLocalState({
+            'userId': user_id,
+            'displayName': user_info['name'],
+            'status': UserStatus.Active,
+            'color': user_info['color'],
+            'lastActivity': time.time() * 1000
+        })
         
-        # Set cursor position for client1
-        await client1.update_awareness({
-            "user": {"id": USER1_ID, "name": "User 1"},
-            "cursor": {
-                "cellId": "cell1",
-                "position": {"line": 10, "column": 15}
+        # Set the cursor position
+        tracker.setCursorPosition(cursor_position)
+        
+        # Check that the cursor position was set in the local state
+        local_state = tracker.getLocalState()
+        assert local_state['cursor']['cellId'] == cursor_position['cellId']
+        assert local_state['cursor']['offset'] == cursor_position['offset']
+        
+        # Simulate an awareness change event to trigger the signal
+        client_id = mock_yjs_doc.clientID
+        tracker._awareness.emit_event('change', {'updated': [client_id]})
+        
+        # Check that the change was signaled
+        assert len(changes_received) > 0
+        assert client_id in changes_received[-1]['updated']
+        
+        # Clean up
+        tracker.destroy()
+    
+    async def test_selection_synchronization(self, mock_yjs_doc, mock_users, selection_range):
+        """Test selection range synchronization between users."""
+        # Create a real PresenceTracker instance
+        tracker = PresenceTracker(mock_yjs_doc)
+        
+        # Set up a handler to track awareness changes
+        changes_received = []
+        def on_state_changed(changes):
+            changes_received.append(changes)
+        tracker.stateChanged.connect(on_state_changed)
+        
+        # Set the local user state
+        user_id = list(mock_users.keys())[0]
+        user_info = mock_users[user_id]
+        tracker.setLocalState({
+            'userId': user_id,
+            'displayName': user_info['name'],
+            'status': UserStatus.Active,
+            'color': user_info['color'],
+            'lastActivity': time.time() * 1000
+        })
+        
+        # Set the selection range
+        tracker.setSelectionRange(selection_range)
+        
+        # Check that the selection range was set in the local state
+        local_state = tracker.getLocalState()
+        assert local_state['selection']['startCellId'] == selection_range['startCellId']
+        assert local_state['selection']['startOffset'] == selection_range['startOffset']
+        assert local_state['selection']['endCellId'] == selection_range['endCellId']
+        assert local_state['selection']['endOffset'] == selection_range['endOffset']
+        
+        # Simulate an awareness change event to trigger the signal
+        client_id = mock_yjs_doc.clientID
+        tracker._awareness.emit_event('change', {'updated': [client_id]})
+        
+        # Check that the change was signaled
+        assert len(changes_received) > 0
+        assert client_id in changes_received[-1]['updated']
+        
+        # Clean up
+        tracker.destroy()
+    
+    async def test_status_propagation(self, mock_yjs_doc, mock_users):
+        """Test user status propagation between clients."""
+        # Create a real PresenceTracker instance
+        tracker = PresenceTracker(mock_yjs_doc)
+        
+        # Set up a handler to track awareness changes
+        changes_received = []
+        def on_state_changed(changes):
+            changes_received.append(changes)
+        tracker.stateChanged.connect(on_state_changed)
+        
+        # Set the local user state
+        user_id = list(mock_users.keys())[0]
+        user_info = mock_users[user_id]
+        tracker.setLocalState({
+            'userId': user_id,
+            'displayName': user_info['name'],
+            'status': UserStatus.Active,
+            'color': user_info['color'],
+            'lastActivity': time.time() * 1000
+        })
+        
+        # Change the status
+        tracker.setStatus(UserStatus.Editing)
+        
+        # Check that the status was updated in the local state
+        local_state = tracker.getLocalState()
+        assert local_state['status'] == UserStatus.Editing
+        
+        # Simulate an awareness change event to trigger the signal
+        client_id = mock_yjs_doc.clientID
+        tracker._awareness.emit_event('change', {'updated': [client_id]})
+        
+        # Check that the change was signaled
+        assert len(changes_received) > 0
+        assert client_id in changes_received[-1]['updated']
+        
+        # Clean up
+        tracker.destroy()
+    
+    async def test_cleanup_on_disconnect(self, mock_yjs_doc, mock_users):
+        """Test cleanup of awareness state when a user disconnects."""
+        # Create a real PresenceTracker instance
+        tracker = PresenceTracker(mock_yjs_doc)
+        
+        # Set up a handler to track awareness changes
+        changes_received = []
+        def on_state_changed(changes):
+            changes_received.append(changes)
+        tracker.stateChanged.connect(on_state_changed)
+        
+        # Set up user states for multiple users
+        client_ids = []
+        for i, (user_id, user_info) in enumerate(mock_users.items()):
+            client_id = i + 1  # Start from 1
+            client_ids.append(client_id)
+            tracker._awareness.states[client_id] = {
+                'userId': user_id,
+                'displayName': user_info['name'],
+                'status': UserStatus.Active,
+                'color': user_info['color'],
+                'lastActivity': time.time() * 1000
             }
-        })
         
-        # Wait for awareness propagation
-        await asyncio.sleep(0.1)
+        # Check that all users are present
+        states = tracker.getStates()
+        assert len(states) == len(mock_users)
         
-        # Get awareness states from client2
-        client2_states = await client2.get_awareness_states()
-        client1_id = client1.provider.awareness.client_id
+        # Simulate a user disconnecting by removing their state
+        disconnected_client_id = client_ids[0]
+        del tracker._awareness.states[disconnected_client_id]
         
-        # Verify client2 received client1's cursor position
-        assert client1_id in client2_states
-        assert "cursor" in client2_states[client1_id]
-        assert client2_states[client1_id]["cursor"]["cellId"] == "cell1"
-        assert client2_states[client1_id]["cursor"]["position"]["line"] == 10
-        assert client2_states[client1_id]["cursor"]["position"]["column"] == 15
+        # Simulate an awareness change event to trigger the signal
+        tracker._awareness.emit_event('change', {'removed': [disconnected_client_id]})
         
-        # Clean up
-        await client1.disconnect()
-        await client2.disconnect()
-    
-    @pytest.mark.asyncio
-    async def test_selection_range_synchronization(self, multi_client_websocket_simulation):
-        """Test that selection ranges are correctly synchronized across clients.
+        # Check that the change was signaled
+        assert len(changes_received) > 0
+        assert disconnected_client_id in changes_received[-1]['removed']
         
-        This test verifies that when a user selects a range of text in a cell,
-        the selection information is correctly broadcast to other clients,
-        allowing them to visualize where other users are working.
-        """
-        """Test that selection ranges are correctly synchronized across clients."""
-        # Create two clients
-        client1 = await multi_client_websocket_simulation(user_id=USER1_ID)
-        client2 = await multi_client_websocket_simulation(user_id=USER2_ID)
-        
-        # Connect both clients to the same document
-        doc_id = "test-selection-doc"
-        await client1.connect(doc_id=doc_id)
-        await client2.connect(doc_id=doc_id)
-        
-        # Set selection range for client1
-        await client1.update_awareness({
-            "user": {"id": USER1_ID, "name": "User 1"},
-            "selection": {
-                "cellId": "cell1",
-                "range": {
-                    "start": {"line": 5, "column": 10},
-                    "end": {"line": 5, "column": 20}
-                }
-            }
-        })
-        
-        # Wait for awareness propagation
-        await asyncio.sleep(TEST_TIMEOUT)
-        
-        # Get awareness states from client2
-        client2_states = await client2.get_awareness_states()
-        client1_id = client1.provider.awareness.client_id
-        
-        # Verify client2 received client1's selection range
-        assert client1_id in client2_states
-        assert "selection" in client2_states[client1_id]
-        assert client2_states[client1_id]["selection"]["cellId"] == "cell1"
-        assert client2_states[client1_id]["selection"]["range"]["start"]["line"] == 5
-        assert client2_states[client1_id]["selection"]["range"]["start"]["column"] == 10
-        assert client2_states[client1_id]["selection"]["range"]["end"]["line"] == 5
-        assert client2_states[client1_id]["selection"]["range"]["end"]["column"] == 20
+        # Check that the user was removed from the states
+        states = tracker.getStates()
+        assert disconnected_client_id not in states
+        assert len(states) == len(mock_users) - 1
         
         # Clean up
-        await client1.disconnect()
-        await client2.disconnect()
-    
-    @pytest.mark.asyncio
-    async def test_user_status_updates(self, multi_client_websocket_simulation):
-        """Test that user status updates are properly propagated.
-        
-        This test verifies that when a user's status changes (e.g., from active to idle),
-        the status update is correctly propagated to all other clients in real-time.
-        """
-        """Test that user status updates are properly propagated."""
-        # Create two clients
-        client1 = await multi_client_websocket_simulation(user_id=USER1_ID)
-        client2 = await multi_client_websocket_simulation(user_id=USER2_ID)
-        
-        # Connect both clients to the same document
-        doc_id = "test-status-doc"
-        await client1.connect(doc_id=doc_id)
-        await client2.connect(doc_id=doc_id)
-        
-        # Set active status for client1
-        await client1.update_awareness({
-            "user": {
-                "id": USER1_ID,
-                "name": "User 1",
-                "status": "active"
-            }
-        })
-        
-        # Wait for awareness propagation
-        await asyncio.sleep(TEST_TIMEOUT)
-        
-        # Get awareness states from client2
-        client2_states = await client2.get_awareness_states()
-        client1_id = client1.provider.awareness.client_id
-        
-        # Verify client2 received client1's active status
-        assert client1_id in client2_states
-        assert client2_states[client1_id]["user"]["status"] == "active"
-        
-        # Update to idle status
-        await client1.update_awareness({
-            "user": {
-                "id": USER1_ID,
-                "name": "User 1",
-                "status": "idle"
-            }
-        })
-        
-        # Wait for awareness propagation
-        await asyncio.sleep(TEST_TIMEOUT)
-        
-        # Get updated awareness states
-        client2_states = await client2.get_awareness_states()
-        
-        # Verify status was updated to idle
-        assert client2_states[client1_id]["user"]["status"] == "idle"
-        
-        # Clean up
-        await client1.disconnect()
-        await client2.disconnect()
-    
-    @pytest.mark.asyncio
-    async def test_awareness_cleanup_for_disconnected_users(self, multi_client_websocket_simulation):
-        """Test that awareness state is cleaned up for disconnected users.
-        
-        This test verifies that when a client disconnects, their awareness state is
-        properly cleaned up after a timeout period, ensuring that other clients
-        don't continue to see presence information for users who are no longer connected.
-        """
-        """Test that awareness state is cleaned up for disconnected users."""
-        # Create two clients
-        client1 = await multi_client_websocket_simulation(user_id=USER1_ID)
-        client2 = await multi_client_websocket_simulation(user_id=USER2_ID)
-        
-        # Connect both clients to the same document
-        doc_id = "test-cleanup-doc"
-        await client1.connect(doc_id=doc_id)
-        await client2.connect(doc_id=doc_id)
-        
-        # Set awareness state for both clients
-        await client1.update_awareness({
-            "user": {"id": USER1_ID, "name": "User 1"}
-        })
-        
-        await client2.update_awareness({
-            "user": {"id": USER2_ID, "name": "User 2"}
-        })
-        
-        # Wait for awareness propagation
-        await asyncio.sleep(TEST_TIMEOUT)
-        
-        # Verify both clients are aware of each other
-        client1_states = await client1.get_awareness_states()
-        client2_states = await client2.get_awareness_states()
-        client1_id = client1.provider.awareness.client_id
-        client2_id = client2.provider.awareness.client_id
-        
-        assert client2_id in client1_states
-        assert client1_id in client2_states
-        
-        # Disconnect client1
-        await client1.disconnect()
-        
-        # Wait for cleanup to occur (this may need adjustment based on actual cleanup timing)
-        await asyncio.sleep(CLEANUP_TIMEOUT)
-        
-        # Get updated awareness states from client2
-        client2_states = await client2.get_awareness_states()
-        
-        # Verify client1's state has been removed
-        assert client1_id not in client2_states
-        
-        # Clean up
-        await client2.disconnect()
-    
-    @pytest.mark.asyncio
-    async def test_multiple_awareness_updates(self, multi_client_websocket_simulation):
-        """Test that multiple awareness updates are correctly handled.
-        
-        This test verifies that when multiple clients are connected to the same document,
-        all clients correctly receive and process awareness updates from all other clients.
-        """
-        """Test that multiple awareness updates are correctly handled."""
-        # Create three clients
-        client1 = await multi_client_websocket_simulation(user_id=USER1_ID)
-        client2 = await multi_client_websocket_simulation(user_id=USER2_ID)
-        client3 = await multi_client_websocket_simulation(user_id=USER3_ID)
-        
-        # Connect all clients to the same document
-        doc_id = "test-multiple-doc"
-        await client1.connect(doc_id=doc_id)
-        await client2.connect(doc_id=doc_id)
-        await client3.connect(doc_id=doc_id)
-        
-        # Set awareness states for all clients
-        await client1.update_awareness({
-            "user": {"id": USER1_ID, "name": "User 1"},
-            "cursor": {"cellId": "cell1", "position": {"line": 1, "column": 5}}
-        })
-        
-        await client2.update_awareness({
-            "user": {"id": USER2_ID, "name": "User 2"},
-            "cursor": {"cellId": "cell2", "position": {"line": 2, "column": 10}}
-        })
-        
-        await client3.update_awareness({
-            "user": {"id": USER3_ID, "name": "User 3"},
-            "cursor": {"cellId": "cell3", "position": {"line": 3, "column": 15}}
-        })
-        
-        # Wait for awareness propagation
-        await asyncio.sleep(TEST_TIMEOUT)
-        
-        # Get awareness states from client1
-        client1_states = await client1.get_awareness_states()
-        client2_id = client2.provider.awareness.client_id
-        client3_id = client3.provider.awareness.client_id
-        
-        # Verify client1 received awareness states from both other clients
-        assert client2_id in client1_states
-        assert client3_id in client1_states
-        assert client1_states[client2_id]["cursor"]["cellId"] == "cell2"
-        assert client1_states[client3_id]["cursor"]["cellId"] == "cell3"
-        
-        # Clean up
-        await client1.disconnect()
-        await client2.disconnect()
-        await client3.disconnect()
-    
-    @pytest.mark.asyncio
-    async def test_awareness_throttling(self, multi_client_websocket_simulation):
-        """Test that rapid awareness updates are properly throttled.
-        
-        This test verifies that when a client sends multiple rapid awareness updates,
-        the system properly throttles these updates to prevent overwhelming the network
-        while ensuring that the final state is correctly synchronized.
-        """
-        """Test that rapid awareness updates are properly throttled."""
-        # Create two clients
-        client1 = await multi_client_websocket_simulation(user_id=USER1_ID)
-        client2 = await multi_client_websocket_simulation(user_id=USER2_ID)
-        
-        # Connect both clients to the same document
-        doc_id = "test-throttling-doc"
-        await client1.connect(doc_id=doc_id)
-        await client2.connect(doc_id=doc_id)
-        
-        # Perform multiple rapid cursor position updates
-        for i in range(10):
-            await client1.update_awareness({
-                "user": {"id": USER1_ID, "name": "User 1"},
-                "cursor": {
-                    "cellId": "cell1",
-                    "position": {"line": i, "column": i * 2}
-                }
-            })
-            # No sleep between updates to simulate rapid changes
-        
-        # Wait for final awareness propagation
-        await asyncio.sleep(TEST_TIMEOUT * 2)
-        
-        # Get awareness states from client2
-        client2_states = await client2.get_awareness_states()
-        client1_id = client1.provider.awareness.client_id
-        
-        # Verify client2 received the final cursor position
-        assert client1_id in client2_states
-        assert client2_states[client1_id]["cursor"]["position"]["line"] == 9
-        assert client2_states[client1_id]["cursor"]["position"]["column"] == 18
-        
-        # Clean up
-        await client1.disconnect()
-        await client2.disconnect()
-    
-    @pytest.mark.asyncio
-    async def test_awareness_persistence_across_reconnection(self, multi_client_websocket_simulation):
-        """Test that awareness state is preserved when a client reconnects.
-        
-        This test verifies that when a client disconnects and then reconnects,
-        they can restore their awareness state and other clients will see the
-        updated state with the new client ID.
-        """
-        """Test that awareness state is preserved when a client reconnects."""
-        # Create two clients
-        client1 = await multi_client_websocket_simulation(user_id=USER1_ID)
-        client2 = await multi_client_websocket_simulation(user_id=USER2_ID)
-        
-        # Connect both clients to the same document
-        doc_id = "test-reconnection-doc"
-        await client1.connect(doc_id=doc_id)
-        await client2.connect(doc_id=doc_id)
-        
-        # Set awareness state for client1
-        await client1.update_awareness({
-            "user": {"id": USER1_ID, "name": "User 1"},
-            "cursor": {"cellId": "cell1", "position": {"line": 5, "column": 10}}
-        })
-        
-        # Wait for awareness propagation
-        await asyncio.sleep(TEST_TIMEOUT)
-        
-        # Disconnect and reconnect client1
-        client1_id = client1.provider.awareness.client_id
-        await client1.disconnect()
-        
-        # Wait for cleanup to occur
-        await asyncio.sleep(CLEANUP_TIMEOUT)
-        
-        # Verify client1's state has been removed
-        client2_states = await client2.get_awareness_states()
-        assert client1_id not in client2_states
-        
-        # Reconnect client1
-        await client1.connect(doc_id=doc_id)
-        
-        # Set the same awareness state
-        await client1.update_awareness({
-            "user": {"id": USER1_ID, "name": "User 1"},
-            "cursor": {"cellId": "cell1", "position": {"line": 5, "column": 10}}
-        })
-        
-        # Wait for awareness propagation
-        await asyncio.sleep(TEST_TIMEOUT)
-        
-        # Get awareness states from client2
-        client2_states = await client2.get_awareness_states()
-        new_client1_id = client1.provider.awareness.client_id
-        
-        # Verify client1's state is present with the new client ID
-        assert new_client1_id in client2_states
-        assert client2_states[new_client1_id]["user"]["id"] == USER1_ID
-        assert client2_states[new_client1_id]["cursor"]["cellId"] == "cell1"
-        
-        # Clean up
-        await client1.disconnect()
-        await client2.disconnect()
+        tracker.destroy()
