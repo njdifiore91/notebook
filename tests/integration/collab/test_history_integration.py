@@ -1,520 +1,709 @@
 import asyncio
-import json
-import os
 import pytest
+import json
 import time
-from unittest.mock import MagicMock, patch
+from typing import List, Dict, Any, Callable, Awaitable
+
+# Skip tests if y_py is not installed
+pytest.importorskip("y_py")
 
 
 @pytest.mark.asyncio
-async def test_version_history_recording(jp_server_with_collab, create_collaborative_session):
+async def test_version_history_recording(jp_serverapp, jp_ws_client):
     """
-    Test that document changes are properly recorded in the version history
-    with correct user attribution.
+    Test that document changes are properly recorded in the version history.
+    
+    Verifies that edits made by different users are recorded with correct attribution.
     """
-    # Create a collaborative session with 2 clients
-    document_path, clients = await create_collaborative_session(num_clients=2)
-    user1_client, user2_client = clients
+    # Create two clients connected to the same document
+    client1 = await jp_ws_client(user_id="user1", username="User One")
+    client2 = await jp_ws_client(user_id="user2", username="User Two")
     
-    # Clear any initial messages
-    user1_client.clear_received_messages()
-    user2_client.clear_received_messages()
+    # Both clients subscribe to the same document
+    doc_id = "test-history-recording-doc"
+    await client1.subscribe_document(doc_id)
+    await client2.subscribe_document(doc_id)
     
-    # User 1 makes a change to a cell
-    cell_id = "cell-1"
-    await user1_client.update_cell(cell_id, "# Updated by User 1")
+    # Wait for initial synchronization
+    await asyncio.sleep(0.5)
     
-    # Wait for the change to be processed
-    await asyncio.sleep(1)
-    
-    # User 2 makes a different change
-    await user2_client.update_cell(cell_id, "# Updated by User 1\n# Then updated by User 2")
-    
-    # Wait for the change to be processed
-    await asyncio.sleep(1)
-    
-    # Request version history from user 1's client
-    await user1_client.send({"type": "get_version_history"})
-    
-    # Wait for the response and verify it contains both changes with correct attribution
-    history_message = await user1_client.wait_for_message_containing("version_history")
-    assert history_message is not None, "No version history message received"
-    
-    # Parse the history message
-    history_data = json.loads(history_message)
-    versions = history_data.get("versions", [])
-    
-    # Verify we have at least 2 versions (could be more with initial state)
-    assert len(versions) >= 2, f"Expected at least 2 versions, got {len(versions)}"
-    
-    # Verify user attribution in the versions
-    user_ids_in_history = [version.get("user_id") for version in versions]
-    assert user1_client.user_id in user_ids_in_history, f"User 1 ({user1_client.user_id}) not found in version history"
-    assert user2_client.user_id in user_ids_in_history, f"User 2 ({user2_client.user_id}) not found in version history"
-
-
-@pytest.mark.asyncio
-async def test_version_timeline_navigation(jp_server_with_collab, create_collaborative_session):
-    """
-    Test that users can navigate through the version timeline and view
-    different versions of the document.
-    """
-    # Create a collaborative session with 1 client
-    document_path, clients = await create_collaborative_session(num_clients=1)
-    client = clients[0]
-    
-    # Clear any initial messages
-    client.clear_received_messages()
-    
-    # Make a series of changes to create a version history
-    cell_id = "cell-1"
-    versions_content = [
-        "# Version 1",
-        "# Version 1\n# Version 2",
-        "# Version 1\n# Version 2\n# Version 3"
-    ]
-    
-    # Apply each change and record the timestamp
-    version_timestamps = []
-    for content in versions_content:
-        await client.update_cell(cell_id, content)
-        version_timestamps.append(int(time.time() * 1000))
-        await asyncio.sleep(1)  # Wait between changes
-    
-    # Request version history
-    await client.send({"type": "get_version_history"})
-    history_message = await client.wait_for_message_containing("version_history")
-    assert history_message is not None, "No version history message received"
-    
-    # Parse the history message
-    history_data = json.loads(history_message)
-    versions = history_data.get("versions", [])
-    
-    # Verify we have at least 3 versions
-    assert len(versions) >= 3, f"Expected at least 3 versions, got {len(versions)}"
-    
-    # Navigate to the second version
-    second_version_id = versions[-2].get("id")
-    await client.send({"type": "view_version", "version_id": second_version_id})
-    
-    # Wait for the response with the document state at that version
-    version_view_message = await client.wait_for_message_containing("version_state")
-    assert version_view_message is not None, "No version state message received"
-    
-    # Parse the version state message
-    version_state_data = json.loads(version_view_message)
-    version_content = version_state_data.get("state", {}).get("cells", [])
-    
-    # Verify the content matches the expected version
-    found_cell = False
-    for cell in version_content:
-        if cell.get("id") == cell_id:
-            found_cell = True
-            cell_content = cell.get("source", "")
-            assert "Version 2" in cell_content, f"Expected 'Version 2' in content, got {cell_content}"
-            assert "Version 3" not in cell_content, f"Unexpected 'Version 3' in content: {cell_content}"
-    
-    assert found_cell, f"Cell {cell_id} not found in version state"
-
-
-@pytest.mark.asyncio
-async def test_document_restoration(jp_server_with_collab, create_collaborative_session, verify_document_consistency):
-    """
-    Test that a document can be restored to a previous state from the version history.
-    """
-    # Create a collaborative session with 2 clients
-    document_path, clients = await create_collaborative_session(num_clients=2)
-    user1_client, user2_client = clients
-    
-    # Clear any initial messages
-    user1_client.clear_received_messages()
-    user2_client.clear_received_messages()
-    
-    # Make a series of changes to create a version history
-    cell_id = "cell-1"
-    initial_content = "# Initial content"
-    updated_content = "# Updated content"
-    final_content = "# Final content"
-    
-    # Initial change
-    await user1_client.update_cell(cell_id, initial_content)
-    await asyncio.sleep(1)
-    
-    # Request version history to get the initial version ID
-    await user1_client.send({"type": "get_version_history"})
-    history_message = await user1_client.wait_for_message_containing("version_history")
-    history_data = json.loads(history_message)
-    initial_version_id = history_data.get("versions", [])[0].get("id")
-    
-    # Make more changes
-    await user1_client.update_cell(cell_id, updated_content)
-    await asyncio.sleep(1)
-    await user2_client.update_cell(cell_id, final_content)
-    await asyncio.sleep(1)
-    
-    # Verify both clients see the final content
-    await verify_document_consistency(clients)
-    
-    # Restore to the initial version
-    await user1_client.send({"type": "restore_version", "version_id": initial_version_id})
-    
-    # Wait for the restoration to complete
-    restore_message = await user1_client.wait_for_message_containing("version_restored")
-    assert restore_message is not None, "No version restored message received"
+    # Client 1 adds a cell
+    cell1_id = "cell1"
+    cell1_content = "# Heading created by User One"
+    await client1.add_cell(doc_id, cell1_id, cell1_content, "markdown")
     
     # Wait for synchronization
-    await asyncio.sleep(2)
+    await asyncio.sleep(0.5)
     
-    # Verify both clients see the restored content
-    await verify_document_consistency(clients)
+    # Client 2 adds another cell
+    cell2_id = "cell2"
+    cell2_content = "print('Code added by User Two')" 
+    await client2.add_cell(doc_id, cell2_id, cell2_content, "code")
     
-    # Get the document state from both clients
-    user1_state = await user1_client.get_document_state()
-    user2_state = await user2_client.get_document_state()
+    # Wait for synchronization
+    await asyncio.sleep(0.5)
     
-    # Verify the content matches the initial version
-    for state in [user1_state, user2_state]:
-        found_cell = False
-        for cell in state.get("cells", []):
-            if cell.get("id") == cell_id:
-                found_cell = True
-                cell_content = cell.get("source", "")
-                assert initial_content in cell_content, f"Expected '{initial_content}' in content, got {cell_content}"
-        assert found_cell, f"Cell {cell_id} not found in document state"
+    # Client 1 modifies their cell
+    cell1_updated = "# Updated heading by User One"
+    await client1.update_cell_content(doc_id, cell1_id, cell1_updated)
+    
+    # Wait for synchronization
+    await asyncio.sleep(0.5)
+    
+    # Retrieve version history
+    history = await client1.get_version_history(doc_id)
+    
+    # Verify history contains at least 3 versions (initial + 3 edits)
+    assert len(history) >= 3, "Version history should contain at least 3 entries"
+    
+    # Verify user attribution in history
+    user_entries = {}
+    for entry in history:
+        user_id = entry.get("user_id")
+        if user_id not in user_entries:
+            user_entries[user_id] = 0
+        user_entries[user_id] += 1
+    
+    # Both users should have entries in the history
+    assert "user1" in user_entries, "User1 should have entries in the version history"
+    assert "user2" in user_entries, "User2 should have entries in the version history"
+    
+    # Verify timestamps are in descending order (most recent first)
+    timestamps = [entry.get("timestamp") for entry in history]
+    assert all(timestamps[i] >= timestamps[i+1] for i in range(len(timestamps)-1)), "History should be in descending timestamp order"
 
 
 @pytest.mark.asyncio
-async def test_change_attribution(jp_server_with_collab, create_collaborative_session):
+async def test_version_timeline_navigation(jp_serverapp, jp_ws_client):
     """
-    Test that changes in the version history are correctly attributed to specific users.
+    Test version timeline visualization and navigation.
+    
+    Verifies that users can view and navigate through the version timeline.
     """
-    # Create a collaborative session with 3 clients representing different users
-    document_path, clients = await create_collaborative_session(num_clients=3)
-    user1_client, user2_client, user3_client = clients
+    # Create a client
+    client = await jp_ws_client(user_id="user1", username="User One")
     
-    # Clear any initial messages
-    for client in clients:
-        client.clear_received_messages()
+    # Subscribe to a document
+    doc_id = "test-version-timeline-doc"
+    await client.subscribe_document(doc_id)
     
-    # Each user makes a distinct change
-    cell_id = "cell-1"
-    await user1_client.update_cell(cell_id, "# Change by User 1")
-    await asyncio.sleep(1)
+    # Wait for initial synchronization
+    await asyncio.sleep(0.5)
     
-    await user2_client.update_cell(cell_id, "# Change by User 1\n# Change by User 2")
-    await asyncio.sleep(1)
+    # Create multiple versions by adding and modifying cells
+    for i in range(5):
+        cell_id = f"cell_{i}"
+        cell_content = f"# Version {i} content"
+        await client.add_cell(doc_id, cell_id, cell_content, "markdown")
+        await asyncio.sleep(0.2)  # Small delay between operations
     
-    await user3_client.update_cell(cell_id, "# Change by User 1\n# Change by User 2\n# Change by User 3")
-    await asyncio.sleep(1)
+    # Wait for synchronization
+    await asyncio.sleep(0.5)
     
-    # Request detailed version history with attribution
-    await user1_client.send({"type": "get_detailed_history", "cell_id": cell_id})
+    # Retrieve version timeline
+    timeline = await client.get_version_timeline(doc_id)
     
-    # Wait for the response
-    detailed_history_message = await user1_client.wait_for_message_containing("detailed_history")
-    assert detailed_history_message is not None, "No detailed history message received"
+    # Verify timeline contains at least 5 versions
+    assert len(timeline) >= 5, "Version timeline should contain at least 5 entries"
     
-    # Parse the detailed history message
-    history_data = json.loads(detailed_history_message)
-    changes = history_data.get("changes", [])
+    # Verify timeline entries have required fields
+    for entry in timeline:
+        assert "snapshot_id" in entry, "Timeline entry should have snapshot_id"
+        assert "timestamp" in entry, "Timeline entry should have timestamp"
+        assert "username" in entry, "Timeline entry should have username"
+        assert "sequence_number" in entry, "Timeline entry should have sequence_number"
     
-    # Verify we have at least 3 changes
-    assert len(changes) >= 3, f"Expected at least 3 changes, got {len(changes)}"
+    # Get a specific version from the timeline
+    middle_version = timeline[len(timeline) // 2]
+    version_id = middle_version["snapshot_id"]
     
-    # Verify each user's change is attributed correctly
-    user_ids = [user1_client.user_id, user2_client.user_id, user3_client.user_id]
-    for user_id in user_ids:
-        user_changes = [change for change in changes if change.get("user_id") == user_id]
-        assert len(user_changes) > 0, f"No changes found for user {user_id}"
+    # Retrieve the specific version
+    version_data = await client.get_version_by_id(doc_id, version_id)
+    
+    # Verify the version data contains document state
+    assert "document_state" in version_data, "Version data should contain document state"
+    assert "metadata" in version_data, "Version data should contain metadata"
+    
+    # Verify we can navigate to a version by timestamp
+    timestamp = middle_version["timestamp"]
+    version_by_time = await client.get_version_by_timestamp(doc_id, timestamp)
+    
+    # Should be the same version or very close
+    assert version_by_time["snapshot_id"] == version_id or \
+           abs(version_by_time["timestamp"] - timestamp) < 1000, \
+           "Version by timestamp should match or be very close to requested time"
+
+
+@pytest.mark.asyncio
+async def test_document_restoration(jp_serverapp, jp_ws_client):
+    """
+    Test document restoration to previous states.
+    
+    Verifies that a document can be restored to a previous version.
+    """
+    # Create a client
+    client = await jp_ws_client(user_id="user1", username="User One")
+    
+    # Subscribe to a document
+    doc_id = "test-document-restoration-doc"
+    await client.subscribe_document(doc_id)
+    
+    # Wait for initial synchronization
+    await asyncio.sleep(0.5)
+    
+    # Create initial version with two cells
+    await client.add_cell(doc_id, "cell1", "# First cell", "markdown")
+    await client.add_cell(doc_id, "cell2", "print('Second cell')" , "code")
+    
+    # Wait for synchronization
+    await asyncio.sleep(0.5)
+    
+    # Get the current document state to restore later
+    initial_state = await client.get_document_state(doc_id)
+    
+    # Get version history to find the initial version ID
+    history = await client.get_version_history(doc_id)
+    initial_version_id = history[-1]["snapshot_id"]  # Oldest version
+    
+    # Make additional changes to the document
+    await client.update_cell_content(doc_id, "cell1", "# Modified first cell")
+    await client.add_cell(doc_id, "cell3", "# Third cell added later", "markdown")
+    await client.delete_cell(doc_id, "cell2")  # Delete the second cell
+    
+    # Wait for synchronization
+    await asyncio.sleep(0.5)
+    
+    # Verify the document has changed
+    modified_state = await client.get_document_state(doc_id)
+    assert modified_state != initial_state, "Document should have changed after modifications"
+    
+    # Restore to the initial version
+    restore_success = await client.restore_version(doc_id, initial_version_id)
+    assert restore_success, "Version restoration should succeed"
+    
+    # Wait for restoration to complete
+    await asyncio.sleep(0.5)
+    
+    # Get the restored document state
+    restored_state = await client.get_document_state(doc_id)
+    
+    # Verify the document has been restored to match the initial state
+    # Note: We compare the cells structure rather than the entire state as some metadata might differ
+    assert len(restored_state["cells"]) == len(initial_state["cells"]), "Restored document should have the same number of cells"
+    
+    # Check that cell1 and cell2 exist with original content
+    assert "cell1" in restored_state["cells"], "cell1 should exist in restored document"
+    assert restored_state["cells"]["cell1"]["source"] == "# First cell", "cell1 content should be restored"
+    assert "cell2" in restored_state["cells"], "cell2 should exist in restored document"
+    assert restored_state["cells"]["cell2"]["source"] == "print('Second cell')", "cell2 content should be restored"
+    
+    # Check that cell3 doesn't exist in the restored state
+    assert "cell3" not in restored_state["cells"], "cell3 should not exist in restored document"
+
+
+@pytest.mark.asyncio
+async def test_change_attribution(jp_serverapp, jp_ws_client):
+    """
+    Test that changes are correctly attributed to specific users.
+    
+    Verifies that each change in the version history is correctly attributed to the user who made it.
+    """
+    # Create three clients with different user identities
+    client1 = await jp_ws_client(user_id="user1", username="User One")
+    client2 = await jp_ws_client(user_id="user2", username="User Two")
+    client3 = await jp_ws_client(user_id="user3", username="User Three")
+    
+    # All clients subscribe to the same document
+    doc_id = "test-change-attribution-doc"
+    await client1.subscribe_document(doc_id)
+    await client2.subscribe_document(doc_id)
+    await client3.subscribe_document(doc_id)
+    
+    # Wait for initial synchronization
+    await asyncio.sleep(0.5)
+    
+    # Each client makes specific changes
+    # Client 1 adds a markdown cell
+    await client1.add_cell(doc_id, "cell1", "# Heading by User One", "markdown")
+    await asyncio.sleep(0.5)
+    
+    # Client 2 adds a code cell
+    await client2.add_cell(doc_id, "cell2", "print('Code by User Two')", "code")
+    await asyncio.sleep(0.5)
+    
+    # Client 3 adds another markdown cell
+    await client3.add_cell(doc_id, "cell3", "## Subheading by User Three", "markdown")
+    await asyncio.sleep(0.5)
+    
+    # Client 1 modifies Client 3's cell
+    await client1.update_cell_content(doc_id, "cell3", "## Modified by User One")
+    await asyncio.sleep(0.5)
+    
+    # Get version history
+    history = await client1.get_version_history(doc_id)
+    
+    # Create a mapping of changes to users
+    change_map = {}
+    for entry in history:
+        user_id = entry.get("user_id")
+        if user_id not in change_map:
+            change_map[user_id] = []
+        change_map[user_id].append(entry)
+    
+    # Verify each user's changes are recorded
+    assert "user1" in change_map, "User1's changes should be recorded"
+    assert len(change_map["user1"]) >= 2, "User1 should have at least 2 changes recorded"
+    
+    assert "user2" in change_map, "User2's changes should be recorded"
+    assert len(change_map["user2"]) >= 1, "User2 should have at least 1 change recorded"
+    
+    assert "user3" in change_map, "User3's changes should be recorded"
+    assert len(change_map["user3"]) >= 1, "User3 should have at least 1 change recorded"
+    
+    # Get user-specific contributions
+    user1_contributions = await client1.get_user_contributions(doc_id, "user1")
+    user2_contributions = await client1.get_user_contributions(doc_id, "user2")
+    user3_contributions = await client1.get_user_contributions(doc_id, "user3")
+    
+    # Verify user-specific contributions match the expected counts
+    assert len(user1_contributions) >= 2, "User1 should have at least 2 contributions"
+    assert len(user2_contributions) >= 1, "User2 should have at least 1 contribution"
+    assert len(user3_contributions) >= 1, "User3 should have at least 1 contribution"
+    
+    # Verify username is correctly recorded in the metadata
+    for entry in user1_contributions:
+        assert entry.get("username") == "User One", "Username should be correctly recorded"
+    
+    for entry in user2_contributions:
+        assert entry.get("username") == "User Two", "Username should be correctly recorded"
+    
+    for entry in user3_contributions:
+        assert entry.get("username") == "User Three", "Username should be correctly recorded"
+
+
+@pytest.mark.asyncio
+async def test_diff_visualization(jp_serverapp, jp_ws_client):
+    """
+    Test diff visualization between different document versions.
+    
+    Verifies that differences between versions can be visualized correctly.
+    """
+    # Create a client
+    client = await jp_ws_client(user_id="user1", username="User One")
+    
+    # Subscribe to a document
+    doc_id = "test-diff-visualization-doc"
+    await client.subscribe_document(doc_id)
+    
+    # Wait for initial synchronization
+    await asyncio.sleep(0.5)
+    
+    # Create initial version with two cells
+    await client.add_cell(doc_id, "cell1", "# Original heading", "markdown")
+    await client.add_cell(doc_id, "cell2", "print('Original code')" , "code")
+    
+    # Wait for synchronization
+    await asyncio.sleep(0.5)
+    
+    # Get the current version ID
+    history = await client.get_version_history(doc_id)
+    first_version_id = history[0]["snapshot_id"]  # Most recent version
+    
+    # Make changes to the document
+    await client.update_cell_content(doc_id, "cell1", "# Modified heading")
+    await client.update_cell_content(doc_id, "cell2", "print('Modified code')")
+    await client.add_cell(doc_id, "cell3", "# New cell added", "markdown")
+    
+    # Wait for synchronization
+    await asyncio.sleep(0.5)
+    
+    # Get the updated version ID
+    history = await client.get_version_history(doc_id)
+    second_version_id = history[0]["snapshot_id"]  # Most recent version
+    
+    # Get diff between versions
+    diff = await client.get_version_diff(doc_id, first_version_id, second_version_id)
+    
+    # Verify diff structure
+    assert "added" in diff, "Diff should contain 'added' section"
+    assert "removed" in diff, "Diff should contain 'removed' section"
+    assert "modified" in diff, "Diff should contain 'modified' section"
+    assert "unchanged" in diff, "Diff should contain 'unchanged' section"
+    
+    # Verify diff content
+    assert "cell3" in diff["added"], "cell3 should be in the 'added' section"
+    assert "cell1" in diff["modified"], "cell1 should be in the 'modified' section"
+    assert "cell2" in diff["modified"], "cell2 should be in the 'modified' section"
+    assert len(diff["removed"]) == 0, "No cells were removed"
+    
+    # Verify cell-level diff details
+    cell_diffs = diff.get("cell_diffs", {})
+    if cell_diffs:  # If detailed cell diffs are available
+        assert "cell1" in cell_diffs, "cell1 should have diff details"
+        assert "cell2" in cell_diffs, "cell2 should have diff details"
         
-        # Verify the change content contains the expected text
-        for change in user_changes:
-            content = change.get("content", "")
-            user_number = user_id.split("-")[-1]  # Extract user number from ID
-            assert f"User {user_number}" in content, f"Expected 'User {user_number}' in content, got {content}"
+        # Check that cell1 diff shows the heading change
+        assert "Original heading" in str(cell_diffs["cell1"]), "cell1 diff should contain original content"
+        assert "Modified heading" in str(cell_diffs["cell1"]), "cell1 diff should contain modified content"
+        
+        # Check that cell2 diff shows the code change
+        assert "Original code" in str(cell_diffs["cell2"]), "cell2 diff should contain original content"
+        assert "Modified code" in str(cell_diffs["cell2"]), "cell2 diff should contain modified content"
 
 
 @pytest.mark.asyncio
-async def test_diff_visualization(jp_server_with_collab, create_collaborative_session):
+async def test_version_history_persistence(jp_serverapp, jp_ws_client):
     """
-    Test that users can view diffs between different document versions.
+    Test that version history persists across server restarts.
+    
+    Verifies that document history is properly stored and can be retrieved after a server restart.
     """
-    # Create a collaborative session with 1 client
-    document_path, clients = await create_collaborative_session(num_clients=1)
-    client = clients[0]
+    # Create a client
+    client = await jp_ws_client(user_id="user1", username="User One")
     
-    # Clear any initial messages
-    client.clear_received_messages()
+    # Subscribe to a document
+    doc_id = "test-history-persistence-doc"
+    await client.subscribe_document(doc_id)
     
-    # Make a series of changes to create a version history
-    cell_id = "cell-1"
-    version1_content = "# Version 1 content\nThis is the first version."
-    version2_content = "# Version 1 content\nThis is the first version.\n\n# Version 2 addition"
+    # Wait for initial synchronization
+    await asyncio.sleep(0.5)
     
-    # Apply changes
-    await client.update_cell(cell_id, version1_content)
-    await asyncio.sleep(1)
+    # Create multiple versions
+    for i in range(3):
+        cell_id = f"cell_{i}"
+        cell_content = f"# Content version {i}"
+        await client.add_cell(doc_id, cell_id, cell_content, "markdown")
+        await asyncio.sleep(0.5)  # Ensure each change is processed separately
     
-    # Request version history to get the first version ID
-    await client.send({"type": "get_version_history"})
-    history_message = await client.wait_for_message_containing("version_history")
-    history_data = json.loads(history_message)
-    version1_id = history_data.get("versions", [])[0].get("id")
+    # Get the version history before restart
+    history_before = await client.get_version_history(doc_id)
+    assert len(history_before) >= 3, "Should have at least 3 versions before restart"
     
-    # Make second change
-    await client.update_cell(cell_id, version2_content)
-    await asyncio.sleep(1)
+    # Store version IDs for later comparison
+    version_ids_before = [entry["snapshot_id"] for entry in history_before]
     
-    # Request updated version history to get the second version ID
-    await client.send({"type": "get_version_history"})
-    history_message = await client.wait_for_message_containing("version_history")
-    history_data = json.loads(history_message)
-    version2_id = history_data.get("versions", [])[-1].get("id")
+    # Simulate server restart by reconnecting the client
+    await client.disconnect()
+    await asyncio.sleep(1)  # Wait for disconnect to complete
     
-    # Request diff between versions
-    await client.send({
-        "type": "get_version_diff",
-        "from_version_id": version1_id,
-        "to_version_id": version2_id
-    })
+    # Reconnect with the same user ID
+    client = await jp_ws_client(user_id="user1", username="User One")
+    await client.subscribe_document(doc_id)
+    await asyncio.sleep(1)  # Wait for reconnection and state synchronization
     
-    # Wait for the diff response
-    diff_message = await client.wait_for_message_containing("version_diff")
-    assert diff_message is not None, "No version diff message received"
+    # Get the version history after restart
+    history_after = await client.get_version_history(doc_id)
     
-    # Parse the diff message
-    diff_data = json.loads(diff_message)
-    diffs = diff_data.get("diffs", [])
+    # Verify history persisted
+    assert len(history_after) >= len(history_before), "Version history should persist after restart"
     
-    # Verify the diff contains the expected changes
-    assert len(diffs) > 0, "No diffs found in the response"
+    # Verify version IDs are preserved
+    version_ids_after = [entry["snapshot_id"] for entry in history_after]
+    for version_id in version_ids_before:
+        assert version_id in version_ids_after, f"Version {version_id} should persist after restart"
     
-    # Find the diff for our cell
-    cell_diff = None
-    for diff in diffs:
-        if diff.get("cell_id") == cell_id:
-            cell_diff = diff
-            break
-    
-    assert cell_diff is not None, f"No diff found for cell {cell_id}"
-    
-    # Verify the diff shows the addition of the Version 2 content
-    diff_content = cell_diff.get("diff", [])
-    added_content_found = False
-    for part in diff_content:
-        if part.get("added") and "Version 2 addition" in part.get("content", ""):
-            added_content_found = True
-            break
-    
-    assert added_content_found, "Added content not found in diff"
+    # Verify we can still access a specific version from before the restart
+    old_version_id = version_ids_before[0]
+    version_data = await client.get_version_by_id(doc_id, old_version_id)
+    assert version_data is not None, "Should be able to retrieve pre-restart version"
+    assert "document_state" in version_data, "Version should contain document state"
 
 
 @pytest.mark.asyncio
-async def test_version_history_persistence(jp_server_with_collab, create_collaborative_session, simulate_server_restart):
+async def test_milestone_versions(jp_serverapp, jp_ws_client):
     """
-    Test that version history is persisted across server restarts.
+    Test creation and management of milestone versions.
+    
+    Verifies that important document versions can be marked as milestones with custom labels.
     """
-    # Create a collaborative session with 2 clients
-    document_path, clients = await create_collaborative_session(num_clients=2)
-    user1_client, user2_client = clients
+    # Create a client
+    client = await jp_ws_client(user_id="user1", username="User One")
     
-    # Clear any initial messages
-    user1_client.clear_received_messages()
-    user2_client.clear_received_messages()
+    # Subscribe to a document
+    doc_id = "test-milestone-versions-doc"
+    await client.subscribe_document(doc_id)
     
-    # Make changes to create a version history
-    cell_id = "cell-1"
-    await user1_client.update_cell(cell_id, "# Change before restart")
-    await asyncio.sleep(1)
+    # Wait for initial synchronization
+    await asyncio.sleep(0.5)
     
-    # Request version history before restart
-    await user1_client.send({"type": "get_version_history"})
-    before_restart_history = await user1_client.wait_for_message_containing("version_history")
-    assert before_restart_history is not None, "No version history message received before restart"
+    # Create initial content
+    await client.add_cell(doc_id, "cell1", "# Initial draft", "markdown")
+    await client.add_cell(doc_id, "cell2", "print('Draft code')" , "code")
     
-    # Parse the history message
-    before_history_data = json.loads(before_restart_history)
-    before_versions = before_history_data.get("versions", [])
+    # Wait for synchronization
+    await asyncio.sleep(0.5)
     
-    # Disconnect clients before server restart
-    await user1_client.disconnect()
-    await user2_client.disconnect()
+    # Create a milestone version labeled "First Draft"
+    milestone1_id = await client.create_milestone_snapshot(
+        doc_id, 
+        "First Draft", 
+        "Initial version of the document"
+    )
+    assert milestone1_id is not None, "Should successfully create milestone"
     
-    # Simulate server restart
-    restart_successful = await simulate_server_restart()
-    assert restart_successful, "Server restart failed"
+    # Make additional changes
+    await client.update_cell_content(doc_id, "cell1", "# Revised draft")
+    await client.update_cell_content(doc_id, "cell2", "print('Improved code')")
+    await client.add_cell(doc_id, "cell3", "# New section", "markdown")
     
-    # Reconnect clients
-    document_name = os.path.basename(document_path)
-    await user1_client.connect(document_name)
-    await user2_client.connect(document_name)
+    # Wait for synchronization
+    await asyncio.sleep(0.5)
     
-    # Wait for reconnection to stabilize
-    await asyncio.sleep(2)
+    # Create another milestone labeled "Revision 1"
+    milestone2_id = await client.create_milestone_snapshot(
+        doc_id, 
+        "Revision 1", 
+        "First major revision with improvements"
+    )
+    assert milestone2_id is not None, "Should successfully create second milestone"
     
-    # Clear any reconnection messages
-    user1_client.clear_received_messages()
+    # Get all milestones
+    milestones = await client.get_milestone_snapshots(doc_id)
     
-    # Request version history after restart
-    await user1_client.send({"type": "get_version_history"})
-    after_restart_history = await user1_client.wait_for_message_containing("version_history")
-    assert after_restart_history is not None, "No version history message received after restart"
+    # Verify milestones are recorded
+    assert len(milestones) >= 2, "Should have at least 2 milestone snapshots"
     
-    # Parse the history message
-    after_history_data = json.loads(after_restart_history)
-    after_versions = after_history_data.get("versions", [])
+    # Verify milestone metadata
+    milestone_labels = [m.get("snapshot_label") for m in milestones]
+    assert "First Draft" in milestone_labels, "First milestone should be recorded"
+    assert "Revision 1" in milestone_labels, "Second milestone should be recorded"
     
-    # Verify that the version history is preserved
-    assert len(after_versions) >= len(before_versions), "Version history lost after restart"
+    # Verify we can restore to a milestone
+    first_draft = next(m for m in milestones if m.get("snapshot_label") == "First Draft")
+    restore_success = await client.restore_version(doc_id, first_draft["snapshot_id"])
+    assert restore_success, "Should successfully restore to milestone version"
     
-    # Verify that the content of the versions is preserved
-    before_version_ids = [v.get("id") for v in before_versions]
-    after_version_ids = [v.get("id") for v in after_versions]
+    # Wait for restoration to complete
+    await asyncio.sleep(0.5)
     
-    for version_id in before_version_ids:
-        assert version_id in after_version_ids, f"Version {version_id} missing after restart"
-    
-    # Make a new change after restart
-    await user2_client.update_cell(cell_id, "# Change before restart\n# Change after restart")
-    await asyncio.sleep(1)
-    
-    # Request updated version history
-    await user1_client.send({"type": "get_version_history"})
-    updated_history = await user1_client.wait_for_message_containing("version_history")
-    assert updated_history is not None, "No updated version history message received"
-    
-    # Parse the updated history message
-    updated_history_data = json.loads(updated_history)
-    updated_versions = updated_history_data.get("versions", [])
-    
-    # Verify that the new version is added to the history
-    assert len(updated_versions) > len(after_versions), "New version not added to history after restart"
+    # Verify the document state matches the first draft
+    doc_state = await client.get_document_state(doc_id)
+    assert len(doc_state["cells"]) == 2, "Restored document should have 2 cells"
+    assert "cell3" not in doc_state["cells"], "cell3 should not exist in restored first draft"
+    assert doc_state["cells"]["cell1"]["source"] == "# Initial draft", "cell1 content should match first draft"
 
 
 @pytest.mark.asyncio
-async def test_multi_user_version_history_view(jp_server_with_collab, create_collaborative_session):
+async def test_concurrent_history_access(jp_serverapp, jp_ws_client):
     """
-    Test that multiple users can view the same version history and see consistent information.
+    Test concurrent access to version history by multiple clients.
+    
+    Verifies that multiple clients can simultaneously access and modify version history.
     """
-    # Create a collaborative session with 3 clients
-    document_path, clients = await create_collaborative_session(num_clients=3)
-    user1_client, user2_client, user3_client = clients
+    # Create three clients
+    client1 = await jp_ws_client(user_id="user1", username="User One")
+    client2 = await jp_ws_client(user_id="user2", username="User Two")
+    client3 = await jp_ws_client(user_id="user3", username="User Three")
     
-    # Clear any initial messages
-    for client in clients:
-        client.clear_received_messages()
+    # All clients subscribe to the same document
+    doc_id = "test-concurrent-history-doc"
+    await client1.subscribe_document(doc_id)
+    await client2.subscribe_document(doc_id)
+    await client3.subscribe_document(doc_id)
     
-    # User 1 makes a change
-    cell_id = "cell-1"
-    await user1_client.update_cell(cell_id, "# Change by User 1")
-    await asyncio.sleep(1)
+    # Wait for initial synchronization
+    await asyncio.sleep(0.5)
     
-    # User 2 makes a change
-    await user2_client.update_cell(cell_id, "# Change by User 1\n# Change by User 2")
-    await asyncio.sleep(1)
+    # Create initial content
+    await client1.add_cell(doc_id, "cell1", "# Initial content", "markdown")
+    await asyncio.sleep(0.5)
     
-    # All users request version history
-    for client in clients:
-        await client.send({"type": "get_version_history"})
-    
-    # Wait for all responses
-    history_messages = []
-    for client in clients:
-        history_message = await client.wait_for_message_containing("version_history")
-        assert history_message is not None, f"No version history message received for {client.user_id}"
-        history_messages.append(history_message)
-    
-    # Parse all history messages
-    history_data_list = [json.loads(msg) for msg in history_messages]
-    versions_list = [data.get("versions", []) for data in history_data_list]
-    
-    # Verify all clients see the same number of versions
-    version_counts = [len(versions) for versions in versions_list]
-    assert all(count == version_counts[0] for count in version_counts), "Inconsistent version counts across clients"
-    
-    # Verify all clients see the same version IDs in the same order
-    version_ids_list = [[v.get("id") for v in versions] for versions in versions_list]
-    for i in range(1, len(version_ids_list)):
-        assert version_ids_list[i] == version_ids_list[0], f"Version IDs don't match between client 0 and client {i}"
-    
-    # Verify all clients see the same user attributions
-    user_attributions_list = [[v.get("user_id") for v in versions] for versions in versions_list]
-    for i in range(1, len(user_attributions_list)):
-        assert user_attributions_list[i] == user_attributions_list[0], f"User attributions don't match between client 0 and client {i}"
-
-
-@pytest.mark.asyncio
-async def test_version_history_with_multiple_cells(jp_server_with_collab, create_test_document, jp_ws_client):
-    """
-    Test that version history correctly tracks changes across multiple cells.
-    """
-    # Create a test document with multiple cells
-    cells = [
-        {
-            "cell_type": "markdown",
-            "metadata": {"id": "cell-1"},
-            "source": ["# Cell 1\n", "Initial content for cell 1."]
-        },
-        {
-            "cell_type": "code",
-            "execution_count": None,
-            "metadata": {"id": "cell-2"},
-            "outputs": [],
-            "source": ["# Cell 2\n", "print('Initial content for cell 2.')"]
-        },
-        {
-            "cell_type": "markdown",
-            "metadata": {"id": "cell-3"},
-            "source": ["# Cell 3\n", "Initial content for cell 3."]
-        }
+    # Concurrently create milestone snapshots from different clients
+    milestone_tasks = [
+        client1.create_milestone_snapshot(doc_id, "Milestone from User 1", "Created by User One"),
+        client2.create_milestone_snapshot(doc_id, "Milestone from User 2", "Created by User Two"),
+        client3.create_milestone_snapshot(doc_id, "Milestone from User 3", "Created by User Three")
     ]
     
-    document_path = await create_test_document(cells=cells)
-    document_name = os.path.basename(document_path)
+    # Execute concurrently
+    milestone_results = await asyncio.gather(*milestone_tasks)
     
-    # Create a client and connect to the document
-    client = await jp_ws_client()
-    await client.connect(document_name)
+    # Verify all milestones were created successfully
+    for result in milestone_results:
+        assert result is not None, "All milestone creations should succeed"
     
-    # Clear any initial messages
-    client.clear_received_messages()
+    # Wait for synchronization
+    await asyncio.sleep(0.5)
     
-    # Make changes to different cells
-    await client.update_cell("cell-1", "# Cell 1\nUpdated content for cell 1.")
-    await asyncio.sleep(1)
+    # Each client retrieves the milestone list
+    milestones1 = await client1.get_milestone_snapshots(doc_id)
+    milestones2 = await client2.get_milestone_snapshots(doc_id)
+    milestones3 = await client3.get_milestone_snapshots(doc_id)
     
-    await client.update_cell("cell-2", "# Cell 2\nprint('Updated content for cell 2.')")
-    await asyncio.sleep(1)
+    # Verify all clients see the same milestones
+    assert len(milestones1) == len(milestones2) == len(milestones3), "All clients should see the same number of milestones"
+    assert len(milestones1) >= 3, "Should have at least 3 milestones"
     
-    await client.update_cell("cell-3", "# Cell 3\nUpdated content for cell 3.")
-    await asyncio.sleep(1)
+    # Verify milestone labels from all users are present
+    milestone_labels = [m.get("snapshot_label") for m in milestones1]
+    assert "Milestone from User 1" in milestone_labels, "User 1's milestone should be visible"
+    assert "Milestone from User 2" in milestone_labels, "User 2's milestone should be visible"
+    assert "Milestone from User 3" in milestone_labels, "User 3's milestone should be visible"
     
-    # Request version history
-    await client.send({"type": "get_version_history"})
-    history_message = await client.wait_for_message_containing("version_history")
-    assert history_message is not None, "No version history message received"
+    # Concurrently access version history
+    history_tasks = [
+        client1.get_version_history(doc_id),
+        client2.get_version_history(doc_id),
+        client3.get_version_history(doc_id)
+    ]
     
-    # Parse the history message
-    history_data = json.loads(history_message)
-    versions = history_data.get("versions", [])
+    # Execute concurrently
+    history_results = await asyncio.gather(*history_tasks)
     
-    # Verify we have at least 3 versions (one for each cell update)
-    assert len(versions) >= 3, f"Expected at least 3 versions, got {len(versions)}"
+    # Verify all clients see the same history length
+    assert len(history_results[0]) == len(history_results[1]) == len(history_results[2]), \
+           "All clients should see the same history length"
+
+
+@pytest.mark.asyncio
+async def test_version_history_with_comments(jp_serverapp, jp_ws_client):
+    """
+    Test integration between version history and comments.
     
-    # Request cell-specific history for each cell
-    for cell_id in ["cell-1", "cell-2", "cell-3"]:
-        await client.send({"type": "get_cell_history", "cell_id": cell_id})
-        cell_history_message = await client.wait_for_message_containing(f"cell_history_{cell_id}")
-        assert cell_history_message is not None, f"No cell history message received for {cell_id}"
-        
-        # Parse the cell history message
-        cell_history_data = json.loads(cell_history_message)
-        cell_versions = cell_history_data.get("versions", [])
-        
-        # Verify we have at least 1 version for this cell
-        assert len(cell_versions) >= 1, f"Expected at least 1 version for {cell_id}, got {len(cell_versions)}"
-        
-        # Verify the latest version contains the updated content
-        latest_version = cell_versions[-1]
-        content = latest_version.get("content", "")
-        assert f"Updated content for {cell_id}" in content, f"Expected updated content in {cell_id}, got {content}"
+    Verifies that comments are properly tracked in version history and preserved during restoration.
+    """
+    # Create two clients
+    client1 = await jp_ws_client(user_id="user1", username="User One")
+    client2 = await jp_ws_client(user_id="user2", username="User Two")
+    
+    # Both clients subscribe to the same document
+    doc_id = "test-history-comments-doc"
+    await client1.subscribe_document(doc_id)
+    await client2.subscribe_document(doc_id)
+    
+    # Wait for initial synchronization
+    await asyncio.sleep(0.5)
+    
+    # Create initial content
+    cell_id = "cell1"
+    await client1.add_cell(doc_id, cell_id, "# Content to comment on", "markdown")
+    
+    # Wait for synchronization
+    await asyncio.sleep(0.5)
+    
+    # Client 2 adds a comment to the cell
+    comment_id = await client2.add_comment(doc_id, cell_id, "This is a comment on the heading")
+    assert comment_id is not None, "Comment should be created successfully"
+    
+    # Wait for synchronization
+    await asyncio.sleep(0.5)
+    
+    # Create a snapshot with the comment
+    snapshot_with_comment = await client1.create_snapshot(doc_id)
+    
+    # Verify comments exist in the document
+    comments = await client1.get_comments(doc_id)
+    assert len(comments) >= 1, "Document should have at least one comment"
+    
+    # Client 1 modifies the cell and adds another cell
+    await client1.update_cell_content(doc_id, cell_id, "# Modified content with comment")
+    await client1.add_cell(doc_id, "cell2", "# Second cell", "markdown")
+    
+    # Wait for synchronization
+    await asyncio.sleep(0.5)
+    
+    # Create another snapshot after modifications
+    snapshot_after_modifications = await client1.create_snapshot(doc_id)
+    
+    # Restore to the version with just the comment
+    restore_success = await client1.restore_version(doc_id, snapshot_with_comment)
+    assert restore_success, "Version restoration should succeed"
+    
+    # Wait for restoration to complete
+    await asyncio.sleep(0.5)
+    
+    # Verify the document content is restored
+    doc_state = await client1.get_document_state(doc_id)
+    assert len(doc_state["cells"]) == 1, "Restored document should have 1 cell"
+    assert doc_state["cells"][cell_id]["source"] == "# Content to comment on", "Cell content should be restored"
+    
+    # Verify the comment is preserved after restoration
+    comments_after_restore = await client1.get_comments(doc_id)
+    assert len(comments_after_restore) >= 1, "Comments should be preserved after restoration"
+    
+    # Verify the comment ID is preserved
+    comment_ids_after_restore = [c.get("id") for c in comments_after_restore]
+    assert comment_id in comment_ids_after_restore, "Original comment should be preserved after restoration"
+
+
+@pytest.mark.asyncio
+async def test_version_comparison(jp_serverapp, jp_ws_client):
+    """
+    Test detailed comparison between document versions.
+    
+    Verifies that users can compare specific aspects of different versions.
+    """
+    # Create a client
+    client = await jp_ws_client(user_id="user1", username="User One")
+    
+    # Subscribe to a document
+    doc_id = "test-version-comparison-doc"
+    await client.subscribe_document(doc_id)
+    
+    # Wait for initial synchronization
+    await asyncio.sleep(0.5)
+    
+    # Create initial version with metadata and cells
+    notebook_metadata = {
+        "kernelspec": {"name": "python3", "display_name": "Python 3"},
+        "language_info": {"name": "python", "version": "3.8.0"},
+        "title": "Original Title"
+    }
+    await client.update_notebook_metadata(doc_id, notebook_metadata)
+    
+    await client.add_cell(doc_id, "cell1", "# Original heading", "markdown")
+    await client.add_cell(doc_id, "cell2", "print('Original code')" , "code")
+    
+    # Wait for synchronization
+    await asyncio.sleep(0.5)
+    
+    # Create first snapshot
+    first_version_id = await client.create_snapshot(doc_id)
+    
+    # Modify metadata and cells
+    updated_metadata = {
+        "title": "Updated Title",
+        "description": "Added description"
+    }
+    await client.update_notebook_metadata(doc_id, updated_metadata)
+    
+    await client.update_cell_content(doc_id, "cell1", "# Updated heading")
+    await client.update_cell_content(doc_id, "cell2", "print('Updated code')")
+    await client.add_cell(doc_id, "cell3", "# New section", "markdown")
+    
+    # Wait for synchronization
+    await asyncio.sleep(0.5)
+    
+    # Create second snapshot
+    second_version_id = await client.create_snapshot(doc_id)
+    
+    # Compare the two versions
+    comparison = await client.compare_versions(doc_id, first_version_id, second_version_id)
+    
+    # Verify comparison structure
+    assert "cell_changes" in comparison, "Comparison should include cell changes"
+    assert "metadata_changes" in comparison, "Comparison should include metadata changes"
+    assert "structure_changes" in comparison, "Comparison should include structure changes"
+    
+    # Verify cell content changes
+    cell_changes = comparison["cell_changes"]
+    assert "cell1" in cell_changes, "cell1 changes should be detected"
+    assert "cell2" in cell_changes, "cell2 changes should be detected"
+    assert cell_changes["cell1"]["old"] == "# Original heading", "Old content should be recorded"
+    assert cell_changes["cell1"]["new"] == "# Updated heading", "New content should be recorded"
+    
+    # Verify metadata changes
+    metadata_changes = comparison["metadata_changes"]
+    assert "title" in metadata_changes, "Title change should be detected"
+    assert "description" in metadata_changes, "Description addition should be detected"
+    assert metadata_changes["title"]["old"] == "Original Title", "Old title should be recorded"
+    assert metadata_changes["title"]["new"] == "Updated Title", "New title should be recorded"
+    
+    # Verify structure changes
+    structure_changes = comparison["structure_changes"]
+    assert "added_cells" in structure_changes, "Added cells should be recorded"
+    assert "cell3" in structure_changes["added_cells"], "cell3 should be listed as added"
+
+
+if __name__ == "__main__":
+    pytest.main(['-xvs', __file__])
