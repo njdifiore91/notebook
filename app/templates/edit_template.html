@@ -20,6 +20,32 @@
     page_config_full.update(baseUrl=base_url, wsUrl=ws_url) %} {# Sentinel value
     to say that we are on the tree page #} {% set _ =
     page_config_full.update(notebookPage='edit') %}
+    
+    {# Collaboration features configuration #}
+    {% set _ = page_config_full.update(collaborationEnabled=collaboration_enabled|default(false)) %}
+    {% if collaboration_enabled|default(false) %}
+      {% set _ = page_config_full.update(collaborationWsUrl=collaboration_ws_url) %}
+      {% set _ = page_config_full.update(collaborationProviderOptions={
+        'provider': 'yjs',
+        'version': '13.x',
+        'documentName': document_id|default(''),
+        'syncInterval': 1000,
+        'gcEnabled': true
+      }) %}
+      {% set _ = page_config_full.update(userAwareness={
+        'enabled': true,
+        'showCursors': true,
+        'showSelections': true,
+        'showUsers': true,
+        'inactivityTimeout': 60000
+      }) %}
+      {% set _ = page_config_full.update(permissionModel={
+        'enabled': true,
+        'defaultRole': 'viewer',
+        'roles': ['owner', 'editor', 'commenter', 'viewer'],
+        'cellLevelPermissions': true
+      }) %}
+    {% endif %}
 
     <script id="jupyter-config-data" type="application/json">
       {{ page_config_full | tojson }}
