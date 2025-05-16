@@ -12,7 +12,7 @@ code, plain language descriptions, data, rich visualizations like 3D models,
 charts, graphs and figures, and interactive controls. A notebook, along with
 an editor like **Jupyter Notebook**, provides a fast interactive environment for
 prototyping and explaining code, exploring and visualizing data, and sharing
-ideas with others.
+ideas with others. With Jupyter Notebook v7, you can now collaborate in real-time with others, enabling multiple users to simultaneously edit the same notebook with features like user presence awareness, cursor synchronization, and more.
 
 **Jupyter Notebook** is a sibling to other notebook authoring applications under
 the Project Jupyter umbrella, like [JupyterLab](https://jupyterlab.readthedocs.io/en/stable/)
@@ -34,6 +34,7 @@ Documentation](notebook.md).
 
 user-documentation
 configuration
+collaboration
 migrate_to_notebook7
 contributor
 changelog
