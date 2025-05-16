@@ -1,7 +1,18 @@
 import pytest
-import asyncio
+import unittest.mock as mock
 import json
-from unittest.mock import patch, MagicMock
+import os
+import sys
+from unittest.mock import MagicMock, patch
+
+# Import the permission system components
+from notebook.collab.permissions import (
+    PermissionRole,
+    PermissionAction,
+    NotebookPermissionManager,
+    collaborative_authorized,
+    ROLE_PERMISSIONS
+)
 
 # Skip tests if collaboration dependencies are not installed
 pytestmark = pytest.mark.skipif(
@@ -10,445 +21,774 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-class TestPermissions:
-    """Test suite for the permission system in collaborative editing."""
+class TestPermissionRoles:
+    """Test the permission role definitions and their associated actions."""
+    
+    def test_role_hierarchy(self):
+        """Test that the role hierarchy is correctly defined."""
+        # Verify the order of roles from highest to lowest privilege
+        roles = list(PermissionRole)
+        assert roles[0] == PermissionRole.OWNER
+        assert roles[1] == PermissionRole.ADMIN
+        assert roles[2] == PermissionRole.EDITOR
+        assert roles[3] == PermissionRole.COMMENTER
+        assert roles[4] == PermissionRole.VIEWER
+    
+    def test_role_permissions_mapping(self):
+        """Test that each role has the correct set of permissions."""
+        # Owner should have all permissions
+        assert len(ROLE_PERMISSIONS[PermissionRole.OWNER]) == len(list(PermissionAction))
+        
+        # Admin should have all permissions except ADMIN_DOCUMENT
+        admin_permissions = ROLE_PERMISSIONS[PermissionRole.ADMIN]
+        assert PermissionAction.ADMIN_DOCUMENT.value not in admin_permissions
+        assert len(admin_permissions) == len(list(PermissionAction)) - 1
+        
+        # Editor should have edit permissions but not admin permissions
+        editor_permissions = ROLE_PERMISSIONS[PermissionRole.EDITOR]
+        assert PermissionAction.EDIT_DOCUMENT.value in editor_permissions
+        assert PermissionAction.EDIT_CELL.value in editor_permissions
+        assert PermissionAction.ADMIN_DOCUMENT.value not in editor_permissions
+        
+        # Commenter should have comment permissions but not edit permissions
+        commenter_permissions = ROLE_PERMISSIONS[PermissionRole.COMMENTER]
+        assert PermissionAction.COMMENT_DOCUMENT.value in commenter_permissions
+        assert PermissionAction.COMMENT_CELL.value in commenter_permissions
+        assert PermissionAction.EDIT_DOCUMENT.value not in commenter_permissions
+        assert PermissionAction.EDIT_CELL.value not in commenter_permissions
+        
+        # Viewer should only have view permissions
+        viewer_permissions = ROLE_PERMISSIONS[PermissionRole.VIEWER]
+        assert PermissionAction.VIEW_DOCUMENT.value in viewer_permissions
+        assert PermissionAction.VIEW_CELL.value in viewer_permissions
+        assert PermissionAction.EDIT_DOCUMENT.value not in viewer_permissions
+        assert PermissionAction.COMMENT_DOCUMENT.value not in viewer_permissions
+    
+    def test_permission_inheritance(self):
+        """Test that permissions are properly inherited in the role hierarchy."""
+        # All roles should have VIEW_DOCUMENT permission
+        for role in PermissionRole:
+            assert PermissionAction.VIEW_DOCUMENT.value in ROLE_PERMISSIONS[role]
+        
+        # OWNER, ADMIN, EDITOR, COMMENTER should have COMMENT_DOCUMENT permission
+        for role in [PermissionRole.OWNER, PermissionRole.ADMIN, PermissionRole.EDITOR, PermissionRole.COMMENTER]:
+            assert PermissionAction.COMMENT_DOCUMENT.value in ROLE_PERMISSIONS[role]
+        
+        # OWNER, ADMIN, EDITOR should have EDIT_DOCUMENT permission
+        for role in [PermissionRole.OWNER, PermissionRole.ADMIN, PermissionRole.EDITOR]:
+            assert PermissionAction.EDIT_DOCUMENT.value in ROLE_PERMISSIONS[role]
+        
+        # Only OWNER should have ADMIN_DOCUMENT permission
+        assert PermissionAction.ADMIN_DOCUMENT.value in ROLE_PERMISSIONS[PermissionRole.OWNER]
+        for role in [PermissionRole.ADMIN, PermissionRole.EDITOR, PermissionRole.COMMENTER, PermissionRole.VIEWER]:
+            assert PermissionAction.ADMIN_DOCUMENT.value not in ROLE_PERMISSIONS[role]
 
-    @pytest.mark.asyncio
-    async def test_document_level_permissions(self, multi_client_websocket_simulation):
-        """Test that document-level permissions are correctly enforced."""
-        # Create clients with different roles
-        owner_client = await multi_client_websocket_simulation(user_id="owner", roles=["owner"])
-        admin_client = await multi_client_websocket_simulation(user_id="admin", roles=["admin"])
-        editor_client = await multi_client_websocket_simulation(user_id="editor", roles=["editor"])
-        commenter_client = await multi_client_websocket_simulation(user_id="commenter", roles=["commenter"])
-        viewer_client = await multi_client_websocket_simulation(user_id="viewer", roles=["viewer"])
+
+class TestNotebookPermissionManager:
+    """Test the NotebookPermissionManager class."""
+    
+    @pytest.fixture
+    def mock_persistence_manager(self):
+        """Create a mock persistence manager for testing."""
+        persistence_manager = MagicMock()
         
-        # Connect all clients to the same document
-        doc_id = "test-permissions-doc"
-        await owner_client.connect(doc_id=doc_id)
-        await admin_client.connect(doc_id=doc_id)
-        await editor_client.connect(doc_id=doc_id)
-        await commenter_client.connect(doc_id=doc_id)
-        await viewer_client.connect(doc_id=doc_id)
+        # Mock get_collaboration_sessions_for_document
+        persistence_manager.get_collaboration_sessions_for_document.return_value = [{
+            'session_id': 'test-session-id',
+            'document_id': 'test-document-id',
+            'owner_id': 'owner-user-id'
+        }]
         
-        try:
-            # Owner should be able to modify the document
-            await owner_client.update_document({"cell1": "print('Hello from owner')"})
-            
-            # Admin should be able to modify the document
-            await admin_client.update_document({"cell2": "print('Hello from admin')"})
-            
-            # Editor should be able to modify the document
-            await editor_client.update_document({"cell3": "print('Hello from editor')"})
-            
-            # Commenter should NOT be able to modify the document (will be rejected by server)
-            with pytest.raises(Exception):
-                await commenter_client.update_document({"cell4": "print('Hello from commenter')"})
-            
-            # Viewer should NOT be able to modify the document (will be rejected by server)
-            with pytest.raises(Exception):
-                await viewer_client.update_document({"cell5": "print('Hello from viewer')"})
-            
-            # Verify document state reflects permissions
-            doc_state = await owner_client.get_document_state()
-            assert "cell1" in doc_state
-            assert "cell2" in doc_state
-            assert "cell3" in doc_state
-            assert "cell4" not in doc_state
-            assert "cell5" not in doc_state
-        finally:
-            # Disconnect all clients
-            await owner_client.disconnect()
-            await admin_client.disconnect()
-            await editor_client.disconnect()
-            await commenter_client.disconnect()
-            await viewer_client.disconnect()
+        # Mock get_permissions
+        persistence_manager.get_permissions.return_value = []
+        
+        # Mock create_collaboration_session
+        persistence_manager.create_collaboration_session.return_value = 'new-session-id'
+        
+        return persistence_manager
+    
+    @pytest.fixture
+    def permission_manager(self, mock_persistence_manager):
+        """Create a permission manager with a mock persistence manager."""
+        manager = NotebookPermissionManager()
+        manager.persistence_manager = mock_persistence_manager
+        return manager
+    
+    def test_get_user_role_owner(self, permission_manager, mock_persistence_manager):
+        """Test that the owner of a document gets the owner role."""
+        # Set up the test
+        document_id = 'test-document-id'
+        user_identity = {'name': 'owner-user-id'}
+        
+        # Call the method
+        role = permission_manager.get_user_role(document_id, user_identity)
+        
+        # Verify the result
+        assert role == PermissionRole.OWNER
+        mock_persistence_manager.get_collaboration_sessions_for_document.assert_called_once_with(document_id)
+    
+    def test_get_user_role_explicit_permission(self, permission_manager, mock_persistence_manager):
+        """Test that a user with explicit permissions gets the correct role."""
+        # Set up the test
+        document_id = 'test-document-id'
+        user_identity = {'name': 'editor-user-id'}
+        
+        # Mock the permissions
+        mock_persistence_manager.get_permissions.return_value = [{
+            'permission_type': 'editor',
+            'user_id': 'editor-user-id'
+        }]
+        
+        # Call the method
+        role = permission_manager.get_user_role(document_id, user_identity)
+        
+        # Verify the result
+        assert role == PermissionRole.EDITOR
+        mock_persistence_manager.get_collaboration_sessions_for_document.assert_called_once_with(document_id)
+        mock_persistence_manager.get_permissions.assert_called_once()
+    
+    def test_get_user_role_default(self, permission_manager, mock_persistence_manager):
+        """Test that a user with no explicit permissions gets the default role."""
+        # Set up the test
+        document_id = 'test-document-id'
+        user_identity = {'name': 'unknown-user-id'}
+        
+        # Call the method
+        role = permission_manager.get_user_role(document_id, user_identity)
+        
+        # Verify the result
+        assert role == permission_manager.default_permission_role
+        mock_persistence_manager.get_collaboration_sessions_for_document.assert_called_once_with(document_id)
+        mock_persistence_manager.get_permissions.assert_called_once()
+    
+    def test_has_permission_allowed(self, permission_manager):
+        """Test that has_permission returns True when the action is allowed."""
+        # Set up the test
+        document_id = 'test-document-id'
+        user_identity = {'name': 'owner-user-id'}
+        action = PermissionAction.EDIT_DOCUMENT
+        
+        # Call the method
+        result = permission_manager.has_permission(document_id, user_identity, action)
+        
+        # Verify the result
+        assert result is True
+    
+    def test_has_permission_denied(self, permission_manager, mock_persistence_manager):
+        """Test that has_permission returns False when the action is not allowed."""
+        # Set up the test
+        document_id = 'test-document-id'
+        user_identity = {'name': 'viewer-user-id'}
+        action = PermissionAction.EDIT_DOCUMENT
+        
+        # Mock the permissions to make the user a viewer
+        mock_persistence_manager.get_permissions.return_value = [{
+            'permission_type': 'viewer',
+            'user_id': 'viewer-user-id'
+        }]
+        
+        # Call the method
+        result = permission_manager.has_permission(document_id, user_identity, action)
+        
+        # Verify the result
+        assert result is False
+    
+    def test_has_cell_permission(self, permission_manager, mock_persistence_manager):
+        """Test that cell-level permissions are correctly checked."""
+        # Set up the test
+        document_id = 'test-document-id'
+        cell_id = 'test-cell-id'
+        user_identity = {'name': 'editor-user-id'}
+        action = PermissionAction.EDIT_CELL
+        
+        # Mock the permissions to make the user an editor
+        mock_persistence_manager.get_permissions.side_effect = [
+            # First call for document permissions
+            [{'permission_type': 'editor', 'user_id': 'editor-user-id'}],
+            # Second call for cell permissions
+            []
+        ]
+        
+        # Call the method
+        result = permission_manager.has_cell_permission(document_id, cell_id, user_identity, action)
+        
+        # Verify the result
+        assert result is True
+        assert mock_persistence_manager.get_permissions.call_count == 2
+    
+    def test_has_cell_permission_with_lock(self, permission_manager, mock_persistence_manager):
+        """Test that locked cells cannot be edited by non-owners."""
+        # Set up the test
+        document_id = 'test-document-id'
+        cell_id = 'locked-cell-id'
+        user_identity = {'name': 'editor-user-id'}
+        action = PermissionAction.EDIT_CELL
+        
+        # Mock the permissions to make the user an editor
+        mock_persistence_manager.get_permissions.side_effect = [
+            # First call for document permissions
+            [{'permission_type': 'editor', 'user_id': 'editor-user-id'}],
+            # Second call for cell permissions
+            []
+        ]
+        
+        # Mock the cell locks to show the cell is locked by another user
+        mock_persistence_manager.get_cell_locks.return_value = [{
+            'cell_id': 'locked-cell-id',
+            'user_id': 'other-user-id'
+        }]
+        
+        # Call the method
+        result = permission_manager.has_cell_permission(document_id, cell_id, user_identity, action)
+        
+        # Verify the result
+        assert result is False
+        assert mock_persistence_manager.get_permissions.call_count == 2
+        mock_persistence_manager.get_cell_locks.assert_called_once()
+    
+    def test_grant_permission(self, permission_manager, mock_persistence_manager):
+        """Test that permissions can be granted to users."""
+        # Set up the test
+        document_id = 'test-document-id'
+        user_id = 'new-editor-id'
+        role = PermissionRole.EDITOR
+        granted_by = 'admin-user-id'
+        
+        # Mock set_permission
+        mock_persistence_manager.set_permission.return_value = 'new-permission-id'
+        
+        # Call the method
+        permission_id = permission_manager.grant_permission(document_id, role, user_id, None, granted_by)
+        
+        # Verify the result
+        assert permission_id == 'new-permission-id'
+        mock_persistence_manager.set_permission.assert_called_once_with(
+            'test-session-id',
+            resource_id='test-document-id',
+            resource_type='document',
+            permission_type='editor',
+            user_id='new-editor-id',
+            group_id=None,
+            granted_by='admin-user-id'
+        )
+    
+    def test_grant_cell_permission(self, permission_manager, mock_persistence_manager):
+        """Test that cell-level permissions can be granted."""
+        # Set up the test
+        document_id = 'test-document-id'
+        cell_id = 'test-cell-id'
+        user_id = 'editor-user-id'
+        role = PermissionRole.EDITOR
+        granted_by = 'admin-user-id'
+        
+        # Mock set_permission
+        mock_persistence_manager.set_permission.return_value = 'new-cell-permission-id'
+        
+        # Call the method
+        permission_id = permission_manager.grant_cell_permission(document_id, cell_id, role, user_id, granted_by)
+        
+        # Verify the result
+        assert permission_id == 'new-cell-permission-id'
+        mock_persistence_manager.set_permission.assert_called_once_with(
+            'test-session-id',
+            resource_id='test-cell-id',
+            resource_type='cell',
+            permission_type='editor',
+            user_id='editor-user-id',
+            granted_by='admin-user-id'
+        )
+    
+    def test_revoke_permission(self, permission_manager, mock_persistence_manager):
+        """Test that permissions can be revoked."""
+        # Set up the test
+        permission_id = 'permission-to-revoke'
+        
+        # Mock remove_permission
+        mock_persistence_manager.remove_permission.return_value = True
+        
+        # Call the method
+        result = permission_manager.revoke_permission(permission_id)
+        
+        # Verify the result
+        assert result is True
+        mock_persistence_manager.remove_permission.assert_called_once_with('permission-to-revoke')
+    
+    def test_get_document_permissions(self, permission_manager, mock_persistence_manager):
+        """Test retrieving all permissions for a document."""
+        # Set up the test
+        document_id = 'test-document-id'
+        expected_permissions = [
+            {'permission_type': 'owner', 'user_id': 'owner-user-id'},
+            {'permission_type': 'editor', 'user_id': 'editor-user-id'}
+        ]
+        
+        # Mock get_permissions
+        mock_persistence_manager.get_permissions.return_value = expected_permissions
+        
+        # Call the method
+        permissions = permission_manager.get_document_permissions(document_id)
+        
+        # Verify the result
+        assert permissions == expected_permissions
+        mock_persistence_manager.get_collaboration_sessions_for_document.assert_called_once_with(document_id)
+        mock_persistence_manager.get_permissions.assert_called_once()
+    
+    def test_get_cell_permissions(self, permission_manager, mock_persistence_manager):
+        """Test retrieving all permissions for a cell."""
+        # Set up the test
+        document_id = 'test-document-id'
+        cell_id = 'test-cell-id'
+        expected_permissions = [
+            {'permission_type': 'editor', 'user_id': 'editor-user-id'}
+        ]
+        
+        # Mock get_permissions
+        mock_persistence_manager.get_permissions.return_value = expected_permissions
+        
+        # Call the method
+        permissions = permission_manager.get_cell_permissions(document_id, cell_id)
+        
+        # Verify the result
+        assert permissions == expected_permissions
+        mock_persistence_manager.get_collaboration_sessions_for_document.assert_called_once_with(document_id)
+        mock_persistence_manager.get_permissions.assert_called_once()
+    
+    def test_jupyterhub_integration(self, permission_manager):
+        """Test integration with JupyterHub for user information."""
+        # Set up the test
+        user_identity = {'name': 'test-user'}
+        
+        # Call the method
+        user_info = permission_manager.get_jupyterhub_user_info(user_identity)
+        
+        # Verify the result
+        assert user_info['name'] == 'test-user'
+        assert 'groups' in user_info
+        
+        # Test with jupyterhub integration disabled
+        permission_manager.enable_jupyterhub_integration = False
+        user_info = permission_manager.get_jupyterhub_user_info(user_identity)
+        assert user_info == {}
+    
+    def test_clear_cache(self, permission_manager):
+        """Test clearing the permission cache."""
+        # Set up the test - add some items to the cache
+        permission_manager._permission_cache = {'doc1': 'cache1', 'doc2': 'cache2'}
+        permission_manager._jupyterhub_groups_cache = {'user1': ['group1']}
+        permission_manager._last_cache_update = {'doc1': 12345}
+        
+        # Call the method
+        permission_manager.clear_cache()
+        
+        # Verify the result
+        assert permission_manager._permission_cache == {}
+        assert permission_manager._jupyterhub_groups_cache == {}
+        assert permission_manager._last_cache_update == {}
+
+
+class TestCollaborativeAuthorized:
+    """Test the collaborative_authorized decorator."""
+    
+    @pytest.fixture
+    def mock_handler(self):
+        """Create a mock handler for testing the decorator."""
+        handler = MagicMock()
+        handler.permission_manager = MagicMock()
+        handler.current_user = {'name': 'test-user'}
+        handler.path_kwargs = {'document_id': 'test-document-id'}
+        return handler
     
     @pytest.mark.asyncio
-    async def test_cell_level_permissions(self, multi_client_websocket_simulation):
-        """Test that cell-level permissions override document-level permissions."""
-        # Create clients with different roles
-        owner_client = await multi_client_websocket_simulation(user_id="owner", roles=["owner"])
-        editor_client = await multi_client_websocket_simulation(user_id="editor", roles=["editor"])
+    async def test_authorized_allowed(self, mock_handler):
+        """Test that the decorator allows access when permission is granted."""
+        # Set up the test
+        mock_handler.permission_manager.has_permission.return_value = True
         
-        # Connect clients to the same document
-        doc_id = "test-cell-permissions-doc"
-        await owner_client.connect(doc_id=doc_id)
-        await editor_client.connect(doc_id=doc_id)
+        # Create a test method with the decorator
+        @collaborative_authorized(PermissionAction.VIEW_DOCUMENT)
+        async def test_method(self):
+            return "success"
         
-        try:
-            # Owner creates initial cells
-            await owner_client.update_document({
-                "cell1": "print('Cell 1')",
-                "cell2": "print('Cell 2')",
-                "cell3": "print('Cell 3')"
-            })
-            
-            # Mock the permission system to simulate cell-level permissions
-            # In a real implementation, this would be handled by the server
-            with patch('notebook.collab.permissions.check_cell_permission') as mock_check:
-                # Set up mock to allow editing cell1, but deny editing cell2
-                def check_permission_side_effect(user_id, cell_id, action):
-                    if cell_id == "cell2" and action == "edit" and user_id == "editor":
-                        return False
-                    return True
-                
-                mock_check.side_effect = check_permission_side_effect
-                
-                # Editor should be able to edit cell1
-                await editor_client.update_document({"cell1": "print('Updated Cell 1')"})  
-                
-                # Editor should NOT be able to edit cell2 due to cell-level permission
-                with pytest.raises(Exception):
-                    await editor_client.update_document({"cell2": "print('Trying to update Cell 2')"})  
-                
-                # Editor should be able to edit cell3
-                await editor_client.update_document({"cell3": "print('Updated Cell 3')"})  
-            
-            # Verify document state reflects cell-level permissions
-            doc_state = await owner_client.get_document_state()
-            assert "print('Updated Cell 1')" in doc_state["cell1"]
-            assert "print('Cell 2')" in doc_state["cell2"]
-            assert "print('Updated Cell 3')" in doc_state["cell3"]
-        finally:
-            # Disconnect clients
-            await owner_client.disconnect()
-            await editor_client.disconnect()
+        # Call the decorated method
+        result = await test_method(mock_handler)
+        
+        # Verify the result
+        assert result == "success"
+        mock_handler.permission_manager.has_permission.assert_called_once_with(
+            'test-document-id', mock_handler.current_user, PermissionAction.VIEW_DOCUMENT
+        )
     
     @pytest.mark.asyncio
-    async def test_permission_changes(self, multi_client_websocket_simulation):
-        """Test that permission changes are immediately enforced."""
-        # Create clients with different roles
-        owner_client = await multi_client_websocket_simulation(user_id="owner", roles=["owner"])
-        user_client = await multi_client_websocket_simulation(user_id="user", roles=["viewer"])
+    async def test_authorized_denied(self, mock_handler):
+        """Test that the decorator denies access when permission is not granted."""
+        # Set up the test
+        mock_handler.permission_manager.has_permission.return_value = False
         
-        # Connect clients to the same document
-        doc_id = "test-permission-changes-doc"
-        await owner_client.connect(doc_id=doc_id)
-        await user_client.connect(doc_id=doc_id)
+        # Create a test method with the decorator
+        @collaborative_authorized(PermissionAction.EDIT_DOCUMENT)
+        async def test_method(self):
+            return "success"
         
-        try:
-            # Owner creates initial cell
-            await owner_client.update_document({"cell1": "print('Initial cell')"})  
-            
-            # User with viewer role should NOT be able to edit
-            with pytest.raises(Exception):
-                await user_client.update_document({"cell1": "print('Trying to edit as viewer')"})  
-            
-            # Mock permission change from viewer to editor
-            with patch('notebook.collab.permissions.get_user_role') as mock_role:
-                # First return viewer, then editor after "permission change"
-                mock_role.side_effect = ["viewer", "editor", "editor"]
-                
-                # Simulate permission change by owner
-                await owner_client.update_document({
-                    "permissions": {"user": "editor"}
-                })
-                
-                # After permission change, user should be able to edit
-                await user_client.update_document({"cell1": "print('Edited after permission change')"})  
-            
-            # Verify document state reflects the edit after permission change
-            doc_state = await owner_client.get_document_state()
-            assert "print('Edited after permission change')" in doc_state["cell1"]
-        finally:
-            # Disconnect clients
-            await owner_client.disconnect()
-            await user_client.disconnect()
+        # Call the decorated method and expect an exception
+        from tornado import web
+        with pytest.raises(web.HTTPError) as excinfo:
+            await test_method(mock_handler)
+        
+        # Verify the exception
+        assert excinfo.value.status_code == 403
+        mock_handler.permission_manager.has_permission.assert_called_once_with(
+            'test-document-id', mock_handler.current_user, PermissionAction.EDIT_DOCUMENT
+        )
     
     @pytest.mark.asyncio
-    async def test_authentication_integration(self, multi_client_websocket_simulation):
-        """Test that permissions integrate correctly with authentication systems."""
-        # Create a client with no authentication
-        unauthenticated_client = await multi_client_websocket_simulation()
+    async def test_authorized_no_permission_manager(self, mock_handler):
+        """Test that the decorator skips permission check if no permission manager is available."""
+        # Set up the test - remove permission manager
+        mock_handler.permission_manager = None
         
-        # Create a client with proper authentication
-        authenticated_client = await multi_client_websocket_simulation(user_id="auth_user", roles=["editor"])
+        # Create a test method with the decorator
+        @collaborative_authorized(PermissionAction.EDIT_DOCUMENT)
+        async def test_method(self):
+            return "success"
         
-        # Connect authenticated client to document
-        doc_id = "test-auth-doc"
-        await authenticated_client.connect(doc_id=doc_id)
+        # Call the decorated method
+        result = await test_method(mock_handler)
         
-        try:
-            # Create initial content as authenticated user
-            await authenticated_client.update_document({"cell1": "print('Authenticated content')"})  
-            
-            # Mock authentication check to simulate authentication failure
-            with patch('notebook.collab.handlers.authenticate_websocket') as mock_auth:
-                mock_auth.return_value = False
-                
-                # Unauthenticated client should not be able to connect
-                with pytest.raises(Exception):
-                    await unauthenticated_client.connect(doc_id=doc_id)
-            
-            # Mock authentication check to simulate successful authentication but insufficient permissions
-            with patch('notebook.collab.handlers.authenticate_websocket') as mock_auth:
-                mock_auth.return_value = True
-                
-                # Mock permission check to deny access
-                with patch('notebook.collab.permissions.check_document_permission') as mock_perm:
-                    mock_perm.return_value = False
-                    
-                    # Client should connect but not be able to access document
-                    with pytest.raises(Exception):
-                        await unauthenticated_client.connect(doc_id=doc_id)
-        finally:
-            # Disconnect clients
-            if authenticated_client.connected:
-                await authenticated_client.disconnect()
-            if unauthenticated_client.connected:
-                await unauthenticated_client.disconnect()
+        # Verify the result
+        assert result == "success"
     
     @pytest.mark.asyncio
-    async def test_permission_inheritance(self, multi_client_websocket_simulation):
-        """Test that permission inheritance and override mechanisms work correctly."""
-        # Create clients with different roles
-        admin_client = await multi_client_websocket_simulation(user_id="admin", roles=["admin"])
-        user_client = await multi_client_websocket_simulation(user_id="user", roles=["editor"])
+    async def test_authorized_session_id(self, mock_handler):
+        """Test that the decorator works with session_id instead of document_id."""
+        # Set up the test - use session_id instead of document_id
+        mock_handler.path_kwargs = {'session_id': 'test-session-id'}
+        mock_handler.permission_manager.has_permission.return_value = True
         
-        # Connect clients to the same document
-        doc_id = "test-permission-inheritance-doc"
-        await admin_client.connect(doc_id=doc_id)
-        await user_client.connect(doc_id=doc_id)
+        # Create a test method with the decorator
+        @collaborative_authorized(PermissionAction.VIEW_DOCUMENT)
+        async def test_method(self):
+            return "success"
         
-        try:
-            # Admin creates initial cells
-            await admin_client.update_document({
-                "cell1": "print('Cell 1')",
-                "cell2": "print('Cell 2')",
-                "metadata": {"cells": {"cell1": {}, "cell2": {}}}
-            })
-            
-            # Mock permission inheritance system
-            with patch('notebook.collab.permissions.get_effective_permission') as mock_perm:
-                # Define permission inheritance logic
-                def get_effective_permission(user_id, resource_id, action):
-                    # Document-level permission: editor can edit all cells by default
-                    if resource_id == doc_id:
-                        return True
-                    
-                    # Cell-level override: user cannot edit cell2
-                    if resource_id == "cell2" and user_id == "user" and action == "edit":
-                        return False
-                    
-                    # Inherit from document-level permission
-                    return True
-                
-                mock_perm.side_effect = get_effective_permission
-                
-                # User should be able to edit cell1 (inherited from document permission)
-                await user_client.update_document({"cell1": "print('Updated Cell 1')"})  
-                
-                # User should NOT be able to edit cell2 (overridden at cell level)
-                with pytest.raises(Exception):
-                    await user_client.update_document({"cell2": "print('Trying to update Cell 2')"})  
-            
-            # Verify document state reflects permission inheritance
-            doc_state = await admin_client.get_document_state()
-            assert "print('Updated Cell 1')" in doc_state["cell1"]
-            assert "print('Cell 2')" in doc_state["cell2"]
-        finally:
-            # Disconnect clients
-            await admin_client.disconnect()
-            await user_client.disconnect()
+        # Call the decorated method
+        result = await test_method(mock_handler)
+        
+        # Verify the result
+        assert result == "success"
+        mock_handler.permission_manager.has_permission.assert_called_once_with(
+            'test-session-id', mock_handler.current_user, PermissionAction.VIEW_DOCUMENT
+        )
     
     @pytest.mark.asyncio
-    async def test_admin_override_permissions(self, multi_client_websocket_simulation):
-        """Test that admin users can override normal permission flow."""
-        # Create clients with different roles
-        admin_client = await multi_client_websocket_simulation(user_id="admin", roles=["admin"])
-        owner_client = await multi_client_websocket_simulation(user_id="owner", roles=["owner"])
+    async def test_authorized_query_param(self, mock_handler):
+        """Test that the decorator works with document_id as a query parameter."""
+        # Set up the test - use query parameter instead of path kwargs
+        mock_handler.path_kwargs = {}
+        mock_handler.get_argument = MagicMock(return_value='test-query-doc-id')
+        mock_handler.permission_manager.has_permission.return_value = True
         
-        # Connect clients to the same document
-        doc_id = "test-admin-override-doc"
-        await admin_client.connect(doc_id=doc_id)
-        await owner_client.connect(doc_id=doc_id)
+        # Create a test method with the decorator
+        @collaborative_authorized(PermissionAction.VIEW_DOCUMENT)
+        async def test_method(self):
+            return "success"
         
-        try:
-            # Owner creates initial document with locked cell
-            await owner_client.update_document({
-                "cell1": "print('Locked cell')",
-                "locks": {"cell1": {"locked_by": "owner", "locked_at": "2023-01-01T12:00:00Z"}}
-            })
-            
-            # Mock lock system to simulate cell locking
-            with patch('notebook.collab.locks.check_lock_status') as mock_lock:
-                # Define lock checking logic
-                def check_lock_status(cell_id, user_id):
-                    # Cell is locked by owner
-                    if cell_id == "cell1" and user_id != "owner":
-                        return {"locked": True, "locked_by": "owner"}
-                    return {"locked": False}
-                
-                mock_lock.side_effect = check_lock_status
-                
-                # Admin should be able to override the lock with force flag
-                with patch('notebook.collab.locks.can_override_lock') as mock_override:
-                    # Admin can override locks
-                    mock_override.return_value = True
-                    
-                    # Admin overrides the lock and edits the cell
-                    await admin_client.update_document({
-                        "cell1": "print('Admin override')",
-                        "locks": {"cell1": {"force_unlock": True}}
-                    })
-            
-            # Verify admin was able to override the lock
-            doc_state = await owner_client.get_document_state()
-            assert "print('Admin override')" in doc_state["cell1"]
-            
-            # Verify lock status was updated
-            if "locks" in doc_state:
-                assert "cell1" not in doc_state["locks"] or \
-                       doc_state["locks"]["cell1"].get("locked") is not True
-        finally:
-            # Disconnect clients
-            await admin_client.disconnect()
-            await owner_client.disconnect()
+        # Call the decorated method
+        result = await test_method(mock_handler)
+        
+        # Verify the result
+        assert result == "success"
+        mock_handler.get_argument.assert_called_once_with('document_id', None)
+        mock_handler.permission_manager.has_permission.assert_called_once_with(
+            'test-query-doc-id', mock_handler.current_user, PermissionAction.VIEW_DOCUMENT
+        )
+
+
+class TestPermissionHandler:
+    """Test the PermissionHandler class."""
+    
+    @pytest.fixture
+    def mock_permission_manager(self):
+        """Create a mock permission manager for testing."""
+        manager = MagicMock()
+        return manager
+    
+    @pytest.fixture
+    def permission_handler(self, mock_permission_manager):
+        """Create a permission handler with a mock permission manager."""
+        from notebook.collab.permissions import PermissionHandler
+        handler = PermissionHandler()
+        handler.permission_manager = mock_permission_manager
+        handler.current_user = {'name': 'admin-user-id'}
+        handler.request = MagicMock()
+        handler.write = MagicMock()
+        handler.set_status = MagicMock()
+        return handler
     
     @pytest.mark.asyncio
-    async def test_jupyterhub_integration(self, multi_client_websocket_simulation):
-        """Test that permissions integrate with JupyterHub authentication."""
-        # Mock JupyterHub authentication data
-        jupyterhub_user_data = {
-            "hub_user": {
-                "name": "hub_user",
-                "admin": False,
-                "scopes": ["access:servers", "notebooks:collaborative:edit"]
-            },
-            "hub_admin": {
-                "name": "hub_admin",
-                "admin": True,
-                "scopes": ["access:servers", "notebooks:collaborative:admin"]
-            }
-        }
+    async def test_get_all_permissions(self, permission_handler, mock_permission_manager):
+        """Test retrieving all permissions for a document."""
+        # Set up the test
+        document_id = 'test-document-id'
+        expected_permissions = [
+            {'permission_type': 'owner', 'user_id': 'owner-user-id'},
+            {'permission_type': 'editor', 'user_id': 'editor-user-id'}
+        ]
         
-        # Create clients with JupyterHub identities
-        with patch('notebook.collab.auth.get_jupyterhub_user') as mock_hub_user:
-            # Mock JupyterHub user data retrieval
-            def get_hub_user(token):
-                if token == "user_token":
-                    return jupyterhub_user_data["hub_user"]
-                elif token == "admin_token":
-                    return jupyterhub_user_data["hub_admin"]
-                return None
-            
-            mock_hub_user.side_effect = get_hub_user
-            
-            # Create clients with different JupyterHub tokens
-            hub_user_client = await multi_client_websocket_simulation(user_id="hub_user")
-            hub_admin_client = await multi_client_websocket_simulation(user_id="hub_admin")
-            
-            # Mock token validation
-            with patch('notebook.collab.auth.validate_jupyterhub_token') as mock_validate:
-                mock_validate.return_value = True
-                
-                # Connect clients with their tokens
-                doc_id = "test-jupyterhub-doc"
-                
-                # Mock the WebSocket connection to include token
-                with patch.object(hub_user_client, 'connect') as mock_user_connect:
-                    mock_user_connect.return_value = hub_user_client
-                    await hub_user_client.connect(doc_id=doc_id)
-                
-                with patch.object(hub_admin_client, 'connect') as mock_admin_connect:
-                    mock_admin_connect.return_value = hub_admin_client
-                    await hub_admin_client.connect(doc_id=doc_id)
-                
-                try:
-                    # Mock permission mapping from JupyterHub scopes to roles
-                    with patch('notebook.collab.permissions.map_jupyterhub_scopes_to_role') as mock_map:
-                        def map_scopes_to_role(scopes):
-                            if "notebooks:collaborative:admin" in scopes:
-                                return "admin"
-                            elif "notebooks:collaborative:edit" in scopes:
-                                return "editor"
-                            elif "notebooks:collaborative:comment" in scopes:
-                                return "commenter"
-                            else:
-                                return "viewer"
-                        
-                        mock_map.side_effect = map_scopes_to_role
-                        
-                        # Admin should be able to create content
-                        await hub_admin_client.update_document({"cell1": "print('Admin content')"})  
-                        
-                        # User with edit scope should be able to edit
-                        await hub_user_client.update_document({"cell2": "print('User content')"})  
-                        
-                        # Verify document state reflects both edits
-                        doc_state = await hub_admin_client.get_document_state()
-                        assert "print('Admin content')" in doc_state["cell1"]
-                        assert "print('User content')" in doc_state["cell2"]
-                finally:
-                    # Disconnect clients
-                    if hub_user_client.connected:
-                        await hub_user_client.disconnect()
-                    if hub_admin_client.connected:
-                        await hub_admin_client.disconnect()
+        # Mock get_document_permissions
+        mock_permission_manager.get_document_permissions.return_value = expected_permissions
+        
+        # Mock has_permission to allow the action
+        mock_permission_manager.has_permission.return_value = True
+        
+        # Call the method
+        await permission_handler.get(document_id)
+        
+        # Verify the result
+        mock_permission_manager.get_document_permissions.assert_called_once_with(document_id)
+        permission_handler.write.assert_called_once_with(json.dumps(expected_permissions))
     
     @pytest.mark.asyncio
-    async def test_audit_logging(self, multi_client_websocket_simulation):
-        """Test that permission-related actions are properly logged for audit purposes."""
-        # Create clients with different roles
-        admin_client = await multi_client_websocket_simulation(user_id="admin", roles=["admin"])
-        user_client = await multi_client_websocket_simulation(user_id="user", roles=["viewer"])
+    async def test_get_user_permissions(self, permission_handler, mock_permission_manager):
+        """Test retrieving permissions for a specific user."""
+        # Set up the test
+        document_id = 'test-document-id'
+        user_id = 'editor-user-id'
+        all_permissions = [
+            {'permission_type': 'owner', 'user_id': 'owner-user-id'},
+            {'permission_type': 'editor', 'user_id': 'editor-user-id'}
+        ]
+        expected_permissions = [
+            {'permission_type': 'editor', 'user_id': 'editor-user-id'}
+        ]
         
-        # Connect clients to the same document
-        doc_id = "test-audit-logging-doc"
-        await admin_client.connect(doc_id=doc_id)
-        await user_client.connect(doc_id=doc_id)
+        # Mock get_document_permissions
+        mock_permission_manager.get_document_permissions.return_value = all_permissions
         
-        # Mock audit logging system
-        audit_logs = []
+        # Mock has_permission to allow the action
+        mock_permission_manager.has_permission.return_value = True
         
-        with patch('notebook.collab.audit.log_permission_event') as mock_audit_log:
-            # Define audit logging function
-            def log_permission_event(event_type, user_id, resource_id, action, result, metadata=None):
-                log_entry = {
-                    "event_type": event_type,
-                    "user_id": user_id,
-                    "resource_id": resource_id,
-                    "action": action,
-                    "result": result,
-                    "timestamp": "2023-01-01T12:00:00Z",  # Mock timestamp
-                    "metadata": metadata or {}
-                }
-                audit_logs.append(log_entry)
-            
-            mock_audit_log.side_effect = log_permission_event
-            
-            try:
-                # Admin creates initial content
-                await admin_client.update_document({"cell1": "print('Initial content')"})  
-                
-                # Admin changes user's role from viewer to editor
-                await admin_client.update_document({
-                    "permissions": {"user": "editor"}
-                })
-                
-                # Mock permission check to log the attempt
-                with patch('notebook.collab.permissions.check_permission') as mock_check:
-                    # First deny, then allow after role change
-                    mock_check.side_effect = [False, True]
-                    
-                    # First attempt should fail and be logged
-                    with pytest.raises(Exception):
-                        await user_client.update_document({"cell1": "print('Unauthorized edit')"})  
-                    
-                    # Second attempt should succeed after role change
-                    await user_client.update_document({"cell1": "print('Authorized edit')"})  
-                
-                # Verify audit logs contain the expected events
-                permission_change_logs = [log for log in audit_logs if log["event_type"] == "permission_change"]
-                assert len(permission_change_logs) > 0
-                assert any(log["user_id"] == "admin" and log["action"] == "grant" for log in permission_change_logs)
-                
-                access_attempt_logs = [log for log in audit_logs if log["event_type"] == "access_attempt"]
-                assert len(access_attempt_logs) > 0
-                assert any(log["user_id"] == "user" and log["result"] == "denied" for log in access_attempt_logs)
-                assert any(log["user_id"] == "user" and log["result"] == "allowed" for log in access_attempt_logs)
-            finally:
-                # Disconnect clients
-                await admin_client.disconnect()
-                await user_client.disconnect()
+        # Call the method
+        await permission_handler.get(document_id, user_id)
+        
+        # Verify the result
+        mock_permission_manager.get_document_permissions.assert_called_once_with(document_id)
+        permission_handler.write.assert_called_once_with(json.dumps(expected_permissions))
+    
+    @pytest.mark.asyncio
+    async def test_post_grant_permission(self, permission_handler, mock_permission_manager):
+        """Test granting a permission to a user."""
+        # Set up the test
+        document_id = 'test-document-id'
+        request_body = json.dumps({
+            'user_id': 'new-editor-id',
+            'role': 'editor'
+        })
+        
+        # Mock the request body
+        permission_handler.request.body = request_body
+        
+        # Mock has_permission to allow the action
+        mock_permission_manager.has_permission.return_value = True
+        
+        # Mock grant_permission
+        mock_permission_manager.grant_permission.return_value = 'new-permission-id'
+        
+        # Call the method
+        await permission_handler.post(document_id)
+        
+        # Verify the result
+        mock_permission_manager.grant_permission.assert_called_once_with(
+            document_id, PermissionRole.EDITOR, 'new-editor-id', None, 'admin-user-id'
+        )
+        permission_handler.set_status.assert_called_once_with(201)
+        permission_handler.write.assert_called_once_with(json.dumps({'id': 'new-permission-id'}))
+    
+    @pytest.mark.asyncio
+    async def test_delete_permission(self, permission_handler, mock_permission_manager):
+        """Test revoking a permission."""
+        # Set up the test
+        document_id = 'test-document-id'
+        permission_id = 'permission-to-revoke'
+        
+        # Mock has_permission to allow the action
+        mock_permission_manager.has_permission.return_value = True
+        
+        # Mock revoke_permission
+        mock_permission_manager.revoke_permission.return_value = True
+        
+        # Call the method
+        await permission_handler.delete(document_id, permission_id)
+        
+        # Verify the result
+        mock_permission_manager.revoke_permission.assert_called_once_with(permission_id)
+        permission_handler.set_status.assert_called_once_with(204)
+    
+    @pytest.mark.asyncio
+    async def test_delete_permission_not_found(self, permission_handler, mock_permission_manager):
+        """Test attempting to revoke a non-existent permission."""
+        # Set up the test
+        document_id = 'test-document-id'
+        permission_id = 'nonexistent-permission'
+        
+        # Mock has_permission to allow the action
+        mock_permission_manager.has_permission.return_value = True
+        
+        # Mock revoke_permission to return False (not found)
+        mock_permission_manager.revoke_permission.return_value = False
+        
+        # Call the method and expect an exception
+        from tornado import web
+        with pytest.raises(web.HTTPError) as excinfo:
+            await permission_handler.delete(document_id, permission_id)
+        
+        # Verify the exception
+        assert excinfo.value.status_code == 404
+        mock_permission_manager.revoke_permission.assert_called_once_with(permission_id)
+
+
+class TestCellPermissionHandler:
+    """Test the CellPermissionHandler class."""
+    
+    @pytest.fixture
+    def mock_permission_manager(self):
+        """Create a mock permission manager for testing."""
+        manager = MagicMock()
+        return manager
+    
+    @pytest.fixture
+    def cell_permission_handler(self, mock_permission_manager):
+        """Create a cell permission handler with a mock permission manager."""
+        from notebook.collab.permissions import CellPermissionHandler
+        handler = CellPermissionHandler()
+        handler.permission_manager = mock_permission_manager
+        handler.current_user = {'name': 'admin-user-id'}
+        handler.request = MagicMock()
+        handler.write = MagicMock()
+        handler.set_status = MagicMock()
+        return handler
+    
+    @pytest.mark.asyncio
+    async def test_get_cell_permissions(self, cell_permission_handler, mock_permission_manager):
+        """Test retrieving permissions for a cell."""
+        # Set up the test
+        document_id = 'test-document-id'
+        cell_id = 'test-cell-id'
+        expected_permissions = [
+            {'permission_type': 'editor', 'user_id': 'editor-user-id'}
+        ]
+        
+        # Mock get_cell_permissions
+        mock_permission_manager.get_cell_permissions.return_value = expected_permissions
+        
+        # Mock has_permission to allow the action
+        mock_permission_manager.has_permission.return_value = True
+        
+        # Call the method
+        await cell_permission_handler.get(document_id, cell_id)
+        
+        # Verify the result
+        mock_permission_manager.get_cell_permissions.assert_called_once_with(document_id, cell_id)
+        cell_permission_handler.write.assert_called_once_with(json.dumps(expected_permissions))
+    
+    @pytest.mark.asyncio
+    async def test_post_grant_cell_permission(self, cell_permission_handler, mock_permission_manager):
+        """Test granting a permission for a cell."""
+        # Set up the test
+        document_id = 'test-document-id'
+        cell_id = 'test-cell-id'
+        request_body = json.dumps({
+            'user_id': 'editor-user-id',
+            'role': 'editor'
+        })
+        
+        # Mock the request body
+        cell_permission_handler.request.body = request_body
+        
+        # Mock has_permission to allow the action
+        mock_permission_manager.has_permission.return_value = True
+        
+        # Mock grant_cell_permission
+        mock_permission_manager.grant_cell_permission.return_value = 'new-cell-permission-id'
+        
+        # Call the method
+        await cell_permission_handler.post(document_id, cell_id)
+        
+        # Verify the result
+        mock_permission_manager.grant_cell_permission.assert_called_once_with(
+            document_id, cell_id, PermissionRole.EDITOR, 'editor-user-id', 'admin-user-id'
+        )
+        cell_permission_handler.set_status.assert_called_once_with(201)
+        cell_permission_handler.write.assert_called_once_with(json.dumps({'id': 'new-cell-permission-id'}))
+    
+    @pytest.mark.asyncio
+    async def test_delete_cell_permission(self, cell_permission_handler, mock_permission_manager):
+        """Test revoking a cell permission."""
+        # Set up the test
+        document_id = 'test-document-id'
+        cell_id = 'test-cell-id'
+        permission_id = 'cell-permission-to-revoke'
+        
+        # Mock has_permission to allow the action
+        mock_permission_manager.has_permission.return_value = True
+        
+        # Mock revoke_permission
+        mock_permission_manager.revoke_permission.return_value = True
+        
+        # Call the method
+        await cell_permission_handler.delete(document_id, cell_id, permission_id)
+        
+        # Verify the result
+        mock_permission_manager.revoke_permission.assert_called_once_with(permission_id)
+        cell_permission_handler.set_status.assert_called_once_with(204)
+    
+    @pytest.mark.asyncio
+    async def test_delete_cell_permission_not_found(self, cell_permission_handler, mock_permission_manager):
+        """Test attempting to revoke a non-existent cell permission."""
+        # Set up the test
+        document_id = 'test-document-id'
+        cell_id = 'test-cell-id'
+        permission_id = 'nonexistent-permission'
+        
+        # Mock has_permission to allow the action
+        mock_permission_manager.has_permission.return_value = True
+        
+        # Mock revoke_permission to return False (not found)
+        mock_permission_manager.revoke_permission.return_value = False
+        
+        # Call the method and expect an exception
+        from tornado import web
+        with pytest.raises(web.HTTPError) as excinfo:
+            await cell_permission_handler.delete(document_id, cell_id, permission_id)
+        
+        # Verify the exception
+        assert excinfo.value.status_code == 404
+        mock_permission_manager.revoke_permission.assert_called_once_with(permission_id)
+
+
+class TestSetupHandlers:
+    """Test the setup_handlers function."""
+    
+    def test_setup_handlers(self):
+        """Test that handlers are correctly set up."""
+        # Set up the test
+        from notebook.collab.permissions import setup_handlers
+        web_app = MagicMock()
+        permission_manager = MagicMock()
+        
+        # Call the function
+        setup_handlers(web_app, permission_manager)
+        
+        # Verify the result
+        web_app.add_handlers.assert_called_once()
+        # Check that the first argument is the host pattern
+        assert web_app.add_handlers.call_args[0][0] == ".*$"
+        # Check that the second argument is a list of handlers
+        handlers = web_app.add_handlers.call_args[0][1]
+        assert isinstance(handlers, list)
+        assert len(handlers) > 0
+        
+        # Check that each handler has the correct structure
+        for handler in handlers:
+            assert isinstance(handler, tuple)
+            assert len(handler) == 3
+            assert isinstance(handler[0], str)  # URL pattern
+            assert handler[2]['permission_manager'] == permission_manager  # Handler options
