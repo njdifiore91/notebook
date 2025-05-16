@@ -4,404 +4,224 @@ import os
 import pathlib
 import pytest
 import uuid
-import time
-import socket
-import signal
-import subprocess
-from unittest.mock import MagicMock, patch
+from urllib.parse import urlparse, parse_qs
 
-# Import Jupyter components
+from tornado.httpclient import AsyncHTTPClient
+from tornado.websocket import websocket_connect
+
 from jupyter_server.serverapp import ServerApp
-from notebook.app import JupyterNotebookApp
-
-# Import Yjs and collaboration components
-try:
-    import y_py as Y
-except ImportError:
-    # Mock Y if not available
-    Y = MagicMock()
-
-try:
-    from jupyter_ydoc import YNotebook
-except ImportError:
-    # Mock YNotebook if not available
-    YNotebook = MagicMock()
-
-# Import WebSocket testing utilities
-try:
-    from websockets.client import connect as ws_connect
-    from websockets.server import serve as ws_serve
-    from websockets.exceptions import ConnectionClosed
-except ImportError:
-    # Mock WebSocket components if not available
-    ws_connect = MagicMock()
-    ws_serve = MagicMock()
-    ConnectionClosed = Exception
-
-# Reuse fixtures from main conftest.py if needed
-pytest_plugins = ["jupyter_server.pytest_plugin"]
-
-
-@pytest.fixture
-async def jp_server_with_collab(jp_root_dir, jp_template_dir):
-    """
-    Creates a Jupyter server with collaboration enabled for integration testing.
-    
-    Args:
-        jp_root_dir: Jupyter root directory fixture from jupyter_server.pytest_plugin
-        jp_template_dir: Jupyter template directory fixture from jupyter_server.pytest_plugin
-        
-    Returns:
-        A configured and running ServerApp instance with collaboration enabled.
-    """
-    # Create a temporary directory for collaboration test data
-    collab_data_dir = jp_root_dir / "collab_data"
-    collab_data_dir.mkdir(exist_ok=True)
-    
-    # Configure the server app with collaboration enabled
-    app = ServerApp()
-    app.root_dir = str(jp_root_dir)
-    app.notebook_dir = str(jp_root_dir)
-    app.config.JupyterCollaboration = {
-        "enabled": True,
-        "document_storage_class": "jupyter_ydoc.InMemoryYDocStorage",
-        "awareness_storage_class": "jupyter_ydoc.InMemoryAwarenessStorage"
-    }
-    
-    # Initialize and start the app
-    await app.initialize(argv=[])
-    await app.start()
-    
-    try:
-        yield app
-    finally:
-        # Clean up
-        await app.cleanup_kernels()
-        await app.stop()
-        app.clear_instance()
-
-
-@pytest.fixture
-async def jp_notebook_with_collab(jp_server_with_collab, jp_root_dir, jp_template_dir):
-    """
-    Creates a Jupyter notebook app with collaboration enabled for integration testing.
-    
-    Args:
-        jp_server_with_collab: The server app fixture with collaboration enabled
-        jp_root_dir: Jupyter root directory fixture from jupyter_server.pytest_plugin
-        jp_template_dir: Jupyter template directory fixture from jupyter_server.pytest_plugin
-        
-    Returns:
-        A configured and running JupyterNotebookApp instance with collaboration enabled.
-    """
-    # Create a notebook app linked to the server app
-    app = JupyterNotebookApp(serverapp=jp_server_with_collab)
-    app.static_dir = str(jp_root_dir)
-    app.templates_dir = str(jp_template_dir)
-    app.app_url = "/"
-    
-    # Initialize and start the app
-    await app.initialize(argv=[])
-    await app.start()
-    
-    try:
-        yield app
-    finally:
-        # Clean up
-        await app.stop()
-        app.clear_instance()
+from jupyter_server.utils import url_path_join
 
 
 class WebSocketTestClient:
-    """
-    A WebSocket client for testing collaborative editing features.
+    """A WebSocket client for testing collaborative features.
     
-    This client can connect to a Jupyter server's WebSocket endpoint for
-    collaboration testing, send and receive messages, and simulate network
-    conditions like disconnections and latency.
+    This client simulates a user connecting to the Jupyter Server's WebSocket
+    endpoints for real-time collaboration testing.
     """
     
-    def __init__(self, server_app, user_id=None, roles=None):
-        """
-        Initialize a WebSocket test client.
+    def __init__(self, serverapp, user_id=None, roles=None):
+        """Initialize the WebSocket test client.
         
-        Args:
-            server_app: The Jupyter server app to connect to
-            user_id: The user ID to use for this client
-            roles: The roles to assign to this user
+        Parameters
+        ----------
+        serverapp : ServerApp
+            The Jupyter server application instance
+        user_id : str, optional
+            The user ID to use for this client, by default a random UUID
+        roles : list, optional
+            The roles to assign to this user, by default None
         """
-        self.server_app = server_app
+        self.serverapp = serverapp
         self.user_id = user_id or f"test-user-{uuid.uuid4().hex[:8]}"
         self.roles = roles or ["editor"]
-        self.websocket = None
-        self.connected = False
-        self.doc_id = None
-        self.ydoc = Y.YDoc()
+        self.base_url = self.serverapp.connection_url
+        self.ws_url = self._get_ws_url()
+        self.ws_connection = None
         self.received_messages = []
-        self.connection_interrupted = False
-        self.offline_updates = []
-        
-    async def connect(self, doc_id=None):
-        """
-        Connect to the collaboration WebSocket endpoint.
-        
-        Args:
-            doc_id: The document ID to collaborate on
-            
-        Returns:
-            True if connection was successful, False otherwise
-        """
-        if doc_id:
-            self.doc_id = doc_id
-        else:
-            self.doc_id = f"test-doc-{uuid.uuid4().hex[:8]}"
-            
-        # Construct the WebSocket URL
-        server_url = f"ws://localhost:{self.server_app.port}"
-        ws_url = f"{server_url}/api/collaboration/{self.doc_id}/ws"
-        
-        try:
-            # Connect to the WebSocket endpoint
-            self.websocket = await ws_connect(
-                ws_url,
-                extra_headers={
-                    "X-Jupyter-User-Id": self.user_id,
-                    "X-Jupyter-User-Roles": ",".join(self.roles)
-                }
-            )
-            self.connected = True
-            
-            # Start a background task to receive messages
-            asyncio.create_task(self._receive_messages())
-            
-            return True
-        except Exception as e:
-            print(f"Connection failed: {e}")
-            return False
+        self._message_future = None
     
-    async def disconnect(self):
-        """
-        Disconnect from the WebSocket endpoint.
-        
-        Returns:
-            True if disconnection was successful, False otherwise
-        """
-        if self.websocket and not self.websocket.closed:
-            await self.websocket.close()
-            self.connected = False
-            return True
-        return False
+    def _get_ws_url(self):
+        """Convert the server's HTTP URL to a WebSocket URL."""
+        parsed = urlparse(self.base_url)
+        protocol = "ws" if parsed.scheme == "http" else "wss"
+        return f"{protocol}://{parsed.netloc}"
     
-    async def send(self, message):
-        """
-        Send a message to the WebSocket endpoint.
+    async def connect(self, path="/collaboration"):
+        """Connect to the WebSocket server.
         
-        Args:
-            message: The message to send (will be JSON-encoded)
+        Parameters
+        ----------
+        path : str, optional
+            The WebSocket endpoint path, by default "/collaboration"
             
-        Returns:
-            True if the message was sent, False otherwise
+        Returns
+        -------
+        WebSocketClientConnection
+            The WebSocket connection object
         """
-        if not self.connected or self.connection_interrupted:
-            # Store updates for later if we're offline
-            self.offline_updates.append(message)
-            return False
+        # Add authentication token if available
+        token = getattr(self.serverapp, 'token', '')
+        if token:
+            path = f"{path}?token={token}"
             
-        try:
-            if isinstance(message, dict):
-                message = json.dumps(message)
-                
-            await self.websocket.send(message)
-            return True
-        except Exception as e:
-            print(f"Send failed: {e}")
-            return False
-    
-    async def _receive_messages(self):
-        """
-        Background task to receive messages from the WebSocket endpoint.
-        """
-        try:
-            while self.connected and not self.websocket.closed:
-                try:
-                    message = await self.websocket.recv()
-                    self.received_messages.append(message)
-                except ConnectionClosed:
-                    self.connected = False
-                    break
-        except Exception as e:
-            print(f"Receive error: {e}")
-            self.connected = False
-    
-    async def simulate_network_interruption(self, duration=2.0):
-        """
-        Simulate a network interruption by temporarily closing the WebSocket connection.
-        
-        Args:
-            duration: The duration of the interruption in seconds
-            
-        Returns:
-            True if the interruption was simulated, False otherwise
-        """
-        if not self.connected:
-            return False
-            
-        # Mark as interrupted to prevent sending messages
-        self.connection_interrupted = True
-        
-        # Close the current connection
-        old_websocket = self.websocket
-        await old_websocket.close()
-        
-        # Wait for the specified duration
-        await asyncio.sleep(duration)
-        
-        # Reconnect
-        await self.connect(self.doc_id)
-        self.connection_interrupted = False
-        
-        # Send any offline updates
-        for update in self.offline_updates:
-            await self.send(update)
-        self.offline_updates = []
-        
-        return True
-    
-    async def simulate_high_latency(self, latency=0.5, duration=5.0):
-        """
-        Simulate high network latency by delaying message sending and receiving.
-        
-        Args:
-            latency: The latency to simulate in seconds
-            duration: How long to simulate high latency in seconds
-            
-        Returns:
-            True if high latency was simulated, False otherwise
-        """
-        if not self.connected:
-            return False
-            
-        # Patch the send and receive methods to add delay
-        original_send = self.websocket.send
-        original_recv = self.websocket.recv
-        
-        async def delayed_send(message):
-            await asyncio.sleep(latency)
-            return await original_send(message)
-            
-        async def delayed_recv():
-            await asyncio.sleep(latency)
-            return await original_recv()
-            
-        self.websocket.send = delayed_send
-        self.websocket.recv = delayed_recv
-        
-        # Wait for the specified duration
-        await asyncio.sleep(duration)
-        
-        # Restore original methods
-        self.websocket.send = original_send
-        self.websocket.recv = original_recv
-        
-        return True
-    
-    async def update_cell(self, cell_id, content):
-        """
-        Update a cell in the collaborative document.
-        
-        Args:
-            cell_id: The ID of the cell to update
-            content: The new content for the cell
-            
-        Returns:
-            True if the update was sent, False otherwise
-        """
-        # Create a simple update message
-        # In a real implementation, this would be a proper Yjs update
-        update = {
-            "type": "update",
-            "cell_id": cell_id,
-            "content": content,
-            "user_id": self.user_id,
-            "timestamp": int(time.time() * 1000)
+        # Add user identity information
+        headers = {
+            "X-User-ID": self.user_id,
+            "X-User-Roles": ",".join(self.roles)
         }
         
-        return await self.send(update)
+        # Connect to the WebSocket server
+        url = url_path_join(self.ws_url, path)
+        self.ws_connection = await websocket_connect(
+            url, 
+            headers=headers,
+            on_message_callback=self._on_message
+        )
+        return self.ws_connection
     
-    async def get_document_state(self):
-        """
-        Get the current state of the document.
+    async def disconnect(self):
+        """Disconnect from the WebSocket server."""
+        if self.ws_connection:
+            self.ws_connection.close()
+            self.ws_connection = None
+    
+    def _on_message(self, message):
+        """Handle incoming WebSocket messages.
         
-        Returns:
-            The document state as reported by the server
+        Parameters
+        ----------
+        message : str or None
+            The message received from the WebSocket server, or None if the connection was closed
         """
-        # Request the current document state
-        await self.send({"type": "get_document"})
-        
-        # Wait for the response
-        for _ in range(10):  # Try up to 10 times
-            for message in reversed(self.received_messages):
-                try:
-                    data = json.loads(message)
-                    if data.get("type") == "document_state":
-                        return data.get("state")
-                except (json.JSONDecodeError, AttributeError):
-                    pass
-            await asyncio.sleep(0.1)
+        if message is None:
+            # Connection closed
+            return
             
-        return None
-    
-    def clear_received_messages(self):
-        """
-        Clear the list of received messages.
-        """
-        self.received_messages = []
-    
-    async def wait_for_message_containing(self, content, timeout=5.0):
-        """
-        Wait for a message containing the specified content.
-        
-        Args:
-            content: The content to look for in messages
-            timeout: How long to wait in seconds
+        # Parse and store the message
+        try:
+            parsed_message = json.loads(message)
+            self.received_messages.append(parsed_message)
             
-        Returns:
-            The message if found, None otherwise
+            # If there's a waiting future, set its result
+            if self._message_future and not self._message_future.done():
+                self._message_future.set_result(parsed_message)
+        except json.JSONDecodeError:
+            # Handle binary messages (like Yjs updates)
+            self.received_messages.append({"type": "binary", "data": message})
+            
+            # If there's a waiting future, set its result
+            if self._message_future and not self._message_future.done():
+                self._message_future.set_result({"type": "binary", "data": message})
+    
+    async def send_message(self, message):
+        """Send a message to the WebSocket server.
+        
+        Parameters
+        ----------
+        message : dict or str
+            The message to send. If a dict, it will be JSON-encoded.
         """
-        start_time = time.time()
-        while time.time() - start_time < timeout:
-            for message in self.received_messages:
-                if content in str(message):
-                    return message
-            await asyncio.sleep(0.1)
-        return None
+        if not self.ws_connection:
+            raise RuntimeError("WebSocket connection not established")
+            
+        if isinstance(message, dict):
+            message = json.dumps(message)
+            
+        await self.ws_connection.write_message(message)
+    
+    async def wait_for_message(self, timeout=5.0):
+        """Wait for the next message from the WebSocket server.
+        
+        Parameters
+        ----------
+        timeout : float, optional
+            The maximum time to wait in seconds, by default 5.0
+            
+        Returns
+        -------
+        dict
+            The received message
+            
+        Raises
+        ------
+        asyncio.TimeoutError
+            If no message is received within the timeout period
+        """
+        self._message_future = asyncio.Future()
+        try:
+            return await asyncio.wait_for(self._message_future, timeout)
+        finally:
+            self._message_future = None
+    
+    async def wait_for_message_type(self, message_type, timeout=5.0):
+        """Wait for a message of a specific type.
+        
+        Parameters
+        ----------
+        message_type : str
+            The type of message to wait for
+        timeout : float, optional
+            The maximum time to wait in seconds, by default 5.0
+            
+        Returns
+        -------
+        dict
+            The received message
+            
+        Raises
+        ------
+        asyncio.TimeoutError
+            If no matching message is received within the timeout period
+        """
+        start_time = asyncio.get_event_loop().time()
+        while True:
+            remaining_time = timeout - (asyncio.get_event_loop().time() - start_time)
+            if remaining_time <= 0:
+                raise asyncio.TimeoutError(f"Timeout waiting for message type: {message_type}")
+                
+            message = await self.wait_for_message(timeout=remaining_time)
+            if message.get("type") == message_type:
+                return message
 
 
 @pytest.fixture
-async def jp_ws_client(jp_server_with_collab):
-    """
-    Creates a WebSocket client connected to the test server.
+async def jp_ws_client(jp_serverapp):
+    """Fixture to create WebSocket clients for testing collaborative features.
     
-    Args:
-        jp_server_with_collab: The Jupyter server app with collaboration enabled
+    This fixture provides a factory function that creates WebSocket clients
+    connected to the test server. Each client simulates a different user for
+    testing multi-user collaboration scenarios.
+    
+    Parameters
+    ----------
+    jp_serverapp : ServerApp
+        The Jupyter server application fixture
         
-    Returns:
-        A function that creates WebSocket test clients.
+    Returns
+    -------
+    callable
+        A factory function that creates WebSocketTestClient instances
     """
     clients = []
     
     async def create_client(user_id=None, roles=None):
-        """
-        Creates a WebSocket client with specified user identity.
+        """Create a WebSocket client connected to the test server.
         
-        Args:
-            user_id: The user ID to use for this client
-            roles: The roles to assign to this user
+        Parameters
+        ----------
+        user_id : str, optional
+            The user ID to use for this client, by default a random UUID
+        roles : list, optional
+            The roles to assign to this user, by default ["editor"]
             
-        Returns:
-            A WebSocketTestClient instance.
+        Returns
+        -------
+        WebSocketTestClient
+            A connected WebSocket client
         """
-        client = WebSocketTestClient(jp_server_with_collab, user_id=user_id, roles=roles)
+        client = WebSocketTestClient(jp_serverapp, user_id=user_id, roles=roles)
+        await client.connect()
         clients.append(client)
         return client
     
@@ -413,222 +233,303 @@ async def jp_ws_client(jp_server_with_collab):
 
 
 @pytest.fixture
-async def create_test_document(jp_server_with_collab, jp_root_dir):
-    """
-    Creates a test notebook document for collaboration testing.
+def collab_db_path(tmp_path):
+    """Fixture providing an isolated path for the collaboration database.
     
-    Args:
-        jp_server_with_collab: The Jupyter server app with collaboration enabled
-        jp_root_dir: Jupyter root directory fixture
-        
-    Returns:
-        A function that creates test documents with specified content.
-    """
-    created_files = []
+    This fixture creates a unique temporary path for each test to ensure
+    that collaboration database state is isolated between tests.
     
-    async def _create_document(name=None, cells=None):
-        """
-        Create a test notebook document.
+    Parameters
+    ----------
+    tmp_path : pathlib.Path
+        The pytest temporary directory fixture
         
-        Args:
-            name: The name of the document (default: a random name)
-            cells: The cells to include in the document
-            
-        Returns:
-            The path to the created document.
-        """
-        if name is None:
-            name = f"test-notebook-{uuid.uuid4().hex[:8]}.ipynb"
-            
-        if not name.endswith(".ipynb"):
-            name += ".ipynb"
-            
-        if cells is None:
-            cells = [
-                {
-                    "cell_type": "markdown",
-                    "metadata": {},
-                    "source": ["# Test Notebook\n", "This is a test notebook for collaboration testing."]
-                },
-                {
-                    "cell_type": "code",
-                    "execution_count": None,
-                    "metadata": {},
-                    "outputs": [],
-                    "source": ["# Test code cell\n", "print('Hello, collaborative world!')"],
-                }
-            ]
-            
-        # Create notebook content
-        content = {
-            "cells": cells,
-            "metadata": {
-                "kernelspec": {
-                    "display_name": "Python 3",
-                    "language": "python",
-                    "name": "python3"
-                },
-                "language_info": {
-                    "codemirror_mode": {
-                        "name": "ipython",
-                        "version": 3
-                    },
-                    "file_extension": ".py",
-                    "mimetype": "text/x-python",
-                    "name": "python",
-                    "nbconvert_exporter": "python",
-                    "pygments_lexer": "ipython3",
-                    "version": "3.8.0"
-                },
-                "collaboration": {
-                    "enabled": True
-                }
+    Returns
+    -------
+    str
+        The path to use for the collaboration database
+    """
+    db_path = tmp_path.joinpath("collab.db")
+    return str(db_path)
+
+
+@pytest.fixture
+def comments_db_path(tmp_path):
+    """Fixture providing an isolated path for the comments database.
+    
+    This fixture creates a unique temporary path for each test to ensure
+    that comments database state is isolated between tests.
+    
+    Parameters
+    ----------
+    tmp_path : pathlib.Path
+        The pytest temporary directory fixture
+        
+    Returns
+    -------
+    str
+        The path to use for the comments database
+    """
+    db_path = tmp_path.joinpath("comments.db")
+    return str(db_path)
+
+
+@pytest.fixture
+def test_notebook_content():
+    """Fixture providing a sample notebook content for testing.
+    
+    Returns
+    -------
+    dict
+        A dictionary representing a simple notebook with code and markdown cells
+    """
+    return {
+        "cells": [
+            {
+                "cell_type": "markdown",
+                "metadata": {},
+                "source": ["# Test Notebook for Collaboration\n", "This is a test notebook for collaboration features."]
             },
-            "nbformat": 4,
-            "nbformat_minor": 5
-        }
+            {
+                "cell_type": "code",
+                "execution_count": None,
+                "metadata": {},
+                "outputs": [],
+                "source": ["# This is a code cell\n", "print('Hello, world!')"]
+            },
+            {
+                "cell_type": "code",
+                "execution_count": None,
+                "metadata": {},
+                "outputs": [],
+                "source": ["# Another code cell\n", "import numpy as np\n", "np.random.rand(10)"]
+            }
+        ],
+        "metadata": {
+            "kernelspec": {
+                "display_name": "Python 3",
+                "language": "python",
+                "name": "python3"
+            },
+            "language_info": {
+                "codemirror_mode": {
+                    "name": "ipython",
+                    "version": 3
+                },
+                "file_extension": ".py",
+                "mimetype": "text/x-python",
+                "name": "python",
+                "nbconvert_exporter": "python",
+                "pygments_lexer": "ipython3",
+                "version": "3.9.0"
+            }
+        },
+        "nbformat": 4,
+        "nbformat_minor": 5
+    }
+
+
+@pytest.fixture
+async def create_test_notebook(jp_root_dir, jp_fetch, test_notebook_content):
+    """Fixture providing a function to create test notebooks.
+    
+    This fixture returns a function that creates a notebook file with the
+    specified content in the server's root directory.
+    
+    Parameters
+    ----------
+    jp_root_dir : pathlib.Path
+        The Jupyter server root directory fixture
+    jp_fetch : callable
+        The Jupyter server fetch fixture
+    test_notebook_content : dict
+        The default notebook content fixture
         
-        # Write the notebook to disk
-        file_path = jp_root_dir / name
-        with open(file_path, "w") as f:
+    Returns
+    -------
+    callable
+        A function that creates test notebooks
+    """
+    async def _create_notebook(name="test_notebook.ipynb", content=None):
+        """Create a test notebook file.
+        
+        Parameters
+        ----------
+        name : str, optional
+            The name of the notebook file, by default "test_notebook.ipynb"
+        content : dict, optional
+            The notebook content, by default uses test_notebook_content
+            
+        Returns
+        -------
+        str
+            The path to the created notebook file
+        """
+        if content is None:
+            content = test_notebook_content
+            
+        # Create the notebook file
+        notebook_path = jp_root_dir / name
+        with open(notebook_path, 'w', encoding='utf-8') as f:
             json.dump(content, f)
             
-        created_files.append(file_path)
-        return str(file_path)
+        # Verify the file was created
+        response = await jp_fetch("api", "contents", name)
+        assert response.code == 200
+        
+        return str(notebook_path)
     
-    yield _create_document
-    
-    # Clean up created files
-    for file_path in created_files:
-        try:
-            os.remove(file_path)
-        except OSError:
-            pass
+    return _create_notebook
 
 
 @pytest.fixture
-async def simulate_server_restart(jp_server_with_collab):
-    """
-    Simulates a server restart by stopping and starting the server.
+def configure_collaboration(monkeypatch, collab_db_path, comments_db_path):
+    """Fixture to configure collaboration settings for testing.
     
-    Args:
-        jp_server_with_collab: The Jupyter server app with collaboration enabled
-        
-    Returns:
-        A function that simulates a server restart.
-    """
-    async def _restart_server():
-        """
-        Restart the server by stopping and starting it.
-        
-        Returns:
-            True if the restart was successful, False otherwise.
-        """
-        try:
-            # Stop the server
-            await jp_server_with_collab.stop()
-            
-            # Wait a moment to ensure it's fully stopped
-            await asyncio.sleep(1)
-            
-            # Start the server again
-            await jp_server_with_collab.start()
-            
-            # Wait a moment to ensure it's fully started
-            await asyncio.sleep(1)
-            
-            return True
-        except Exception as e:
-            print(f"Server restart failed: {e}")
-            return False
+    This fixture sets environment variables to configure the collaboration
+    features for testing, using isolated database paths.
     
-    return _restart_server
+    Parameters
+    ----------
+    monkeypatch : pytest.MonkeyPatch
+        The pytest monkeypatch fixture
+    collab_db_path : str
+        The collaboration database path fixture
+    comments_db_path : str
+        The comments database path fixture
+        
+    Returns
+    -------
+    dict
+        A dictionary of the configured collaboration settings
+    """
+    # Configure collaboration settings via environment variables
+    monkeypatch.setenv("JUPYTER_COLLABORATION_ENABLED", "true")
+    monkeypatch.setenv("JUPYTER_COLLABORATION_DB_PATH", collab_db_path)
+    monkeypatch.setenv("JUPYTER_COMMENTS_DB_PATH", comments_db_path)
+    monkeypatch.setenv("JUPYTER_COLLABORATION_DOCUMENT_STORAGE_CLASS", "jupyter_ydoc.SQLiteYDocStorage")
+    monkeypatch.setenv("JUPYTER_COLLABORATION_AWARENESS_STORAGE_CLASS", "jupyter_ydoc.InMemoryAwarenessStorage")
+    monkeypatch.setenv("JUPYTER_COMMENTS_STORAGE_CLASS", "jupyter_comments.SQLiteCommentStorage")
+    monkeypatch.setenv("JUPYTER_PERMISSIONS_STORAGE_CLASS", "jupyter_permissions.SQLitePermissionStorage")
+    
+    # Return the configuration for reference
+    return {
+        "enabled": True,
+        "collab_db_path": collab_db_path,
+        "comments_db_path": comments_db_path,
+        "document_storage_class": "jupyter_ydoc.SQLiteYDocStorage",
+        "awareness_storage_class": "jupyter_ydoc.InMemoryAwarenessStorage",
+        "comments_storage_class": "jupyter_comments.SQLiteCommentStorage",
+        "permissions_storage_class": "jupyter_permissions.SQLitePermissionStorage"
+    }
 
 
 @pytest.fixture
-async def create_collaborative_session(jp_ws_client, create_test_document):
-    """
-    Creates a collaborative editing session with multiple clients.
+async def setup_collaboration_test(configure_collaboration, create_test_notebook, jp_ws_client):
+    """Fixture to set up a complete collaboration test environment.
     
-    Args:
-        jp_ws_client: The WebSocket client factory fixture
-        create_test_document: The test document creation fixture
-        
-    Returns:
-        A function that creates a collaborative session with multiple clients.
-    """
-    async def _create_session(num_clients=2, document_name=None):
-        """
-        Create a collaborative session with multiple clients.
-        
-        Args:
-            num_clients: The number of clients to create
-            document_name: The name of the document to collaborate on
-            
-        Returns:
-            A tuple containing (document_path, clients) where clients is a list of
-            connected WebSocketTestClient instances.
-        """
-        # Create a test document
-        document_path = await create_test_document(name=document_name)
-        document_name = os.path.basename(document_path)
-        
-        # Create and connect clients
-        clients = []
-        for i in range(num_clients):
-            client = await jp_ws_client(user_id=f"user-{i+1}")
-            await client.connect(document_name)
-            clients.append(client)
-            
-        # Wait a moment for all clients to fully connect
-        await asyncio.sleep(1)
-        
-        return document_path, clients
+    This fixture combines multiple fixtures to create a fully configured
+    collaboration test environment with a test notebook and connected clients.
     
-    return _create_session
+    Parameters
+    ----------
+    configure_collaboration : dict
+        The collaboration configuration fixture
+    create_test_notebook : callable
+        The notebook creation fixture
+    jp_ws_client : callable
+        The WebSocket client factory fixture
+        
+    Returns
+    -------
+    dict
+        A dictionary containing the test environment setup
+    """
+    # Create a test notebook
+    notebook_path = await create_test_notebook()
+    notebook_name = os.path.basename(notebook_path)
+    
+    # Create two test clients
+    client1 = await jp_ws_client(user_id="user1", roles=["editor"])
+    client2 = await jp_ws_client(user_id="user2", roles=["editor"])
+    
+    # Subscribe both clients to the test document
+    await client1.send_message({
+        "type": "subscribe",
+        "document_id": notebook_name
+    })
+    await client2.send_message({
+        "type": "subscribe",
+        "document_id": notebook_name
+    })
+    
+    # Wait for subscription confirmations
+    await client1.wait_for_message_type("subscribed")
+    await client2.wait_for_message_type("subscribed")
+    
+    # Return the test environment
+    return {
+        "notebook_path": notebook_path,
+        "notebook_name": notebook_name,
+        "client1": client1,
+        "client2": client2,
+        "config": configure_collaboration
+    }
 
 
 @pytest.fixture
-async def verify_document_consistency(jp_ws_client):
-    """
-    Verifies that all clients see the same document state.
+def mock_collaboration_provider():
+    """Fixture providing a mock collaboration provider for unit testing.
     
-    Args:
-        jp_ws_client: The WebSocket client factory fixture
-        
-    Returns:
-        A function that verifies document consistency across clients.
-    """
-    async def _verify_consistency(clients, timeout=5.0):
-        """
-        Verify that all clients see the same document state.
-        
-        Args:
-            clients: A list of WebSocketTestClient instances
-            timeout: How long to wait for consistency in seconds
-            
-        Returns:
-            True if all clients see the same state, False otherwise.
-        """
-        start_time = time.time()
-        while time.time() - start_time < timeout:
-            # Get document state from all clients
-            states = []
-            for client in clients:
-                state = await client.get_document_state()
-                if state:
-                    states.append(state)
-            
-            # If we have states from all clients, check if they're consistent
-            if len(states) == len(clients) and all(states):
-                # Check if all states are the same
-                first_state = json.dumps(states[0], sort_keys=True)
-                if all(json.dumps(state, sort_keys=True) == first_state for state in states):
-                    return True
-            
-            # Wait a moment before trying again
-            await asyncio.sleep(0.5)
-        
-        return False
+    This fixture creates a mock implementation of the ICollaborationProvider
+    interface for unit testing collaboration components without requiring
+    a full server setup.
     
-    return _verify_consistency
+    Returns
+    -------
+    object
+        A mock collaboration provider object
+    """
+    class MockCollaborationProvider:
+        """Mock implementation of ICollaborationProvider for testing."""
+        
+        def __init__(self):
+            self.documents = {}
+            self.subscribers = {}
+            self.awareness = {}
+            self.connected = True
+        
+        async def connect_document(self, doc_id):
+            """Mock connecting to a collaborative document."""
+            if doc_id not in self.documents:
+                self.documents[doc_id] = {"cells": [], "metadata": {}}
+                self.subscribers[doc_id] = set()
+            
+            self.subscribers[doc_id].add("test-user")
+            return self.documents[doc_id]
+        
+        async def disconnect_document(self, doc_id):
+            """Mock disconnecting from a collaborative document."""
+            if doc_id in self.subscribers:
+                self.subscribers[doc_id].discard("test-user")
+        
+        def get_connected_users(self, doc_id):
+            """Mock getting connected users for a document."""
+            return ["test-user"] if doc_id in self.subscribers else []
+        
+        def update_awareness(self, doc_id, state):
+            """Mock updating awareness state."""
+            if doc_id not in self.awareness:
+                self.awareness[doc_id] = {}
+            
+            self.awareness[doc_id]["test-user"] = state
+        
+        def get_awareness_states(self, doc_id):
+            """Mock getting awareness states for a document."""
+            return self.awareness.get(doc_id, {})
+        
+        def is_connected(self):
+            """Mock checking if connected to collaboration server."""
+            return self.connected
+    
+    return MockCollaborationProvider()
