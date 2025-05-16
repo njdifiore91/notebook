@@ -13,29 +13,139 @@ Notebook 7 includes a new debugger that allows you to step through your code cel
 
 ![a screenshot of the debugger](https://user-images.githubusercontent.com/591645/195543524-e16647a1-a4e0-4832-929d-73d5a77ef001.png)
 
-## Real Time collaboration
+## Real-Time Collaborative Editing
 
-Notebook 7 allows for using the real time collaboration extension so you can share your notebook with other users and edit it in real time.
+Notebook 7 now includes built-in comprehensive real-time collaborative editing capabilities, enabling multiple users to simultaneously edit notebook documents with seamless synchronization. This feature is powered by the Yjs CRDT (Conflict-free Replicated Data Type) framework, providing a robust foundation for multi-user editing.
 
-The Real Time Collaboration feature is the same as in JupyterLab and is available as a JupyterLab extension. It is not enabled by default, but you can install with `pip`:
+![a screencast showing multiple users collaboratively editing a notebook with synchronized cursors and presence indicators](https://path/to/collaboration-demo.gif)
 
-```bash
-pip install jupyter-collaboration
+### Key Collaborative Features
+
+#### Real-Time Synchronization
+
+All notebook content is synchronized in real-time between collaborators, including:
+- Code and markdown cell content
+- Cell outputs and execution results
+- Cell metadata and formatting
+- Notebook structure (cell creation, deletion, and reordering)
+
+Changes made by any user are instantly visible to all collaborators, with automatic conflict resolution provided by the Yjs CRDT framework.
+
+#### User Presence Awareness
+
+Collaborative notebooks display who is currently viewing or editing the document:
+
+- User avatars appear in the collaboration panel showing all active participants
+- Status indicators show whether users are active, idle, or viewing
+- User information includes names and optional profile details
+
+![a screenshot showing the user presence panel with avatars and status indicators](https://path/to/presence-panel.png)
+
+#### Cursor and Selection Synchronization
+
+See exactly where your collaborators are working in real-time:
+
+- Colored cursors show each user's current position
+- Text selections are highlighted with user-specific colors
+- Cell focus indicators show which cells other users are viewing
+
+This feature makes it easy to follow along with others' work and avoid editing conflicts.
+
+#### Cell-Level Locking Mechanism
+
+To prevent editing conflicts, Notebook 7 implements an intelligent cell locking system:
+
+- When a user begins editing a cell, it's automatically locked for other users
+- Visual indicators show which cells are locked and by whom
+- Locks are automatically released when the user completes editing
+- Administrators can override locks if necessary
+
+![a screenshot showing locked cells with visual indicators](https://path/to/cell-locking.png)
+
+#### Change History and Versioning
+
+Track contributions and changes over time:
+
+- Complete history of all changes made to the notebook
+- Attribution of changes to specific users
+- Ability to view and restore previous versions
+- Diff visualization to compare changes between versions
+
+#### Permissions System
+
+Fine-grained access control allows document owners to manage collaboration:
+
+- Document-level roles (Owner, Editor, Commenter, Viewer)
+- Cell-level permissions for restricted content
+- Permission management interface for easy configuration
+- Integration with JupyterHub authentication
+
+![a screenshot showing the permissions management interface](https://path/to/permissions-ui.png)
+
+#### Comment and Review System
+
+Facilitate discussion and feedback directly within the notebook:
+
+- Add comments to specific cells or selections
+- Thread-based discussions with reply functionality
+- Comment resolution workflow for tracking addressed feedback
+- Notification system for new comments and mentions
+
+![a screenshot showing the comment and review interface](https://path/to/comments-ui.png)
+
+### Enabling Collaborative Editing
+
+Collaborative editing is built into Notebook 7 and can be enabled through server configuration:
+
+1. Enable the collaboration feature in your Jupyter configuration:
+
+```python
+# In jupyter_notebook_config.py
+c.NotebookApp.collaborative = True
 ```
 
-or with `conda`:
+2. Start your Jupyter Notebook server:
 
 ```bash
-conda install -c conda-forge jupyter-collaboration
+jupyter notebook
 ```
 
-After installing the extension, restart the Jupyter Server so the extension can be loaded.
+3. Share the notebook URL with collaborators who have access to your Jupyter server
+
+4. For multi-user deployments, configure JupyterHub integration for authentication and user management
+
+### Technical Implementation
+
+The collaborative editing feature is powered by several key technologies:
+
+- **Yjs CRDT Framework**: Provides conflict-free real-time synchronization with automatic merging of concurrent changes
+- **Y-WebSocket**: Efficient binary protocol for Yjs updates over WebSocket connections
+- **Y-Protocols/Awareness**: Standardized protocol for user presence and cursor tracking
+
+This implementation ensures:
+
+- Low-latency updates even with multiple simultaneous editors
+- Offline editing capability with automatic synchronization when reconnected
+- Minimal bandwidth usage through efficient binary update protocol
+- Deterministic conflict resolution without requiring server-side intervention
+
+### Using Collaborative Features
+
+When you open a notebook with collaboration enabled:
+
+1. The collaboration panel appears showing all connected users
+2. Your changes are automatically synchronized with other users
+3. You can see others' cursors and selections in real-time
+4. Cells being edited by others are locked and visually indicated
+5. You can add comments by clicking the comment icon in cell margins
+6. Access version history through the History button in the toolbar
+7. Manage permissions via the Share button in the collaboration panel
 
 ```{note}
-It is possible for two users to work on the same notebook using Notebook 7 or JupyterLab.
+Collaborative editing works seamlessly between Notebook 7 and JupyterLab 4+, allowing team members to use their preferred interface while collaborating on the same document.
 ```
 
-![a screencast showing how users can collaborate on the same document with both Notebook 7 and JupyterLab](https://user-images.githubusercontent.com/591645/229854102-6eed73f4-587f-406e-8ed1-347b788da9ee.gif)
+![a screencast showing the full collaborative editing experience with multiple features in action](https://path/to/full-collaboration-demo.gif)
 
 ## Table of Contents
 
@@ -132,3 +242,5 @@ This was just a quick overview of the new features in Notebook 7. For more detai
 
 - The [JupyterLab Documentation](https://jupyterlab.readthedocs.io/en/latest/) is a great resource to learn more about JupyterLab and the extensions available. Since Notebook 7 is based on JupyterLab, many of the features and extensions available for JupyterLab are also available for Notebook 7.
 - [Migration Guide](./migrate_to_notebook7.md) for Notebook 7, which explains how to migrate from the Classic Notebook to Notebook 7.
+- [Collaborative Editing Documentation](./collaboration/index.md) provides detailed information about setting up and using the real-time collaborative features in Notebook 7.
+- [Yjs Documentation](https://docs.yjs.dev/) offers technical details about the CRDT framework powering the collaborative editing features.
