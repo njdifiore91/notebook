@@ -26,6 +26,14 @@
     page_config_full.update(baseUrl=base_url, wsUrl=ws_url) %} {# Sentinel value
     to say that we are on the tree page #} {% set _ =
     page_config_full.update(notebookPage='consoles') %}
+    
+    {# Add collaboration configuration for Yjs CRDT framework #}
+    {% if collaboration_enabled is defined %}
+    {% set _ = page_config_full.update(collaborationEnabled=collaboration_enabled) %}
+    {% endif %}
+    {% if collaboration_ws_url is defined %}
+    {% set _ = page_config_full.update(collaborationWsUrl=collaboration_ws_url) %}
+    {% endif %}
 
     <script id="jupyter-config-data" type="application/json">
       {{ page_config_full | tojson }}
