@@ -6,7 +6,6 @@ import pathlib
 import shutil
 import sys
 import asyncio
-import uuid
 from typing import Dict, List, Optional, Any, Callable, Awaitable
 
 if sys.version_info < (3, 10):
@@ -15,22 +14,14 @@ else:
     from importlib.resources import files
 
 import pytest
-import websockets
-
-try:
-    import y_py as Y
-    from pycrdt import Doc as YDoc
-    from pycrdt import Text as YText
-    from pycrdt import Map as YMap
-    from pycrdt import Array as YArray
-    from pycrdt_websocket import WebsocketProvider
-    HAS_COLLABORATION_DEPS = True
-except ImportError:
-    HAS_COLLABORATION_DEPS = False
+import y_py as ypy
+from tornado.websocket import WebSocketClientConnection
+from tornado.httpclient import AsyncHTTPClient
 
 from notebook.app import JupyterNotebookApp
+from notebook.collab.handlers import YjsDocumentProvider
 
-pytest_plugins = ["jupyter_server.pytest_plugin"]
+pytest_plugins = ["jupyter_server.pytest_plugin", "pytest_asyncio"]
 
 
 def mkdir(tmp_path, *parts):
@@ -154,230 +145,212 @@ def notebookapp(jp_serverapp, make_notebook_app):
     return app
 
 
-# Collaboration testing fixtures
+class CollabWebSocketClient:
+    """A WebSocket client for testing collaboration features."""
+
+    def __init__(self, serverapp, user_id="test-user", roles=None):
+        """Initialize the WebSocket client.
+        
+        Parameters
+        ----------
+        serverapp : JupyterServerApp
+            The Jupyter server application instance
+        user_id : str, optional
+            The user ID to use for this client, by default "test-user"
+        roles : list, optional
+            The roles to assign to this user, by default None
+        """
+        self.serverapp = serverapp
+        self.user_id = user_id
+        self.roles = roles or ["editor"]
+        self.connection = None
+        self.messages = []
+        self.connected = False
+        self.http_client = AsyncHTTPClient()
+        self.base_url = self.serverapp.web_app.settings["base_url"]
+        self.token = self.serverapp.web_app.settings["token"]
+
+    async def connect(self, doc_id="test-doc"):
+        """Connect to the WebSocket server.
+        
+        Parameters
+        ----------
+        doc_id : str, optional
+            The document ID to connect to, by default "test-doc"
+            
+        Returns
+        -------
+        bool
+            True if connection was successful, False otherwise
+        """
+        url = f"ws://localhost:{self.serverapp.port}{self.base_url}collab/api/yjs/{doc_id}?token={self.token}&user_id={self.user_id}"
+        self.connection = await self.serverapp.http_server.websocket_connect(url)
+        self.connected = True
+        
+        # Start message listener
+        asyncio.create_task(self._listen_for_messages())
+        return True
+
+    async def disconnect(self):
+        """Disconnect from the WebSocket server."""
+        if self.connection:
+            self.connection.close()
+            self.connected = False
+            self.connection = None
+
+    async def send_message(self, message):
+        """Send a message to the WebSocket server.
+        
+        Parameters
+        ----------
+        message : bytes or str
+            The message to send
+        """
+        if not self.connected:
+            raise RuntimeError("Not connected to WebSocket server")
+        
+        if isinstance(message, str):
+            message = message.encode("utf-8")
+            
+        await self.connection.write_message(message, binary=True)
+
+    async def _listen_for_messages(self):
+        """Listen for messages from the WebSocket server."""
+        while self.connected:
+            try:
+                msg = await self.connection.read_message()
+                if msg is None:
+                    # Connection closed
+                    self.connected = False
+                    break
+                self.messages.append(msg)
+            except Exception as e:
+                print(f"Error reading message: {e}")
+                self.connected = False
+                break
+
+    def get_messages(self):
+        """Get all received messages.
+        
+        Returns
+        -------
+        list
+            List of received messages
+        """
+        return self.messages
+
+    def clear_messages(self):
+        """Clear the message buffer."""
+        self.messages = []
+
 
 @pytest.fixture
-def yjs_doc_provider():
-    """Fixture for creating and managing Yjs documents for collaboration testing.
+async def yjs_doc_provider(jp_serverapp):
+    """Create a Yjs document provider for testing.
     
-    Returns a function that creates a new Yjs document with the given ID.
+    Returns
+    -------
+    YjsDocumentProvider
+        A Yjs document provider instance
     """
-    if not HAS_COLLABORATION_DEPS:
-        pytest.skip("Collaboration dependencies not installed")
-    
-    docs = {}
-    
-    def create_doc(doc_id=None):
-        if doc_id is None:
-            doc_id = str(uuid.uuid4())
-        
-        if doc_id not in docs:
-            doc = YDoc()
-            docs[doc_id] = doc
-        
-        return docs[doc_id]
-    
-    yield create_doc
-    
-    # Clean up documents
-    docs.clear()
+    provider = YjsDocumentProvider(doc_id="test-doc")
+    provider.initialize(jp_serverapp)
+    try:
+        yield provider
+    finally:
+        await provider.destroy()
 
 
 @pytest.fixture
 def awareness_state():
-    """Fixture for testing user presence functionality.
+    """Create an awareness state for testing user presence functionality.
     
-    Returns a dictionary to track user awareness states.
+    Returns
+    -------
+    dict
+        A dictionary representing the awareness state
     """
-    if not HAS_COLLABORATION_DEPS:
-        pytest.skip("Collaboration dependencies not installed")
+    # Create a Y.Doc to hold the awareness state
+    ydoc = ypy.YDoc()
     
-    awareness_states = {}
+    # Create an awareness map
+    awareness = {
+        "clients": {},
+        "user_ids": {}
+    }
     
-    def get_awareness(doc_id=None):
-        if doc_id is None:
-            doc_id = str(uuid.uuid4())
-        
-        if doc_id not in awareness_states:
-            awareness_states[doc_id] = {}
-        
-        return awareness_states[doc_id]
+    # Add some test users
+    awareness["clients"]["client1"] = {
+        "user": {
+            "id": "user1",
+            "name": "Test User 1",
+            "color": "#ff0000"
+        },
+        "cursor": {
+            "cellId": "cell1",
+            "position": 10
+        },
+        "selection": {
+            "cellId": "cell1",
+            "start": 5,
+            "end": 15
+        },
+        "status": "active"
+    }
     
-    yield get_awareness
+    awareness["clients"]["client2"] = {
+        "user": {
+            "id": "user2",
+            "name": "Test User 2",
+            "color": "#00ff00"
+        },
+        "cursor": {
+            "cellId": "cell2",
+            "position": 5
+        },
+        "selection": None,
+        "status": "idle"
+    }
     
-    # Clean up awareness states
-    awareness_states.clear()
-
-
-class CollabWebSocketClient:
-    """WebSocket client for testing collaboration functionality."""
+    awareness["user_ids"]["user1"] = "client1"
+    awareness["user_ids"]["user2"] = "client2"
     
-    def __init__(self, server_app, user_id=None, roles=None):
-        """Initialize a WebSocket client for collaboration testing.
-        
-        Args:
-            server_app: The Jupyter server application
-            user_id: Optional user ID for the client
-            roles: Optional list of roles for the client
-        """
-        if not HAS_COLLABORATION_DEPS:
-            pytest.skip("Collaboration dependencies not installed")
-        
-        self.server_app = server_app
-        self.user_id = user_id or str(uuid.uuid4())
-        self.roles = roles or ["user"]
-        self.websocket = None
-        self.doc = None
-        self.provider = None
-        self.connected = False
-        self.messages = []
-    
-    async def connect(self, doc_id=None, endpoint="/api/collaboration/room"):
-        """Connect to the collaboration WebSocket endpoint.
-        
-        Args:
-            doc_id: Optional document ID to connect to
-            endpoint: The WebSocket endpoint to connect to
-        """
-        if doc_id is None:
-            doc_id = str(uuid.uuid4())
-        
-        self.doc_id = doc_id
-        server_url = self.server_app.connection_url
-        ws_url = f"ws://{server_url.host}:{server_url.port}{endpoint}/{doc_id}"
-        
-        # Create a new Yjs document
-        self.doc = YDoc()
-        
-        # Connect to the WebSocket server
-        self.websocket = await websockets.connect(ws_url)
-        
-        # Create a WebSocket provider for the document
-        self.provider = WebsocketProvider(self.doc, self.websocket)
-        
-        # Set up awareness state
-        self.provider.awareness.set_local_state({
-            "user": {
-                "id": self.user_id,
-                "name": f"User {self.user_id}",
-                "roles": self.roles
-            }
-        })
-        
-        self.connected = True
-        return self
-    
-    async def disconnect(self):
-        """Disconnect from the WebSocket server."""
-        if self.provider:
-            await self.provider.disconnect()
-            self.provider = None
-        
-        if self.websocket and self.websocket.open:
-            await self.websocket.close()
-            self.websocket = None
-        
-        self.connected = False
-    
-    async def update_document(self, updates):
-        """Apply updates to the Yjs document.
-        
-        Args:
-            updates: Dictionary of updates to apply to the document
-        """
-        if not self.connected or not self.doc:
-            raise RuntimeError("Client not connected")
-        
-        # Apply updates to the document
-        with self.doc.begin_transaction() as txn:
-            for key, value in updates.items():
-                if isinstance(value, str):
-                    # Create or update a text shared type
-                    text = self.doc.get_text(key)
-                    text.extend(txn, value)
-                elif isinstance(value, dict):
-                    # Create or update a map shared type
-                    map_obj = self.doc.get_map(key)
-                    for k, v in value.items():
-                        map_obj.set(txn, k, v)
-                elif isinstance(value, list):
-                    # Create or update an array shared type
-                    array = self.doc.get_array(key)
-                    for item in value:
-                        array.append(txn, item)
-    
-    async def get_document_state(self):
-        """Get the current state of the Yjs document.
-        
-        Returns:
-            Dictionary representing the document state
-        """
-        if not self.connected or not self.doc:
-            raise RuntimeError("Client not connected")
-        
-        # Extract the document state
-        state = {}
-        for key in self.doc.share.keys():
-            shared_type = self.doc.get(key)
-            if isinstance(shared_type, YText):
-                state[key] = str(shared_type)
-            elif isinstance(shared_type, YMap):
-                state[key] = {k: shared_type.get(k) for k in shared_type.keys()}
-            elif isinstance(shared_type, YArray):
-                state[key] = [shared_type.get(i) for i in range(len(shared_type))]
-        
-        return state
-    
-    async def update_awareness(self, state):
-        """Update the client's awareness state.
-        
-        Args:
-            state: Dictionary of awareness state to set
-        """
-        if not self.connected or not self.provider:
-            raise RuntimeError("Client not connected")
-        
-        # Update the local awareness state
-        current_state = self.provider.awareness.get_local_state() or {}
-        current_state.update(state)
-        self.provider.awareness.set_local_state(current_state)
-    
-    async def get_awareness_states(self):
-        """Get the awareness states of all connected clients.
-        
-        Returns:
-            Dictionary of client IDs to their awareness states
-        """
-        if not self.connected or not self.provider:
-            raise RuntimeError("Client not connected")
-        
-        # Get all awareness states
-        states = {}
-        for client_id in self.provider.awareness.get_states().keys():
-            states[client_id] = self.provider.awareness.get_state(client_id)
-        
-        return states
+    return awareness
 
 
 @pytest.fixture
 async def multi_client_websocket_simulation(jp_serverapp):
-    """Fixture for simulating multiple clients in collaboration tests.
+    """Create a simulation of multiple clients for collaboration testing.
     
-    Returns a function that creates a new CollabWebSocketClient.
+    Returns
+    -------
+    callable
+        A function that creates a new client with the given user ID
     """
-    if not HAS_COLLABORATION_DEPS:
-        pytest.skip("Collaboration dependencies not installed")
-    
     clients = []
     
-    async def create_client(user_id=None, roles=None):
+    async def create_client(user_id="test-user", roles=None):
+        """Create a new client with the given user ID.
+        
+        Parameters
+        ----------
+        user_id : str, optional
+            The user ID to use for this client, by default "test-user"
+        roles : list, optional
+            The roles to assign to this user, by default None
+            
+        Returns
+        -------
+        CollabWebSocketClient
+            A WebSocket client instance
+        """
         client = CollabWebSocketClient(jp_serverapp, user_id=user_id, roles=roles)
+        await client.connect()
         clients.append(client)
         return client
     
     yield create_client
     
-    # Clean up clients
+    # Clean up all clients after the test
     for client in clients:
-        if client.connected:
-            await client.disconnect()
+        await client.disconnect()
