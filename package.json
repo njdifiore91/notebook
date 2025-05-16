@@ -48,7 +48,9 @@
   "resolutions": {
     "@types/react": "^18.0.26",
     "react": "^18.2.0",
-    "yjs": "^13.5.40"
+    "yjs": "^13.5.40",
+    "y-websocket": ">=3.0.0",
+    "y-protocols/awareness": ">=1.0.6"
   },
   "devDependencies": {
     "@jupyterlab/buildutils": "~4.5.0-alpha.0",
@@ -64,7 +66,9 @@
     "npm-run-all": "^4.1.5",
     "prettier": "^2.8.5",
     "rimraf": "^3.0.2",
-    "typescript": "~5.5.4"
+    "typescript": "~5.5.4",
+    "y-websocket": ">=3.0.0",
+    "y-protocols/awareness": ">=1.0.6"
   },
   "nx": {}
 }
