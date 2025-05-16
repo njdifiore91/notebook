@@ -1,217 +1,421 @@
-# Configuring Collaborative Editing
+# Configuring Collaboration Features
 
-Jupyter Notebook v7 includes comprehensive real-time collaborative editing capabilities powered by the Yjs CRDT (Conflict-free Replicated Data Type) framework. This guide explains how to configure these collaboration features.
+Jupyter Notebook 7 includes comprehensive real-time collaborative editing capabilities powered by the [Yjs CRDT](https://yjs.dev/) framework. This document explains how to configure these collaboration features to suit your deployment needs.
 
-## Enabling Collaboration
+## Overview
 
-Collaborative editing can be enabled or disabled through the Jupyter Server configuration. By default, collaboration is disabled and must be explicitly enabled.
+The collaboration system in Jupyter Notebook 7 enables multiple users to simultaneously edit notebook documents with the following capabilities:
 
-To enable collaboration, add the following to your `jupyter_server_config.py` file:
+- Real-time synchronization of notebook content (code cells, markdown cells, outputs)
+- User presence awareness showing who is viewing/editing the notebook
+- Cursor/selection synchronization to visualize other users' work areas
+- Cell-level locking mechanism to prevent editing conflicts
+- Change history and versioning system for tracking individual contributions
+- Permissions system with fine-grained access control
+- Comment and review system for discussing specific cells
+
+This document covers the configuration options for these features.
+
+## Enabling and Disabling Collaboration
+
+Collaboration features can be enabled or disabled at the server level.
+
+### Server Configuration
+
+In your `jupyter_server_config.py` file:
 
 ```python
-c.NotebookApp.collaborative = True
+# Enable or disable collaboration features globally
+c.JupyterNotebookApp.collaborative_mode = True  # Default: False
 ```
 
-You can also enable collaboration via command line when starting Jupyter Notebook:
+When disabled, all collaboration-related UI elements will be hidden, and the WebSocket endpoints for collaboration will not be registered.
 
-```bash
-jupyter notebook --collaborative=True
+### Client-Side Configuration
+
+In the Settings Editor (JSON):
+
+```json
+{
+  "@jupyterlab/notebook-extension:collaborative": {
+    "enabled": true
+  }
+}
 ```
 
 ## WebSocket Connection Parameters
 
-The collaborative editing features rely on WebSocket connections for real-time updates. You can configure various WebSocket parameters to optimize performance and reliability.
+The real-time collaboration features use WebSocket connections to synchronize document changes between clients.
+
+### Server Configuration
+
+In your `jupyter_server_config.py` file:
 
 ```python
-# Maximum WebSocket message size (in bytes)
-c.NotebookApp.collaboration_ws_max_message_size = 10485760  # 10MB
+# WebSocket connection settings for Yjs CRDT synchronization
+c.CollaborationManager.websocket_path = "/api/collaboration/yjs"  # Default: "/api/collaboration/yjs"
+c.CollaborationManager.ping_interval = 30000  # Milliseconds, Default: 30000 (30 seconds)
+c.CollaborationManager.ping_timeout = 10000  # Milliseconds, Default: 10000 (10 seconds)
+c.CollaborationManager.max_message_size = 1048576  # Bytes, Default: 1MB
+c.CollaborationManager.close_timeout = 5000  # Milliseconds, Default: 5000 (5 seconds)
 
-# WebSocket ping interval (in milliseconds)
-c.NotebookApp.collaboration_ws_ping_interval = 30000  # 30 seconds
+# Reconnection settings
+c.CollaborationManager.reconnect_delay = 1000  # Initial delay in milliseconds, Default: 1000 (1 second)
+c.CollaborationManager.max_reconnect_delay = 30000  # Maximum delay in milliseconds, Default: 30000 (30 seconds)
+c.CollaborationManager.reconnect_backoff_factor = 1.5  # Exponential backoff factor, Default: 1.5
+c.CollaborationManager.max_reconnect_attempts = 10  # Default: 10, set to -1 for unlimited attempts
 
-# WebSocket ping timeout (in milliseconds)
-c.NotebookApp.collaboration_ws_ping_timeout = 10000  # 10 seconds
-
-# Maximum number of concurrent WebSocket connections per notebook
-c.NotebookApp.collaboration_max_connections = 20
+# Security settings for WebSocket connections
+c.CollaborationManager.require_secure_websockets = True  # Default: True, requires WSS protocol
+c.CollaborationManager.allowed_origins = []  # Default: [], empty list means same origin only
 ```
 
-## Permission System Configuration
+### Client-Side Configuration
 
-The collaboration feature includes a permission system that controls access to shared notebooks. You can configure default permissions and permission enforcement behavior.
+In the Settings Editor (JSON):
 
-```python
-# Default permission level for new collaborators
-# Options: 'viewer', 'commenter', 'editor', 'admin'
-c.NotebookApp.collaboration_default_permission = 'viewer'
-
-# Enable or disable cell-level permissions
-c.NotebookApp.collaboration_cell_permissions = True
-
-# Permission enforcement mode
-# Options: 'strict' (reject unauthorized operations), 'warn' (allow but log warnings)
-c.NotebookApp.collaboration_permission_mode = 'strict'
-
-# Enable or disable JupyterHub integration for permissions
-c.NotebookApp.collaboration_jupyterhub_permissions = True
+```json
+{
+  "@jupyterlab/collaboration-extension:websocket": {
+    "reconnectDelay": 1000,
+    "maxReconnectDelay": 30000,
+    "reconnectBackoffFactor": 1.5,
+    "maxReconnectAttempts": 10,
+    "showConnectionStatus": true
+  }
+}
 ```
 
 ## Persistence Configuration
 
-Collaborative editing requires persistent storage for document updates, version history, comments, and permissions. You can configure how this data is stored and managed.
+Collaboration data, including document history, comments, and user presence information, needs to be persisted.
+
+### Server Configuration
+
+In your `jupyter_server_config.py` file:
 
 ```python
-# Storage backend for collaboration data
-# Options: 'sqlite', 'postgresql', 'mysql'
-c.NotebookApp.collaboration_storage_backend = 'sqlite'
+# Persistence settings for collaboration data
+c.CollaborationManager.persistence_enabled = True  # Default: True
 
-# Connection string for database (if using postgresql or mysql)
-c.NotebookApp.collaboration_storage_url = 'postgresql://user:password@localhost/jupyter_collab'
+# Storage backend options: "file", "sqlite", "postgresql", "mysql"
+c.CollaborationManager.storage_backend = "file"  # Default: "file"
 
-# Path to SQLite database file (if using sqlite)
-c.NotebookApp.collaboration_sqlite_path = '/path/to/jupyter_collaboration.db'
+# File storage settings (when storage_backend = "file")
+c.CollaborationManager.file_storage_path = ""  # Default: "", empty means jupyter data dir
+c.CollaborationManager.file_storage_prefix = "collab_"  # Default: "collab_"
 
-# Version history settings
-c.NotebookApp.collaboration_max_history = 100  # Maximum number of versions to keep
-c.NotebookApp.collaboration_history_snapshot_interval = 300  # Seconds between snapshots
+# Database settings (when storage_backend = "sqlite", "postgresql", or "mysql")
+c.CollaborationManager.database_url = ""  # Connection string, required for database backends
+
+# Data retention settings
+c.CollaborationManager.update_retention_days = 30  # Default: 30 days
+c.CollaborationManager.inactive_document_cleanup_days = 90  # Default: 90 days
+
+# Snapshot settings
+c.CollaborationManager.snapshot_interval = 100  # Take snapshot every N updates, Default: 100
+c.CollaborationManager.max_snapshots_per_document = 50  # Default: 50
+```
+
+### Client-Side Configuration
+
+In the Settings Editor (JSON):
+
+```json
+{
+  "@jupyterlab/collaboration-extension:persistence": {
+    "autoSaveInterval": 60000,  // Milliseconds between auto-saves, Default: 60000 (1 minute)
+    "showSaveStatus": true
+  }
+}
+```
+
+## Permission System Configuration
+
+The collaboration features include a comprehensive permission system for controlling access to collaborative notebooks.
+
+### Server Configuration
+
+In your `jupyter_server_config.py` file:
+
+```python
+# Permission system settings
+c.CollaborationManager.permission_system_enabled = True  # Default: True
+
+# Default role for new collaborators: "viewer", "commenter", "editor", "admin", "owner"
+c.CollaborationManager.default_role = "viewer"  # Default: "viewer"
+
+# JupyterHub integration for authentication
+c.CollaborationManager.use_jupyterhub_user_identity = True  # Default: True if JupyterHub is detected
+
+# Permission inheritance settings
+c.CollaborationManager.cell_permissions_override_document = True  # Default: True
+c.CollaborationManager.admin_override_cell_permissions = True  # Default: True
+
+# Permission enforcement points
+c.CollaborationManager.enforce_permissions_on_server = True  # Default: True
+c.CollaborationManager.enforce_permissions_on_client = True  # Default: True
+```
+
+### Client-Side Configuration
+
+In the Settings Editor (JSON):
+
+```json
+{
+  "@jupyterlab/collaboration-extension:permissions": {
+    "showPermissionsUI": true,
+    "showRoleIndicators": true,
+    "allowCellLevelPermissions": true,
+    "defaultCellPermission": "inherit"  // "inherit", "viewer", "commenter", "editor"
+  }
+}
+```
+
+## Cell-Level Locking Mechanism
+
+To prevent editing conflicts, Jupyter Notebook 7 implements a cell-level locking system.
+
+### Server Configuration
+
+In your `jupyter_server_config.py` file:
+
+```python
+# Cell locking settings
+c.CollaborationManager.cell_locking_enabled = True  # Default: True
+
+# Lock timeout settings
+c.CollaborationManager.lock_expiration_time = 300  # Seconds, Default: 300 (5 minutes)
+c.CollaborationManager.inactive_lock_timeout = 60  # Seconds of inactivity, Default: 60 (1 minute)
+
+# Lock override settings
+c.CollaborationManager.allow_admin_lock_override = True  # Default: True
+c.CollaborationManager.notify_on_lock_override = True  # Default: True
+```
+
+### Client-Side Configuration
+
+In the Settings Editor (JSON):
+
+```json
+{
+  "@jupyterlab/collaboration-extension:locks": {
+    "showLockIndicators": true,
+    "autoLockOnEdit": true,
+    "showLockNotifications": true,
+    "requestLockOnSelection": false
+  }
+}
+```
+
+## Comment and Review System
+
+The comment and review system allows users to discuss specific cells without modifying the notebook content.
+
+### Server Configuration
+
+In your `jupyter_server_config.py` file:
+
+```python
+# Comment system settings
+c.CollaborationManager.comments_enabled = True  # Default: True
+
+# Comment notification settings
+c.CollaborationManager.comment_notifications_enabled = True  # Default: True
+c.CollaborationManager.email_notifications_enabled = False  # Default: False
+c.CollaborationManager.email_server_settings = {}  # SMTP server settings if email notifications are enabled
+
+# Comment moderation settings
+c.CollaborationManager.comment_moderation_enabled = False  # Default: False
+c.CollaborationManager.comment_moderation_roles = ["admin", "owner"]  # Default: ["admin", "owner"]
+```
+
+### Client-Side Configuration
+
+In the Settings Editor (JSON):
+
+```json
+{
+  "@jupyterlab/collaboration-extension:comments": {
+    "showCommentIndicators": true,
+    "showCommentPanel": true,
+    "autoShowNewComments": true,
+    "commentPanelPosition": "right"  // "right", "bottom", "left"
+  }
+}
 ```
 
 ## User Presence and Awareness
 
-The collaboration feature includes user presence awareness, showing who is viewing or editing a notebook. You can configure how this information is displayed and updated.
+The presence system shows which users are currently viewing or editing the notebook.
+
+### Server Configuration
+
+In your `jupyter_server_config.py` file:
 
 ```python
-# Enable or disable user presence features
-c.NotebookApp.collaboration_presence = True
+# User presence settings
+c.CollaborationManager.presence_enabled = True  # Default: True
 
-# User presence update interval (in milliseconds)
-c.NotebookApp.collaboration_presence_update_interval = 1000  # 1 second
+# Presence update frequency
+c.CollaborationManager.presence_update_interval = 5000  # Milliseconds, Default: 5000 (5 seconds)
 
-# User inactivity timeout (in milliseconds)
-# After this period of inactivity, a user is marked as idle
-c.NotebookApp.collaboration_user_idle_timeout = 300000  # 5 minutes
+# Inactivity thresholds
+c.CollaborationManager.idle_threshold = 60000  # Milliseconds, Default: 60000 (1 minute)
+c.CollaborationManager.away_threshold = 300000  # Milliseconds, Default: 300000 (5 minutes)
 
-# User disconnection timeout (in milliseconds)
-# After this period without updates, a user is removed from the presence list
-c.NotebookApp.collaboration_user_disconnect_timeout = 900000  # 15 minutes
+# Presence cleanup
+c.CollaborationManager.presence_cleanup_delay = 30000  # Milliseconds, Default: 30000 (30 seconds)
 ```
 
-## Comment System Configuration
+### Client-Side Configuration
 
-The collaboration feature includes a comment and review system. You can configure how comments are stored, displayed, and managed.
+In the Settings Editor (JSON):
 
-```python
-# Enable or disable the comment system
-c.NotebookApp.collaboration_comments = True
-
-# Maximum comment length (in characters)
-c.NotebookApp.collaboration_max_comment_length = 1000
-
-# Enable or disable email notifications for comments
-c.NotebookApp.collaboration_comment_notifications = False
-
-# Email address for sending notifications (if enabled)
-c.NotebookApp.collaboration_notification_email = 'jupyter@example.com'
+```json
+{
+  "@jupyterlab/collaboration-extension:presence": {
+    "showPresencePanel": true,
+    "showCursors": true,
+    "showSelections": true,
+    "showUserStatus": true,
+    "condensedPresenceView": false
+  }
+}
 ```
 
-## Cell Locking Mechanism
+## Version History and Change Tracking
 
-The collaboration feature includes a cell locking mechanism to prevent editing conflicts. You can configure how locks are acquired, released, and managed.
+The version history system tracks changes to the notebook over time.
+
+### Server Configuration
+
+In your `jupyter_server_config.py` file:
 
 ```python
-# Enable or disable cell locking
-c.NotebookApp.collaboration_cell_locking = True
+# Version history settings
+c.CollaborationManager.version_history_enabled = True  # Default: True
 
-# Maximum lock duration (in seconds)
-# After this period, locks are automatically released
-c.NotebookApp.collaboration_lock_expiration = 300  # 5 minutes
+# History granularity
+c.CollaborationManager.history_granularity = "cell"  # "cell" or "document", Default: "cell"
 
-# Lock acquisition mode
-# Options: 'automatic' (lock on edit), 'manual' (explicit lock/unlock)
-c.NotebookApp.collaboration_lock_mode = 'automatic'
+# Automatic snapshot settings
+c.CollaborationManager.auto_snapshot_enabled = True  # Default: True
+c.CollaborationManager.auto_snapshot_interval = 300  # Seconds, Default: 300 (5 minutes)
+c.CollaborationManager.max_auto_snapshots = 100  # Default: 100
+
+# Named version settings
+c.CollaborationManager.named_versions_enabled = True  # Default: True
+c.CollaborationManager.max_named_versions = 50  # Default: 50
+```
+
+### Client-Side Configuration
+
+In the Settings Editor (JSON):
+
+```json
+{
+  "@jupyterlab/collaboration-extension:history": {
+    "showHistoryPanel": true,
+    "showChangeIndicators": true,
+    "autoExpandChanges": false,
+    "showAuthorInfo": true
+  }
+}
 ```
 
 ## Advanced Configuration
 
-For advanced deployments, additional configuration options are available.
+### Custom Authentication Integration
+
+For custom authentication systems, you can configure how the collaboration system integrates with your authentication provider.
 
 ```python
-# Enable or disable offline editing support
-c.NotebookApp.collaboration_offline_support = True
-
-# Maximum size of offline edit queue (in operations)
-c.NotebookApp.collaboration_offline_queue_size = 1000
-
-# Collaboration server URL (for external collaboration service)
-# If not set, the built-in collaboration service is used
-c.NotebookApp.collaboration_server_url = 'https://collab.example.com'
-
-# Authentication token for external collaboration service
-c.NotebookApp.collaboration_server_token = 'your-secret-token'
+# Custom authentication integration
+c.CollaborationManager.auth_provider_class = "my_module.MyAuthProvider"  # Default: None
+c.CollaborationManager.auth_provider_options = {}  # Options passed to the auth provider
 ```
 
-## Monitoring and Logging
+### Performance Tuning
 
-You can configure logging for the collaboration features to help with monitoring and troubleshooting.
+For deployments with many users or large notebooks, you may need to adjust performance settings.
 
 ```python
-# Collaboration log level
-# Options: 'DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'
-c.NotebookApp.collaboration_log_level = 'INFO'
+# WebSocket performance settings
+c.CollaborationManager.max_connections_per_document = 50  # Default: 50
+c.CollaborationManager.max_documents_per_server = 1000  # Default: 1000
 
-# Path to collaboration log file
-c.NotebookApp.collaboration_log_file = '/path/to/collaboration.log'
+# Update batching settings
+c.CollaborationManager.update_batch_size = 10  # Default: 10
+c.CollaborationManager.update_batch_delay = 50  # Milliseconds, Default: 50
 
-# Enable or disable metrics collection
-c.NotebookApp.collaboration_metrics = True
-
-# Metrics collection interval (in seconds)
-c.NotebookApp.collaboration_metrics_interval = 60
+# Memory management
+c.CollaborationManager.document_cache_size = 100  # Default: 100
+c.CollaborationManager.document_cache_ttl = 3600  # Seconds, Default: 3600 (1 hour)
 ```
 
-## Example Configuration
+### Logging and Monitoring
 
-Here's a complete example configuration for enabling collaborative editing with recommended settings:
+Configure logging and monitoring for collaboration features.
 
 ```python
-# Enable collaboration
-c.NotebookApp.collaborative = True
+# Collaboration logging settings
+c.CollaborationManager.log_level = "INFO"  # "DEBUG", "INFO", "WARNING", "ERROR", Default: "INFO"
+c.CollaborationManager.log_file = ""  # Default: "", empty means use Jupyter Server's log
 
-# WebSocket settings
-c.NotebookApp.collaboration_ws_max_message_size = 10485760
-c.NotebookApp.collaboration_ws_ping_interval = 30000
-c.NotebookApp.collaboration_ws_ping_timeout = 10000
-
-# Permission settings
-c.NotebookApp.collaboration_default_permission = 'viewer'
-c.NotebookApp.collaboration_permission_mode = 'strict'
-
-# Storage settings
-c.NotebookApp.collaboration_storage_backend = 'sqlite'
-c.NotebookApp.collaboration_sqlite_path = '/path/to/jupyter_collaboration.db'
-c.NotebookApp.collaboration_max_history = 100
-
-# Presence settings
-c.NotebookApp.collaboration_presence = True
-c.NotebookApp.collaboration_user_idle_timeout = 300000
-
-# Comment settings
-c.NotebookApp.collaboration_comments = True
-
-# Cell locking settings
-c.NotebookApp.collaboration_cell_locking = True
-c.NotebookApp.collaboration_lock_mode = 'automatic'
-
-# Logging settings
-c.NotebookApp.collaboration_log_level = 'INFO'
+# Metrics collection
+c.CollaborationManager.metrics_enabled = True  # Default: True
+c.CollaborationManager.metrics_collection_interval = 60  # Seconds, Default: 60 (1 minute)
 ```
 
-## Disabling Collaboration
+## Troubleshooting
 
-If you need to disable collaboration after it has been enabled, set the following in your configuration:
+### Common Issues
 
-```python
-c.NotebookApp.collaborative = False
+1. **WebSocket Connection Failures**
+   - Ensure your server is properly configured for WebSocket connections
+   - Check that your proxy server (if any) is configured to pass WebSocket traffic
+   - Verify that SSL/TLS is properly configured if using secure WebSockets (WSS)
+
+2. **Permission Problems**
+   - Verify that the JupyterHub integration is properly configured
+   - Check the server logs for permission validation errors
+   - Ensure users have the appropriate roles assigned
+
+3. **Synchronization Issues**
+   - Check the WebSocket connection status in the client
+   - Verify that the persistence backend is properly configured and accessible
+   - Look for errors in the server logs related to CRDT updates
+
+### Diagnostic Commands
+
+To check the status of the collaboration system:
+
+```bash
+jupyter collaboration status
 ```
 
-This will disable all collaborative features, including real-time editing, user presence, comments, and cell locking. Notebooks will function in single-user mode, similar to previous versions of Jupyter Notebook.
+To reset the collaboration state for a specific notebook:
+
+```bash
+jupyter collaboration reset /path/to/notebook.ipynb
+```
+
+## Security Considerations
+
+When configuring collaboration features, consider the following security aspects:
+
+1. **Always use secure WebSockets (WSS)** for production deployments
+2. **Configure appropriate authentication** for all users
+3. **Set up proper permission roles** to restrict access as needed
+4. **Enable audit logging** for security monitoring
+5. **Regularly back up** the collaboration persistence store
+
+For more information on security, see the [Security in Jupyter](https://jupyter-server.readthedocs.io/en/stable/operators/security.html) documentation.
+
+## Further Reading
+
+- [Jupyter Server Configuration](https://jupyter-server.readthedocs.io/en/stable/operators/configuring-jupyter-server.html)
+- [JupyterHub Integration](https://jupyterhub.readthedocs.io/en/stable/)
+- [Yjs Documentation](https://docs.yjs.dev/)
+- [Jupyter Notebook 7 Collaboration Architecture](../collaboration/architecture.html)
