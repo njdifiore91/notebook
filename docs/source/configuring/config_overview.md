@@ -9,6 +9,7 @@ when using Jupyter Notebook:
 > - {ref}`Jupyter's common configuration system <configure-common>`
 > - {ref}`Jupyter Server <configure-jupyter-server>`
 > - {ref}`Notebook extensions <configure-nbextensions>`
+> - {ref}`Collaborative editing <configure-collaboration>`
 
 Let's look at highlights of each area.
 
@@ -20,7 +21,7 @@ Jupyter applications, from the Notebook to JupyterHub to nbgrader, share a
 common configuration system. The process for creating a configuration file
 and editing settings is similar for all the Jupyter applications.
 
-> - [Jupyter’s Common Configuration Approach](https://jupyter.readthedocs.io/en/latest/use/config.html)
+> - [Jupyter's Common Configuration Approach](https://jupyter.readthedocs.io/en/latest/use/config.html)
 > - [Common Directories and File Locations](https://jupyter.readthedocs.io/en/latest/use/jupyter-directories.html)
 > - [Language kernels](https://jupyter.readthedocs.io/en/latest/projects/kernels.html)
 > - [traitlets](https://traitlets.readthedocs.io/en/latest/config.html#module-traitlets.config)
@@ -65,6 +66,32 @@ Check out the [migration guide](../migrating/server-imports.md) to learn more on
 The Notebook frontend can be extending with JupyterLab extensions.
 
 See the {ref}`Frontend Extension Guide <frontend-extensions>` for more information.
+
+(configure-collaboration)=
+
+## Collaborative editing
+
+Jupyter Notebook 7 includes real-time collaborative editing capabilities, allowing multiple users to simultaneously edit notebook documents.
+
+> - Configuring Collaborative Features
+>
+>   > To create a `jupyter_collaboration_config.py` file in the `.jupyter`
+>   > directory, with all the defaults commented out, use the following
+>   > command:
+>   >
+>   > ```
+>   > $ jupyter server --generate-config-file jupyter_collaboration_config.py
+>   > ```
+>
+> - Key configuration options include:
+>   - WebSocket connection parameters
+>   - User presence and awareness settings
+>   - Permission system configuration
+>   - Comment and review system settings
+>   - Version history tracking options
+>   - Cell locking mechanism configuration
+>
+> - See the {ref}`Collaborative Editing Guide <collaboration>` for detailed information on setting up and using collaborative features.
 
 [Security in Jupyter notebooks:](https://jupyter-server.readthedocs.io/en/stable/operators/security.html)
 Since security policies vary from organization to organization, we encourage you to
