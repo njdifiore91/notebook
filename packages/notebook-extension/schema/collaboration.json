@@ -1,0 +1,97 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema",
+  "title": "Collaboration",
+  "description": "Collaboration feature configuration settings.",
+  "jupyter.lab.setting-icon": "notebook-ui-components:jupyter",
+  "jupyter.lab.setting-icon-label": "Collaboration Settings",
+  "properties": {
+    "enabled": {
+      "type": "boolean",
+      "title": "Enable Collaboration",
+      "description": "Master toggle for all collaboration features",
+      "default": true
+    },
+    "autoConnect": {
+      "type": "boolean",
+      "title": "Auto-connect to collaboration server",
+      "description": "Automatically connect to collaboration server when opening a notebook",
+      "default": true
+    },
+    "defaultRole": {
+      "type": "string",
+      "title": "Default Role Assignment",
+      "description": "Default role to assign to users when they first join a collaboration session",
+      "enum": ["viewer", "editor", "admin"],
+      "default": "editor"
+    },
+    "presence": {
+      "type": "object",
+      "title": "Presence Settings",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "title": "Enable Presence",
+          "default": true
+        },
+        "showCursors": {
+          "type": "boolean",
+          "title": "Show Collaborator Cursors",
+          "default": true
+        },
+        "showAvatars": {
+          "type": "boolean",
+          "title": "Show User Avatars",
+          "default": true
+        }
+      }
+    },
+    "locks": {
+      "type": "object",
+      "title": "Cell Locking Settings",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "title": "Enable Cell Locking",
+          "default": true
+        },
+        "autoRelease": {
+          "type": "boolean",
+          "title": "Auto-release locks after timeout",
+          "default": true
+        },
+        "timeoutSeconds": {
+          "type": "number",
+          "title": "Lock timeout in seconds",
+          "default": 300
+        },
+        "mode": {
+          "type": "string",
+          "title": "Lock Mode",
+          "enum": ["auto", "manual"],
+          "default": "auto"
+        }
+      }
+    },
+    "statusBar": {
+      "type": "object",
+      "title": "Status Bar Settings",
+      "properties": {
+        "visible": {
+          "type": "boolean",
+          "title": "Show Collaboration Status",
+          "default": true
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["userCount", "connectionStatus", "syncStatus"]
+          },
+          "default": ["userCount", "connectionStatus", "syncStatus"]
+        }
+      }
+    }
+  },
+  "additionalProperties": false,
+  "type": "object"
+}
