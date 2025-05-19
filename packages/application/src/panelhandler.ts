@@ -38,6 +38,40 @@ export class PanelHandler {
   }
 
   /**
+   * Add a collaboration-specific widget to the panel.
+   * 
+   * This method allows for special handling of collaboration widgets.
+   * 
+   * @param widget - The collaboration widget to add
+   * @param rank - The rank of the widget
+   * @param options - Optional collaboration-specific options
+   */
+  addCollaborationWidget(widget: Widget, rank: number, options?: CollaborationWidgetOptions): void {
+    widget.parent = null;
+    const item = { 
+      widget, 
+      rank,
+      isCollaborationWidget: true,
+      collaborationOptions: options || {}
+    };
+    const index = ArrayExt.upperBound(this._items, item, Private.itemCmp);
+    ArrayExt.insert(this._items, index, item);
+    this._panel.insertWidget(index, widget);
+    
+    // Add collaboration-specific class to the widget for styling
+    widget.addClass('jp-CollaborationWidget');
+  }
+
+  /**
+   * Get all collaboration widgets in this panel.
+   */
+  getCollaborationWidgets(): Widget[] {
+    return this._items
+      .filter(item => 'isCollaborationWidget' in item && item.isCollaborationWidget)
+      .map(item => item.widget);
+  }
+
+  /**
    * A message hook for child remove messages on the panel handler.
    */
   private _panelChildHook = (
@@ -95,6 +129,15 @@ export class SidePanelHandler extends PanelHandler {
     const icon = new Widget({ node: this._closeButton });
     this._panel.addWidget(icon);
     this._panel.addWidget(this._widgetPanel);
+    
+    // Initialize collaboration status indicator container
+    this._collaborationStatusContainer = document.createElement('div');
+    this._collaborationStatusContainer.className = 'jp-SidePanel-collaborationStatus';
+    this._collaborationStatusContainer.style.display = 'none';
+    
+    // Add collaboration status container to the panel
+    const statusWidget = new Widget({ node: this._collaborationStatusContainer });
+    this._panel.addWidget(statusWidget);
   }
 
   /**
@@ -155,6 +198,97 @@ export class SidePanelHandler extends PanelHandler {
    */
   get closeButton(): HTMLButtonElement {
     return this._closeButton;
+  }
+
+  /**
+   * Get the collaboration status container element.
+   */
+  get collaborationStatusContainer(): HTMLDivElement {
+    return this._collaborationStatusContainer;
+  }
+
+  /**
+   * Set the collaboration status for this panel.
+   * 
+   * @param status - The collaboration status to set
+   */
+  setCollaborationStatus(status: CollaborationStatus | null): void {
+    if (!status) {
+      this._collaborationStatusContainer.style.display = 'none';
+      return;
+    }
+    
+    // Update the status container with the new status
+    this._collaborationStatusContainer.style.display = 'flex';
+    this._collaborationStatusContainer.innerHTML = '';
+    
+    // Create status indicator
+    const statusIndicator = document.createElement('div');
+    statusIndicator.className = `jp-CollaborationStatus-indicator jp-CollaborationStatus-${status.state}`;
+    this._collaborationStatusContainer.appendChild(statusIndicator);
+    
+    // Create status text
+    const statusText = document.createElement('span');
+    statusText.textContent = status.message;
+    statusText.className = 'jp-CollaborationStatus-text';
+    this._collaborationStatusContainer.appendChild(statusText);
+    
+    // Add user presence indicators if available
+    if (status.activeUsers && status.activeUsers.length > 0) {
+      const presenceContainer = document.createElement('div');
+      presenceContainer.className = 'jp-CollaborationStatus-presence';
+      
+      // Add up to 3 user avatars, with a +N indicator for additional users
+      const maxVisibleUsers = 3;
+      const visibleUsers = status.activeUsers.slice(0, maxVisibleUsers);
+      const remainingUsers = Math.max(0, status.activeUsers.length - maxVisibleUsers);
+      
+      visibleUsers.forEach(user => {
+        const userAvatar = document.createElement('div');
+        userAvatar.className = 'jp-CollaborationStatus-userAvatar';
+        userAvatar.title = user.displayName;
+        userAvatar.style.backgroundColor = user.color;
+        userAvatar.textContent = user.displayName.substring(0, 1).toUpperCase();
+        presenceContainer.appendChild(userAvatar);
+      });
+      
+      if (remainingUsers > 0) {
+        const remainingIndicator = document.createElement('div');
+        remainingIndicator.className = 'jp-CollaborationStatus-remainingUsers';
+        remainingIndicator.textContent = `+${remainingUsers}`;
+        presenceContainer.appendChild(remainingIndicator);
+      }
+      
+      this._collaborationStatusContainer.appendChild(presenceContainer);
+    }
+  }
+
+  /**
+   * Add a collaboration-specific widget to the side panel.
+   * 
+   * @param widget - The collaboration widget to add
+   * @param rank - The rank of the widget
+   * @param options - Optional collaboration-specific options
+   */
+  addCollaborationWidget(widget: Widget, rank: number, options?: CollaborationWidgetOptions): void {
+    widget.parent = null;
+    widget.hide();
+    const item = { 
+      widget, 
+      rank,
+      isCollaborationWidget: true,
+      collaborationOptions: options || {}
+    };
+    const index = this._findInsertIndex(item);
+    ArrayExt.insert(this._items, index, item);
+    this._widgetPanel.insertWidget(index, widget);
+
+    // Add collaboration-specific class to the widget for styling
+    widget.addClass('jp-CollaborationWidget');
+    
+    this._refreshVisibility();
+
+    this._widgetAdded.emit(widget);
   }
 
   /**
@@ -294,6 +428,7 @@ export class SidePanelHandler extends PanelHandler {
   private _currentWidget: Widget | null;
   private _lastCurrentWidget: Widget | null;
   private _closeButton: HTMLButtonElement;
+  private _collaborationStatusContainer: HTMLDivElement;
   private _widgetAdded: Signal<SidePanelHandler, Widget> = new Signal(this);
   private _widgetRemoved: Signal<SidePanelHandler, Widget> = new Signal(this);
 }
@@ -367,6 +502,41 @@ export class SidePanelPalette {
   }
 
   /**
+   * Add a collaboration-specific item to the command palette.
+   * 
+   * @param widget - The collaboration widget
+   * @param area - The area of the panel
+   * @param category - Optional category for the command palette entry (defaults to 'Collaboration')
+   */
+  addCollaborationItem(widget: Readonly<Widget>, area: 'left' | 'right', category: string = 'Collaboration'): void {
+    // Check if the item does not already exist.
+    if (this.getItem(widget, area)) {
+      return;
+    }
+
+    // Add a new item in command palette with collaboration-specific category.
+    const disposableDelegate = this._commandPalette.addItem({
+      command: this._command,
+      category: category,
+      args: {
+        side: area,
+        title: `Show ${widget.title.caption}`,
+        id: widget.id,
+        isCollaboration: true
+      },
+    });
+
+    // Keep the disposableDelegate object to be able to dispose of the item if the widget
+    // is remove from the side panel.
+    this._items.push({
+      widgetId: widget.id,
+      area: area,
+      disposable: disposableDelegate,
+      isCollaboration: true
+    });
+  }
+
+  /**
    * Remove an item from the command palette.
    */
   removeItem(widget: Readonly<Widget>, area: 'left' | 'right'): void {
@@ -381,6 +551,9 @@ export class SidePanelPalette {
   _items: SidePanelPaletteItem[] = [];
 }
 
+/**
+ * Interface for a side panel palette item.
+ */
 type SidePanelPaletteItem = {
   /**
    * The ID of the widget associated to the command palette.
@@ -396,6 +569,11 @@ type SidePanelPaletteItem = {
    * The disposable object to remove the item from command palette.
    */
   disposable: IDisposable;
+  
+  /**
+   * Whether this is a collaboration-specific item.
+   */
+  isCollaboration?: boolean;
 };
 
 /**
@@ -420,6 +598,66 @@ type SidePanelPaletteOption = {
 };
 
 /**
+ * Interface for collaboration widget options.
+ */
+export interface CollaborationWidgetOptions {
+  /**
+   * The type of collaboration widget.
+   */
+  type?: 'presence' | 'history' | 'comments' | 'permissions' | 'locks' | 'other';
+  
+  /**
+   * Whether this widget should be shown in the collaboration status area.
+   */
+  showInStatusArea?: boolean;
+  
+  /**
+   * Additional metadata for the collaboration widget.
+   */
+  metadata?: { [key: string]: any };
+}
+
+/**
+ * Interface for collaboration status.
+ */
+export interface CollaborationStatus {
+  /**
+   * The state of the collaboration.
+   */
+  state: 'connected' | 'connecting' | 'disconnected' | 'error';
+  
+  /**
+   * A message describing the current status.
+   */
+  message: string;
+  
+  /**
+   * List of active users in the collaboration session.
+   */
+  activeUsers?: Array<{
+    /**
+     * Unique identifier for the user.
+     */
+    id: string;
+    
+    /**
+     * Display name for the user.
+     */
+    displayName: string;
+    
+    /**
+     * Color associated with this user for UI elements.
+     */
+    color: string;
+    
+    /**
+     * Optional avatar URL.
+     */
+    avatarUrl?: string;
+  }>;
+}
+
+/**
  * A namespace for private module data.
  */
 namespace Private {
@@ -436,6 +674,16 @@ namespace Private {
      * The sort rank of the widget.
      */
     rank: number;
+    
+    /**
+     * Whether this is a collaboration widget.
+     */
+    isCollaborationWidget?: boolean;
+    
+    /**
+     * Collaboration-specific options for the widget.
+     */
+    collaborationOptions?: CollaborationWidgetOptions;
   }
   /**
    * A less-than comparison function for side bar rank items.
