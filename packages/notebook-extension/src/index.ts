@@ -2166,6 +2166,9 @@ class CommentService implements ICommentService {
   private _commentsChanged: Signal<ICommentService, { panel: NotebookPanel, comments: Array<{ id: string, cellId: string, author: string, text: string, timestamp: number, resolved: boolean, range?: { start: number, end: number } }> }>;
 }
 
+// Import the history plugin
+import historyPlugin from './historyPlugin';
+
 /**
  * Export the plugins as default.
  */
@@ -2187,7 +2190,8 @@ const plugins: JupyterFrontEndPlugin<any>[] = [
   lockService,
   historyService,
   permissionsService,
-  commentService
+  commentService,
+  historyPlugin
 ];
 
 export default plugins;
