@@ -1,0 +1,10 @@
+{
+  "title": "User presence",
+  "description": "User presence indicators in the top area showing active collaborators",
+  "jupyter.lab.toolbars": {
+    "TopBar": [{ "name": "userPresence", "rank": 100 }]
+  },
+  "properties": {},
+  "additionalProperties": false,
+  "type": "object"
+}
