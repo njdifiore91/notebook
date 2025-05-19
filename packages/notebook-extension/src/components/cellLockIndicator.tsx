@@ -1,327 +1,251 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import { ReactWidget } from '@jupyterlab/apputils';
-import { ITranslator, nullTranslator } from '@jupyterlab/translation';
-
-import '../../style/cellLockIndicator.css';
+import { Cell } from '@jupyterlab/cells';
+import { ITranslator } from '@jupyterlab/translation';
 
 /**
  * Interface for the lock service that manages cell locks
  */
 export interface ILockService {
   /**
-   * Acquire a lock on a cell
-   * @param cellId - The ID of the cell to lock
-   * @returns A promise that resolves to true if the lock was acquired, false otherwise
+   * Request a lock for a specific cell
+   * @param cellId The ID of the cell to lock
+   * @returns Promise that resolves to true if lock was acquired, false otherwise
    */
-  acquireLock: (cellId: string) => Promise<boolean>;
+  requestLock: (cellId: string) => Promise<boolean>;
 
   /**
-   * Release a lock on a cell
-   * @param cellId - The ID of the cell to unlock
-   * @returns A promise that resolves to true if the lock was released, false otherwise
+   * Release a lock for a specific cell
+   * @param cellId The ID of the cell to release
+   * @returns Promise that resolves when the lock is released
    */
-  releaseLock: (cellId: string) => Promise<boolean>;
+  releaseLock: (cellId: string) => Promise<void>;
 
   /**
-   * Check if a cell is locked
-   * @param cellId - The ID of the cell to check
-   * @returns A promise that resolves to the user ID of the lock owner, or null if the cell is not locked
+   * Check if a cell is currently locked
+   * @param cellId The ID of the cell to check
+   * @returns True if the cell is locked, false otherwise
    */
-  isLocked: (cellId: string) => Promise<string | null>;
+  isLocked: (cellId: string) => boolean;
+
+  /**
+   * Check if the current user holds the lock for a cell
+   * @param cellId The ID of the cell to check
+   * @returns True if the current user holds the lock, false otherwise
+   */
+  hasLock: (cellId: string) => boolean;
+
+  /**
+   * Get information about the user who holds the lock for a cell
+   * @param cellId The ID of the cell to check
+   * @returns User information or null if the cell is not locked
+   */
+  getLockHolder: (cellId: string) => { id: string; name: string; color: string } | null;
 
   /**
    * Subscribe to lock state changes
-   * @param callback - The callback to call when the lock state changes
-   * @returns A function to unsubscribe from lock state changes
+   * @param callback Function to call when lock state changes
+   * @returns Function to unsubscribe
    */
-  subscribe: (callback: (cellId: string, userId: string | null) => void) => () => void;
-}
-
-/**
- * Interface for the user information
- */
-export interface IUserInfo {
-  /**
-   * The user's ID
-   */
-  id: string;
-
-  /**
-   * The user's display name
-   */
-  name: string;
-
-  /**
-   * The user's avatar URL
-   */
-  avatarUrl?: string;
-
-  /**
-   * The user's color (for visual identification)
-   */
-  color: string;
-}
-
-/**
- * Interface for the user service that provides user information
- */
-export interface IUserService {
-  /**
-   * Get information about a user
-   * @param userId - The ID of the user
-   * @returns A promise that resolves to the user information, or null if the user is not found
-   */
-  getUserInfo: (userId: string) => Promise<IUserInfo | null>;
-
-  /**
-   * Get the current user's ID
-   * @returns The current user's ID
-   */
-  getCurrentUserId: () => string;
+  subscribe: (callback: () => void) => () => void;
 }
 
 /**
  * Props for the CellLockIndicator component
  */
-export interface ICellLockIndicatorProps {
+interface ICellLockIndicatorProps {
   /**
-   * The ID of the cell
+   * The cell this lock indicator is associated with
    */
-  cellId: string;
+  cell: Cell;
 
   /**
-   * The lock service
+   * The lock service to use for managing locks
    */
   lockService: ILockService;
 
   /**
-   * The user service
+   * The translation service
    */
-  userService: IUserService;
-
-  /**
-   * The translator
-   */
-  translator?: ITranslator;
+  translator: ITranslator;
 }
 
 /**
- * A component that displays the lock status of a cell and provides controls for acquiring and releasing locks
+ * A React component to display the lock status of a cell and provide controls
+ * for acquiring and releasing locks.
  */
 export const CellLockIndicator: React.FC<ICellLockIndicatorProps> = ({
-  cellId,
+  cell,
   lockService,
-  userService,
-  translator = nullTranslator
+  translator
 }) => {
   const trans = translator.load('notebook');
-  const [lockOwner, setLockOwner] = useState<string | null>(null);
-  const [lockOwnerInfo, setLockOwnerInfo] = useState<IUserInfo | null>(null);
-  const [isAcquiringLock, setIsAcquiringLock] = useState(false);
-  const [isReleasingLock, setIsReleasingLock] = useState(false);
-  const currentUserId = userService.getCurrentUserId();
-  const isLockedByCurrentUser = lockOwner === currentUserId;
+  const cellId = cell.model.id;
+  
+  // State to track lock status
+  const [isLocked, setIsLocked] = useState(lockService.isLocked(cellId));
+  const [hasLock, setHasLock] = useState(lockService.hasLock(cellId));
+  const [lockHolder, setLockHolder] = useState(lockService.getLockHolder(cellId));
+  const [isRequesting, setIsRequesting] = useState(false);
+  const [showAnimation, setShowAnimation] = useState(false);
 
-  // Check if the cell is locked when the component mounts
-  useEffect(() => {
-    const checkLockStatus = async () => {
-      const owner = await lockService.isLocked(cellId);
-      setLockOwner(owner);
+  // Update lock state when it changes
+  const updateLockState = useCallback(() => {
+    setIsLocked(lockService.isLocked(cellId));
+    setHasLock(lockService.hasLock(cellId));
+    setLockHolder(lockService.getLockHolder(cellId));
+  }, [lockService, cellId]);
 
-      if (owner) {
-        const info = await userService.getUserInfo(owner);
-        setLockOwnerInfo(info);
-      } else {
-        setLockOwnerInfo(null);
-      }
-    };
-
-    checkLockStatus();
-
-    // Subscribe to lock state changes
-    const unsubscribe = lockService.subscribe(async (updatedCellId, userId) => {
-      if (updatedCellId === cellId) {
-        setLockOwner(userId);
-
-        if (userId) {
-          const info = await userService.getUserInfo(userId);
-          setLockOwnerInfo(info);
-        } else {
-          setLockOwnerInfo(null);
-        }
-      }
-    });
-
-    return unsubscribe;
-  }, [cellId, lockService, userService]);
-
-  // Handle acquiring a lock
-  const handleAcquireLock = useCallback(async () => {
-    if (lockOwner || isAcquiringLock) return;
-
-    setIsAcquiringLock(true);
-    try {
-      const success = await lockService.acquireLock(cellId);
-      if (success) {
-        setLockOwner(currentUserId);
-        const info = await userService.getUserInfo(currentUserId);
-        setLockOwnerInfo(info);
-      }
-    } catch (error) {
-      console.error('Failed to acquire lock:', error);
-    } finally {
-      setIsAcquiringLock(false);
+  // Request a lock for this cell
+  const requestLock = async () => {
+    if (isLocked && !hasLock) {
+      return; // Already locked by someone else
     }
-  }, [cellId, lockOwner, lockService, currentUserId, userService, isAcquiringLock]);
-
-  // Handle releasing a lock
-  const handleReleaseLock = useCallback(async () => {
-    if (!isLockedByCurrentUser || isReleasingLock) return;
-
-    setIsReleasingLock(true);
+    
+    setIsRequesting(true);
     try {
-      const success = await lockService.releaseLock(cellId);
-      if (success) {
-        setLockOwner(null);
-        setLockOwnerInfo(null);
+      const acquired = await lockService.requestLock(cellId);
+      if (acquired) {
+        setShowAnimation(true);
+        setTimeout(() => setShowAnimation(false), 1000);
       }
-    } catch (error) {
-      console.error('Failed to release lock:', error);
     } finally {
-      setIsReleasingLock(false);
+      setIsRequesting(false);
     }
-  }, [cellId, isLockedByCurrentUser, lockService, isReleasingLock]);
+  };
 
-  // Handle keyboard shortcut (Alt+L) for toggling lock
+  // Release a lock for this cell
+  const releaseLock = async () => {
+    if (!hasLock) {
+      return; // Don't have the lock
+    }
+    
+    try {
+      await lockService.releaseLock(cellId);
+    } catch (error) {
+      console.error('Error releasing lock:', error);
+    }
+  };
+
+  // Subscribe to lock state changes
   useEffect(() => {
+    const unsubscribe = lockService.subscribe(updateLockState);
+    updateLockState(); // Initial state update
+    
+    // Set up keyboard shortcut (Alt+L) for lock toggle
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.altKey && event.key === 'l') {
+      if (event.altKey && event.key === 'l' && cell.node.contains(document.activeElement)) {
         event.preventDefault();
-        if (isLockedByCurrentUser) {
-          handleReleaseLock();
-        } else if (!lockOwner) {
-          handleAcquireLock();
+        if (hasLock) {
+          releaseLock();
+        } else if (!isLocked) {
+          requestLock();
         }
       }
     };
-
+    
     document.addEventListener('keydown', handleKeyDown);
+    
     return () => {
+      unsubscribe();
       document.removeEventListener('keydown', handleKeyDown);
     };
-  }, [handleAcquireLock, handleReleaseLock, isLockedByCurrentUser, lockOwner]);
+  }, [lockService, cellId, hasLock, isLocked, cell.node]);
 
-  // Determine the appropriate aria-label based on lock state
-  const getAriaLabel = () => {
-    if (!lockOwner) {
-      return trans.__('Cell is unlocked. Press to lock.');
-    } else if (isLockedByCurrentUser) {
-      return trans.__('Cell is locked by you. Press to unlock.');
-    } else if (lockOwnerInfo) {
-      return trans.__('Cell is locked by %1', lockOwnerInfo.name);
-    } else {
-      return trans.__('Cell is locked by another user');
-    }
-  };
+  // Determine the appropriate button text and aria labels
+  let buttonText = '';
+  let ariaLabel = '';
+  let buttonTitle = '';
+  
+  if (isRequesting) {
+    buttonText = trans.__('Requesting...');
+    ariaLabel = trans.__('Requesting lock for this cell');
+    buttonTitle = trans.__('Requesting lock for this cell');
+  } else if (hasLock) {
+    buttonText = trans.__('Unlock');
+    ariaLabel = trans.__('Release lock for this cell');
+    buttonTitle = trans.__('You have locked this cell. Click to release the lock (Alt+L)');
+  } else if (isLocked && lockHolder) {
+    buttonText = trans.__('Locked');
+    ariaLabel = trans.__(`This cell is locked by ${lockHolder.name}`);
+    buttonTitle = trans.__(`This cell is locked by ${lockHolder.name} and cannot be edited`);
+  } else {
+    buttonText = trans.__('Lock');
+    ariaLabel = trans.__('Acquire lock for this cell');
+    buttonTitle = trans.__('Click to lock this cell for editing (Alt+L)');
+  }
 
-  // Determine the appropriate title based on lock state
-  const getTitle = () => {
-    if (!lockOwner) {
-      return trans.__('Lock cell (Alt+L)');
-    } else if (isLockedByCurrentUser) {
-      return trans.__('Unlock cell (Alt+L)');
-    } else if (lockOwnerInfo) {
-      return trans.__('Locked by %1', lockOwnerInfo.name);
-    } else {
-      return trans.__('Locked by another user');
-    }
-  };
+  // Determine the appropriate CSS classes
+  const lockClasses = [
+    'jp-CellLockIndicator',
+    isLocked ? 'jp-mod-locked' : '',
+    hasLock ? 'jp-mod-hasLock' : '',
+    showAnimation ? 'jp-mod-animating' : '',
+    isRequesting ? 'jp-mod-requesting' : ''
+  ].filter(Boolean).join(' ');
+
+  // Determine the lock indicator style (color from lock holder)
+  const lockStyle = lockHolder && isLocked && !hasLock ? 
+    { borderColor: lockHolder.color } : {};
 
   return (
-    <div className="jp-CellLockIndicator" role="region" aria-label={trans.__('Cell lock controls')}>
-      {lockOwner ? (
-        <div 
-          className={`jp-CellLockIndicator-locked ${isLockedByCurrentUser ? 'jp-CellLockIndicator-locked-by-me' : 'jp-CellLockIndicator-locked-by-other'}`}
-          style={lockOwnerInfo ? { borderColor: lockOwnerInfo.color } : undefined}
-        >
-          {lockOwnerInfo && lockOwnerInfo.avatarUrl ? (
-            <img 
-              src={lockOwnerInfo.avatarUrl} 
-              alt={trans.__('Avatar of %1', lockOwnerInfo.name)}
-              className="jp-CellLockIndicator-avatar"
-            />
-          ) : (
-            <div 
-              className="jp-CellLockIndicator-avatar-placeholder"
-              style={lockOwnerInfo ? { backgroundColor: lockOwnerInfo.color } : undefined}
-            >
-              {lockOwnerInfo ? lockOwnerInfo.name.charAt(0).toUpperCase() : '?'}
-            </div>
-          )}
-          <span className="jp-CellLockIndicator-text">
-            {isLockedByCurrentUser ? (
-              trans.__('Locked by you')
-            ) : (
-              lockOwnerInfo ? trans.__('Locked by %1', lockOwnerInfo.name) : trans.__('Locked')
-            )}
+    <div className={lockClasses} style={lockStyle}>
+      <button
+        className="jp-CellLockIndicator-button"
+        onClick={hasLock ? releaseLock : requestLock}
+        disabled={isRequesting || (isLocked && !hasLock)}
+        aria-label={ariaLabel}
+        title={buttonTitle}
+        role="button"
+        tabIndex={0}
+      >
+        {buttonText}
+        {lockHolder && isLocked && !hasLock && (
+          <span 
+            className="jp-CellLockIndicator-lockHolder"
+            style={{ backgroundColor: lockHolder.color }}
+            aria-hidden="true"
+          >
+            {lockHolder.name.charAt(0).toUpperCase()}
           </span>
-          {isLockedByCurrentUser && (
-            <button
-              className="jp-CellLockIndicator-button jp-CellLockIndicator-unlock"
-              onClick={handleReleaseLock}
-              disabled={isReleasingLock}
-              aria-label={trans.__('Unlock cell')}
-              title={trans.__('Unlock cell (Alt+L)')}
-            >
-              <span className="jp-CellLockIndicator-icon jp-CellLockIndicator-unlock-icon" aria-hidden="true">
-                🔓
-              </span>
-              <span className="jp-CellLockIndicator-sr-only">{trans.__('Unlock')}</span>
-            </button>
-          )}
-        </div>
-      ) : (
-        <button
-          className="jp-CellLockIndicator-button jp-CellLockIndicator-lock"
-          onClick={handleAcquireLock}
-          disabled={isAcquiringLock}
-          aria-label={trans.__('Lock cell')}
-          title={trans.__('Lock cell (Alt+L)')}
-        >
-          <span className="jp-CellLockIndicator-icon jp-CellLockIndicator-lock-icon" aria-hidden="true">
-            🔒
-          </span>
-          <span className="jp-CellLockIndicator-text">{trans.__('Lock')}</span>
-        </button>
-      )}
+        )}
+      </button>
+      {/* Screen reader only text for additional context */}
+      <span className="jp-CellLockIndicator-srOnly" aria-live="polite">
+        {isLocked && lockHolder && !hasLock ? 
+          trans.__(`Cell locked by ${lockHolder.name}`) : 
+          hasLock ? trans.__('You have locked this cell') : 
+          trans.__('Cell is unlocked')}
+      </span>
     </div>
   );
 };
 
 /**
- * A namespace for CellLockIndicator statics.
+ * A namespace for CellLockIndicatorComponent static methods.
  */
-export namespace CellLockIndicator {
+export namespace CellLockIndicatorComponent {
   /**
-   * Create a new CellLockIndicator widget.
+   * Create a new CellLockIndicatorComponent
+   *
+   * @param cell The cell
+   * @param lockService The lock service
+   * @param translator The translator
    */
-  export const createWidget = ({
-    cellId,
+  export const create = ({
+    cell,
     lockService,
-    userService,
-    translator = nullTranslator
+    translator,
   }: {
-    cellId: string;
+    cell: Cell;
     lockService: ILockService;
-    userService: IUserService;
-    translator?: ITranslator;
+    translator: ITranslator;
   }): ReactWidget => {
     return ReactWidget.create(
-      <CellLockIndicator
-        cellId={cellId}
-        lockService={lockService}
-        userService={userService}
-        translator={translator}
+      <CellLockIndicator 
+        cell={cell} 
+        lockService={lockService} 
+        translator={translator} 
       />
     );
   };
