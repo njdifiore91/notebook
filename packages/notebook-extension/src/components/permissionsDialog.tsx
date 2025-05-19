@@ -1,20 +1,21 @@
 // Copyright (c) Jupyter Development Team.
 // Distributed under the terms of the Modified BSD License.
 
-import * as React from 'react';
-import { useState, useEffect, useCallback } from 'react';
-import { ReactWidget } from '@jupyterlab/ui-components';
-import { showDialog, Dialog } from '@jupyterlab/apputils';
+import React, { useState, useEffect, useCallback } from 'react';
+import { Dialog, showDialog } from '@jupyterlab/apputils';
 import { ITranslator, nullTranslator } from '@jupyterlab/translation';
+import { ReactWidget } from '@jupyterlab/apputils';
+import { IPermissionsService, ICollaborationService } from '../tokens';
+import { Button, Select, Checkbox, Avatar } from '@jupyterlab/ui-components';
 
 /**
  * Interface for a user with permissions
  */
-interface ICollaborator {
+interface IUserPermission {
   /**
-   * Unique identifier for the user
+   * User ID (typically from JupyterHub)
    */
-  id: string;
+  userId: string;
 
   /**
    * Display name of the user
@@ -22,92 +23,19 @@ interface ICollaborator {
   displayName: string;
 
   /**
-   * Email address of the user (optional)
+   * Email address of the user
    */
   email?: string;
 
   /**
-   * URL to the user's avatar image (optional)
+   * Avatar URL for the user
    */
   avatarUrl?: string;
 
   /**
-   * Current permission level for the user
+   * Current role assigned to the user
    */
-  permission: PermissionLevel;
-}
-
-/**
- * Permission levels for collaborative notebook access
- */
-enum PermissionLevel {
-  /**
-   * Can only view the notebook content
-   */
-  VIEW = 'view',
-
-  /**
-   * Can view and add comments, but not edit content
-   */
-  COMMENT = 'comment',
-
-  /**
-   * Can view, comment, and edit notebook content
-   */
-  EDIT = 'edit',
-
-  /**
-   * Can view, comment, edit, and manage permissions
-   */
-  ADMIN = 'admin',
-
-  /**
-   * Has complete control over the notebook
-   */
-  OWNER = 'owner'
-}
-
-/**
- * Interface for the permissions service
- */
-export interface IPermissionsService {
-  /**
-   * Get all collaborators for the current notebook
-   */
-  getCollaborators(): Promise<ICollaborator[]>;
-
-  /**
-   * Update a collaborator's permission level
-   * 
-   * @param userId - The ID of the user to update
-   * @param permission - The new permission level
-   */
-  updatePermission(userId: string, permission: PermissionLevel): Promise<void>;
-
-  /**
-   * Add a new collaborator to the notebook
-   * 
-   * @param userIdentifier - Email or username to identify the user
-   * @param permission - The permission level to grant
-   */
-  addCollaborator(userIdentifier: string, permission: PermissionLevel): Promise<ICollaborator>;
-
-  /**
-   * Remove a collaborator from the notebook
-   * 
-   * @param userId - The ID of the user to remove
-   */
-  removeCollaborator(userId: string): Promise<void>;
-
-  /**
-   * Get the current user's permission level
-   */
-  getCurrentUserPermission(): Promise<PermissionLevel>;
-
-  /**
-   * Check if the current user can modify permissions
-   */
-  canManagePermissions(): Promise<boolean>;
+  role: 'viewer' | 'commenter' | 'editor' | 'admin' | 'owner';
 }
 
 /**
@@ -115,12 +43,17 @@ export interface IPermissionsService {
  */
 interface IPermissionsDialogProps {
   /**
-   * The permissions service instance
+   * The permissions service
    */
   permissionsService: IPermissionsService;
 
   /**
-   * The translator instance
+   * The collaboration service
+   */
+  collaborationService: ICollaborationService;
+
+  /**
+   * The translator
    */
   translator?: ITranslator;
 
@@ -131,302 +64,266 @@ interface IPermissionsDialogProps {
 }
 
 /**
- * A React component for managing permissions in collaborative notebooks
+ * A React component for managing user permissions in collaborative notebooks
  */
-function PermissionsDialog(props: IPermissionsDialogProps): JSX.Element {
-  const { permissionsService, onClose } = props;
-  const translator = props.translator || nullTranslator;
+export function PermissionsDialog(props: IPermissionsDialogProps): JSX.Element {
+  const {
+    permissionsService,
+    collaborationService,
+    translator = nullTranslator,
+    onClose
+  } = props;
+
   const trans = translator.load('notebook');
 
-  // State for collaborators list
-  const [collaborators, setCollaborators] = useState<ICollaborator[]>([]);
-  
-  // State for new collaborator input
-  const [newCollaborator, setNewCollaborator] = useState('');
-  
-  // State for new collaborator permission
-  const [newPermission, setNewPermission] = useState<PermissionLevel>(PermissionLevel.VIEW);
-  
-  // State for loading indicators
-  const [isLoading, setIsLoading] = useState(true);
-  
-  // State for error messages
-  const [errorMessage, setErrorMessage] = useState('');
-  
-  // State for current user's permission level
-  const [currentUserPermission, setCurrentUserPermission] = useState<PermissionLevel | null>(null);
-  
-  // State for whether current user can manage permissions
-  const [canManage, setCanManage] = useState(false);
+  // State for users and their permissions
+  const [users, setUsers] = useState<IUserPermission[]>([]);
+  const [loading, setLoading] = useState<boolean>(true);
+  const [error, setError] = useState<string | null>(null);
+  const [newUserEmail, setNewUserEmail] = useState<string>('');
+  const [currentUser, setCurrentUser] = useState<IUserPermission | null>(null);
 
-  // Load collaborators on component mount
-  useEffect(() => {
-    const loadData = async () => {
-      try {
-        setIsLoading(true);
-        const [collabs, userPerm, canManagePerms] = await Promise.all([
-          permissionsService.getCollaborators(),
-          permissionsService.getCurrentUserPermission(),
-          permissionsService.canManagePermissions()
-        ]);
-        setCollaborators(collabs);
-        setCurrentUserPermission(userPerm);
-        setCanManage(canManagePerms);
-        setErrorMessage('');
-      } catch (error) {
-        console.error('Failed to load collaborators:', error);
-        setErrorMessage(trans.__('Failed to load collaborators. Please try again.'));
-      } finally {
-        setIsLoading(false);
-      }
-    };
-
-    loadData();
-  }, [permissionsService, trans]);
-
-  // Handle permission change for a collaborator
-  const handlePermissionChange = useCallback(async (userId: string, newPermission: PermissionLevel) => {
+  // Load users and their permissions
+  const loadUsers = useCallback(async () => {
     try {
-      await permissionsService.updatePermission(userId, newPermission);
+      setLoading(true);
+      setError(null);
+      const userPermissions = await permissionsService.getUserPermissions();
+      setUsers(userPermissions);
       
-      // Update the collaborators list with the new permission
-      setCollaborators(prevCollaborators => 
-        prevCollaborators.map(collab => 
-          collab.id === userId ? { ...collab, permission: newPermission } : collab
+      // Get current user information
+      const currentUserInfo = await collaborationService.getCurrentUser();
+      if (currentUserInfo) {
+        const currentUserPermission = userPermissions.find(
+          user => user.userId === currentUserInfo.userId
+        );
+        setCurrentUser(currentUserPermission || null);
+      }
+    } catch (err) {
+      console.error('Failed to load user permissions:', err);
+      setError(trans.__('Failed to load user permissions. Please try again.'));
+    } finally {
+      setLoading(false);
+    }
+  }, [permissionsService, collaborationService, trans]);
+
+  // Load users on component mount
+  useEffect(() => {
+    loadUsers();
+  }, [loadUsers]);
+
+  // Handle role change for a user
+  const handleRoleChange = async (
+    userId: string,
+    newRole: 'viewer' | 'commenter' | 'editor' | 'admin' | 'owner'
+  ) => {
+    try {
+      await permissionsService.setUserRole(userId, newRole);
+      setUsers(prevUsers =>
+        prevUsers.map(user =>
+          user.userId === userId ? { ...user, role: newRole } : user
         )
       );
-      setErrorMessage('');
-    } catch (error) {
-      console.error('Failed to update permission:', error);
-      setErrorMessage(trans.__('Failed to update permission. Please try again.'));
+    } catch (err) {
+      console.error('Failed to update user role:', err);
+      setError(trans.__('Failed to update user role. Please try again.'));
     }
-  }, [permissionsService, trans]);
+  };
 
-  // Handle adding a new collaborator
-  const handleAddCollaborator = useCallback(async () => {
-    if (!newCollaborator.trim()) {
-      setErrorMessage(trans.__('Please enter a valid email or username.'));
+  // Handle adding a new user
+  const handleAddUser = async () => {
+    if (!newUserEmail) {
       return;
     }
 
     try {
-      const collaborator = await permissionsService.addCollaborator(
-        newCollaborator.trim(),
-        newPermission
-      );
-      
-      // Add the new collaborator to the list
-      setCollaborators(prevCollaborators => [...prevCollaborators, collaborator]);
-      
-      // Reset the input field
-      setNewCollaborator('');
-      setErrorMessage('');
-    } catch (error) {
-      console.error('Failed to add collaborator:', error);
-      setErrorMessage(trans.__('Failed to add collaborator. Please check the email or username and try again.'));
-    }
-  }, [newCollaborator, newPermission, permissionsService, trans]);
-
-  // Handle removing a collaborator
-  const handleRemoveCollaborator = useCallback(async (userId: string) => {
-    try {
-      await permissionsService.removeCollaborator(userId);
-      
-      // Remove the collaborator from the list
-      setCollaborators(prevCollaborators => 
-        prevCollaborators.filter(collab => collab.id !== userId)
-      );
-      setErrorMessage('');
-    } catch (error) {
-      console.error('Failed to remove collaborator:', error);
-      setErrorMessage(trans.__('Failed to remove collaborator. Please try again.'));
-    }
-  }, [permissionsService, trans]);
-
-  // Get human-readable permission label
-  const getPermissionLabel = (permission: PermissionLevel): string => {
-    switch (permission) {
-      case PermissionLevel.VIEW:
-        return trans.__('View only');
-      case PermissionLevel.COMMENT:
-        return trans.__('Can comment');
-      case PermissionLevel.EDIT:
-        return trans.__('Can edit');
-      case PermissionLevel.ADMIN:
-        return trans.__('Admin');
-      case PermissionLevel.OWNER:
-        return trans.__('Owner');
-      default:
-        return trans.__('Unknown');
+      await permissionsService.addUser(newUserEmail, 'viewer');
+      setNewUserEmail('');
+      loadUsers(); // Reload the user list
+    } catch (err) {
+      console.error('Failed to add user:', err);
+      setError(trans.__('Failed to add user. Please try again.'));
     }
   };
 
-  // Render permission options dropdown
-  const renderPermissionOptions = (collaborator: ICollaborator) => {
-    // If user can't manage permissions or is viewing their own permissions and they're the owner,
-    // just show the current permission level as text
-    const isCurrentUser = currentUserPermission === PermissionLevel.OWNER && 
-                         collaborator.permission === PermissionLevel.OWNER;
-    
-    if (!canManage || isCurrentUser) {
-      return <span>{getPermissionLabel(collaborator.permission)}</span>;
+  // Handle removing a user
+  const handleRemoveUser = async (userId: string) => {
+    try {
+      await permissionsService.removeUser(userId);
+      setUsers(prevUsers => prevUsers.filter(user => user.userId !== userId));
+    } catch (err) {
+      console.error('Failed to remove user:', err);
+      setError(trans.__('Failed to remove user. Please try again.'));
     }
+  };
 
-    // Otherwise, show a dropdown to change permissions
+  // Check if current user can modify permissions
+  const canModifyPermissions = currentUser?.role === 'admin' || currentUser?.role === 'owner';
+
+  // Render role selection dropdown
+  const renderRoleSelector = (user: IUserPermission) => {
+    const isCurrentUser = currentUser?.userId === user.userId;
+    const isOwner = user.role === 'owner';
+    
+    // Owners can't change their own role and non-admins can't change roles
+    const disabled = isOwner || (isCurrentUser && isOwner) || !canModifyPermissions;
+
     return (
-      <select
-        value={collaborator.permission}
-        onChange={(e) => handlePermissionChange(collaborator.id, e.target.value as PermissionLevel)}
-        aria-label={trans.__('Change permission level')}
-        className="jp-mod-styled jp-PermissionsDialog-select"
+      <Select
+        aria-label={trans.__('Select role for %1', user.displayName)}
+        className="jp-PermissionsDialog-roleSelect"
+        disabled={disabled}
+        value={user.role}
+        onChange={e => handleRoleChange(user.userId, e.target.value as any)}
       >
-        <option value={PermissionLevel.VIEW}>{getPermissionLabel(PermissionLevel.VIEW)}</option>
-        <option value={PermissionLevel.COMMENT}>{getPermissionLabel(PermissionLevel.COMMENT)}</option>
-        <option value={PermissionLevel.EDIT}>{getPermissionLabel(PermissionLevel.EDIT)}</option>
-        <option value={PermissionLevel.ADMIN}>{getPermissionLabel(PermissionLevel.ADMIN)}</option>
-        {/* Only show Owner option for admins */}
-        {currentUserPermission === PermissionLevel.OWNER && (
-          <option value={PermissionLevel.OWNER}>{getPermissionLabel(PermissionLevel.OWNER)}</option>
-        )}
-      </select>
+        <option value="viewer">{trans.__('Viewer')}</option>
+        <option value="commenter">{trans.__('Commenter')}</option>
+        <option value="editor">{trans.__('Editor')}</option>
+        <option value="admin">{trans.__('Admin')}</option>
+        {isOwner && <option value="owner">{trans.__('Owner')}</option>}
+      </Select>
     );
   };
 
   return (
     <div className="jp-PermissionsDialog">
       <div className="jp-PermissionsDialog-header">
-        <h2>{trans.__('Manage Access')}</h2>
-        <p className="jp-PermissionsDialog-description">
-          {trans.__('Control who can view, comment on, or edit this notebook.')}
-        </p>
+        <h2>{trans.__('Manage Permissions')}</h2>
+        {error && <div className="jp-PermissionsDialog-error">{error}</div>}
       </div>
 
-      {errorMessage && (
-        <div className="jp-PermissionsDialog-error" role="alert">
-          {errorMessage}
-        </div>
-      )}
-
-      {isLoading ? (
+      {loading ? (
         <div className="jp-PermissionsDialog-loading">
-          <div className="jp-Spinner"/>
-          <span>{trans.__('Loading collaborators...')}</span>
+          {trans.__('Loading user permissions...')}
         </div>
       ) : (
         <>
-          {/* Current collaborators list */}
-          <div className="jp-PermissionsDialog-collaborators">
-            <h3>{trans.__('Collaborators')}</h3>
-            {collaborators.length === 0 ? (
-              <p className="jp-PermissionsDialog-empty">
-                {trans.__('No collaborators yet. Add people to collaborate on this notebook.')}
-              </p>
-            ) : (
-              <ul className="jp-PermissionsDialog-list" role="list">
-                {collaborators.map(collaborator => (
-                  <li key={collaborator.id} className="jp-PermissionsDialog-collaborator">
-                    <div className="jp-PermissionsDialog-collaboratorInfo">
-                      <div className="jp-PermissionsDialog-avatar">
-                        {collaborator.avatarUrl ? (
-                          <img 
-                            src={collaborator.avatarUrl} 
-                            alt="" 
-                            aria-hidden="true"
-                          />
-                        ) : (
-                          <div className="jp-PermissionsDialog-avatarFallback">
-                            {collaborator.displayName.charAt(0).toUpperCase()}
-                          </div>
-                        )}
-                      </div>
-                      <div className="jp-PermissionsDialog-userDetails">
-                        <span className="jp-PermissionsDialog-userName">
-                          {collaborator.displayName}
-                        </span>
-                        {collaborator.email && (
-                          <span className="jp-PermissionsDialog-userEmail">
-                            {collaborator.email}
-                          </span>
-                        )}
-                      </div>
-                    </div>
-                    <div className="jp-PermissionsDialog-collaboratorActions">
-                      <div className="jp-PermissionsDialog-permission">
-                        {renderPermissionOptions(collaborator)}
-                      </div>
-                      {canManage && collaborator.permission !== PermissionLevel.OWNER && (
-                        <button 
-                          className="jp-PermissionsDialog-removeButton jp-mod-styled"
-                          onClick={() => handleRemoveCollaborator(collaborator.id)}
-                          aria-label={trans.__('Remove collaborator')}
-                          title={trans.__('Remove collaborator')}
-                        >
-                          <span className="jp-PermissionsDialog-removeIcon" aria-hidden="true">×</span>
-                        </button>
-                      )}
-                    </div>
-                  </li>
-                ))}
-              </ul>
-            )}
+          <div className="jp-PermissionsDialog-description">
+            <p>
+              {trans.__(
+                'Control who can view, comment on, or edit this notebook. Only admins and the owner can modify permissions.'
+              )}
+            </p>
           </div>
 
-          {/* Add new collaborator form */}
-          {canManage && (
-            <div className="jp-PermissionsDialog-addForm">
-              <h3>{trans.__('Add people')}</h3>
-              <div className="jp-PermissionsDialog-inputGroup">
+          <div className="jp-PermissionsDialog-roles">
+            <h3>{trans.__('Role Descriptions')}</h3>
+            <ul>
+              <li>
+                <strong>{trans.__('Viewer')}:</strong>{' '}
+                {trans.__('Can view notebook content but cannot edit or comment.')}
+              </li>
+              <li>
+                <strong>{trans.__('Commenter')}:</strong>{' '}
+                {trans.__('Can view and add comments but cannot edit content.')}
+              </li>
+              <li>
+                <strong>{trans.__('Editor')}:</strong>{' '}
+                {trans.__('Can view, comment, and edit notebook content.')}
+              </li>
+              <li>
+                <strong>{trans.__('Admin')}:</strong>{' '}
+                {trans.__('Can edit content and manage user permissions.')}
+              </li>
+              <li>
+                <strong>{trans.__('Owner')}:</strong>{' '}
+                {trans.__('Has full control over the notebook and can transfer ownership.')}
+              </li>
+            </ul>
+          </div>
+
+          <div className="jp-PermissionsDialog-userList">
+            <h3>{trans.__('Users')}</h3>
+            <table aria-label={trans.__('User permissions table')}>
+              <thead>
+                <tr>
+                  <th scope="col">{trans.__('User')}</th>
+                  <th scope="col">{trans.__('Role')}</th>
+                  <th scope="col">{trans.__('Actions')}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {users.map(user => (
+                  <tr key={user.userId}>
+                    <td className="jp-PermissionsDialog-userCell">
+                      <div className="jp-PermissionsDialog-userInfo">
+                        <Avatar
+                          src={user.avatarUrl}
+                          alt={user.displayName}
+                          className="jp-PermissionsDialog-avatar"
+                        />
+                        <div>
+                          <div className="jp-PermissionsDialog-userName">
+                            {user.displayName}
+                            {currentUser?.userId === user.userId && (
+                              <span className="jp-PermissionsDialog-currentUser">
+                                {trans.__(" (You)")}
+                              </span>
+                            )}
+                          </div>
+                          {user.email && (
+                            <div className="jp-PermissionsDialog-userEmail">
+                              {user.email}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </td>
+                    <td>{renderRoleSelector(user)}</td>
+                    <td>
+                      {user.role !== 'owner' && canModifyPermissions && (
+                        <Button
+                          className="jp-PermissionsDialog-removeButton"
+                          onClick={() => handleRemoveUser(user.userId)}
+                          aria-label={trans.__('Remove %1', user.displayName)}
+                        >
+                          {trans.__('Remove')}
+                        </Button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          {canModifyPermissions && (
+            <div className="jp-PermissionsDialog-addUser">
+              <h3>{trans.__('Add User')}</h3>
+              <div className="jp-PermissionsDialog-addUserForm">
                 <input
                   type="text"
-                  value={newCollaborator}
-                  onChange={(e) => setNewCollaborator(e.target.value)}
-                  placeholder={trans.__('Email or username')}
-                  aria-label={trans.__('Email or username')}
-                  className="jp-mod-styled jp-PermissionsDialog-input"
+                  placeholder={trans.__('Enter email address')}
+                  value={newUserEmail}
+                  onChange={e => setNewUserEmail(e.target.value)}
+                  aria-label={trans.__('Email address for new user')}
+                  className="jp-PermissionsDialog-emailInput"
                 />
-                <select
-                  value={newPermission}
-                  onChange={(e) => setNewPermission(e.target.value as PermissionLevel)}
-                  aria-label={trans.__('Permission level')}
-                  className="jp-mod-styled jp-PermissionsDialog-select"
-                >
-                  <option value={PermissionLevel.VIEW}>{getPermissionLabel(PermissionLevel.VIEW)}</option>
-                  <option value={PermissionLevel.COMMENT}>{getPermissionLabel(PermissionLevel.COMMENT)}</option>
-                  <option value={PermissionLevel.EDIT}>{getPermissionLabel(PermissionLevel.EDIT)}</option>
-                  <option value={PermissionLevel.ADMIN}>{getPermissionLabel(PermissionLevel.ADMIN)}</option>
-                </select>
-                <button 
-                  className="jp-mod-styled jp-mod-primary jp-PermissionsDialog-addButton"
-                  onClick={handleAddCollaborator}
-                  disabled={!newCollaborator.trim()}
-                  aria-label={trans.__('Add collaborator')}
+                <Button
+                  className="jp-PermissionsDialog-addButton"
+                  onClick={handleAddUser}
+                  disabled={!newUserEmail}
+                  aria-label={trans.__('Add user')}
                 >
                   {trans.__('Add')}
-                </button>
+                </Button>
               </div>
+              <p className="jp-PermissionsDialog-addUserHelp">
+                {trans.__(
+                  'Users must have a JupyterHub account to be added. They will receive access after you add them.'
+                )}
+              </p>
             </div>
           )}
 
-          {/* Help text */}
-          <div className="jp-PermissionsDialog-help">
-            <h3>{trans.__('Access levels')}</h3>
-            <ul className="jp-PermissionsDialog-helpList">
-              <li>
-                <strong>{getPermissionLabel(PermissionLevel.VIEW)}</strong>: {trans.__('Can view but not edit or comment on the notebook.')}
-              </li>
-              <li>
-                <strong>{getPermissionLabel(PermissionLevel.COMMENT)}</strong>: {trans.__('Can view and add comments, but cannot edit the notebook content.')}
-              </li>
-              <li>
-                <strong>{getPermissionLabel(PermissionLevel.EDIT)}</strong>: {trans.__('Can view, comment, and edit the notebook content.')}
-              </li>
-              <li>
-                <strong>{getPermissionLabel(PermissionLevel.ADMIN)}</strong>: {trans.__('Can view, comment, edit, and manage access permissions.')}
-              </li>
-              <li>
-                <strong>{getPermissionLabel(PermissionLevel.OWNER)}</strong>: {trans.__('Has complete control over the notebook.')}
-              </li>
-            </ul>
+          <div className="jp-PermissionsDialog-actions">
+            <Button
+              className="jp-PermissionsDialog-closeButton"
+              onClick={onClose}
+              aria-label={trans.__('Close dialog')}
+            >
+              {trans.__('Close')}
+            </Button>
           </div>
         </>
       )}
@@ -441,32 +338,30 @@ export namespace PermissionsDialog {
   /**
    * Show the permissions dialog.
    *
-   * @param permissionsService - The permissions service instance
-   * @param translator - The translator instance
+   * @param permissionsService - The permissions service
+   * @param collaborationService - The collaboration service
+   * @param translator - The translator
    * @returns A promise that resolves with whether the dialog was accepted.
    */
-  export function showDialog(
+  export async function showDialog(
     permissionsService: IPermissionsService,
-    translator?: ITranslator
+    collaborationService: ICollaborationService,
+    translator: ITranslator = nullTranslator
   ): Promise<Dialog.IResult<void>> {
-    translator = translator || nullTranslator;
     const trans = translator.load('notebook');
-
-    // Create the dialog body as a ReactWidget
-    const body = ReactWidget.create(
-      <PermissionsDialog 
-        permissionsService={permissionsService} 
-        translator={translator} 
-      />
-    );
-    body.addClass('jp-PermissionsDialog-content');
-
-    return Dialog.show({
-      title: trans.__('Manage Access'),
-      body,
-      buttons: [
-        Dialog.cancelButton({ label: trans.__('Close') })
-      ],
+    const dialog = new Dialog({
+      title: trans.__('Manage Permissions'),
+      body: ReactWidget.create(
+        <PermissionsDialog
+          permissionsService={permissionsService}
+          collaborationService={collaborationService}
+          translator={translator}
+          onClose={() => dialog.resolve()}
+        />
+      ),
+      buttons: [] // We'll handle buttons in the component itself
     });
+
+    return dialog.launch();
   }
 }
