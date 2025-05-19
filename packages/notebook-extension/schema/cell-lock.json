@@ -1,0 +1,10 @@
+{
+  "title": "Cell lock",
+  "description": "Cell locking mechanism for collaborative notebooks",
+  "jupyter.lab.toolbars": {
+    "Cell": [{ "name": "cellLock", "rank": 30 }]
+  },
+  "properties": {},
+  "additionalProperties": false,
+  "type": "object"
+}
