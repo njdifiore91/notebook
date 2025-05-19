@@ -284,6 +284,134 @@
 }
 
 /* -------------------------------------------------------------------------- */
+/*                          Cell Lock Indicator Styles                        */
+/* -------------------------------------------------------------------------- */
+
+.jp-CellLockIndicator {
+  display: flex;
+  align-items: center;
+  height: 28px;
+  padding: 0 var(--jp-collab-spacing-sm);
+  border-radius: 4px;
+  border-left: 3px solid transparent;
+  transition: all 0.2s ease;
+  margin: var(--jp-collab-spacing-xs) 0;
+  position: relative;
+}
+
+.jp-CellLockIndicator.jp-mod-locked {
+  background-color: var(--jp-collab-lock-overlay-locked);
+}
+
+.jp-CellLockIndicator.jp-mod-hasLock {
+  background-color: var(--jp-collab-lock-overlay-free);
+  border-left-color: var(--jp-collab-user-color-2);
+}
+
+.jp-CellLockIndicator.jp-mod-animating {
+  animation: jp-lock-pulse 1s ease;
+}
+
+.jp-CellLockIndicator-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--jp-collab-spacing-xs) var(--jp-collab-spacing-sm);
+  border-radius: 4px;
+  border: 1px solid var(--jp-border-color1);
+  background-color: var(--jp-layout-color1);
+  color: var(--jp-ui-font-color1);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  min-width: 60px;
+  min-height: 28px; /* Ensures minimum 44px touch target with padding */
+  transition: background-color 0.15s ease;
+}
+
+.jp-CellLockIndicator-button:hover:not(:disabled) {
+  background-color: var(--jp-layout-color2);
+}
+
+.jp-CellLockIndicator-button:focus-visible {
+  outline: 2px solid var(--jp-brand-color1);
+  outline-offset: 2px;
+}
+
+.jp-CellLockIndicator-button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.jp-CellLockIndicator.jp-mod-hasLock .jp-CellLockIndicator-button {
+  background-color: var(--jp-collab-user-color-2);
+  color: var(--jp-collab-user-text-color-2);
+  border-color: var(--jp-collab-user-color-2);
+}
+
+.jp-CellLockIndicator.jp-mod-requesting .jp-CellLockIndicator-button {
+  opacity: 0.7;
+  background-image: linear-gradient(
+    45deg,
+    var(--jp-layout-color2) 25%,
+    var(--jp-layout-color1) 25%,
+    var(--jp-layout-color1) 50%,
+    var(--jp-layout-color2) 50%,
+    var(--jp-layout-color2) 75%,
+    var(--jp-layout-color1) 75%,
+    var(--jp-layout-color1) 100%
+  );
+  background-size: 20px 20px;
+  animation: jp-requesting-animation 1s linear infinite;
+}
+
+.jp-CellLockIndicator-lockHolder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  margin-left: var(--jp-collab-spacing-sm);
+  color: white;
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.jp-CellLockIndicator-srOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border-width: 0;
+}
+
+@keyframes jp-lock-pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(46, 204, 113, 0.4);
+  }
+  70% {
+    box-shadow: 0 0 0 10px rgba(46, 204, 113, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(46, 204, 113, 0);
+  }
+}
+
+@keyframes jp-requesting-animation {
+  0% {
+    background-position: 0 0;
+  }
+  100% {
+    background-position: 20px 20px;
+  }
+}
+
+/* -------------------------------------------------------------------------- */
 /*                          Cell Lock Overlay Styles                          */
 /* -------------------------------------------------------------------------- */
 
