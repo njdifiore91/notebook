@@ -571,22 +571,12 @@
 /* -------------------------------------------------------------------------- */
 
 .jp-HistoryViewer {
-  position: absolute;
-  top: 0;
-  right: 0;
-  bottom: 0;
-  width: 300px;
-  background-color: var(--jp-layout-color0);
-  border-left: 1px solid var(--jp-border-color1);
-  box-shadow: var(--jp-elevation-z6);
-  z-index: 1000;
   display: flex;
   flex-direction: column;
-  transition: transform 0.3s ease-in-out;
-}
-
-.jp-HistoryViewer.jp-mod-hidden {
-  transform: translateX(100%);
+  height: 100%;
+  background-color: var(--jp-layout-color0);
+  color: var(--jp-ui-font-color1);
+  font-family: var(--jp-ui-font-family);
 }
 
 .jp-HistoryViewer-header {
@@ -595,110 +585,229 @@
   justify-content: space-between;
   padding: var(--jp-collab-spacing-sm) var(--jp-collab-spacing-md);
   border-bottom: 1px solid var(--jp-border-color1);
+  background-color: var(--jp-layout-color1);
 }
 
 .jp-HistoryViewer-title {
   font-weight: 600;
-  font-size: 14px;
+  font-size: 16px;
   color: var(--jp-ui-font-color0);
+  margin: 0;
 }
 
-.jp-HistoryViewer-close {
-  padding: var(--jp-collab-spacing-xs);
-  border-radius: 4px;
-  cursor: pointer;
-  color: var(--jp-ui-font-color2);
+.jp-HistoryViewer-content {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  overflow: hidden;
 }
 
-.jp-HistoryViewer-close:hover {
-  background-color: var(--jp-layout-color2);
-  color: var(--jp-ui-font-color1);
+.jp-HistoryViewer-split {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
 }
 
-.jp-HistoryViewer-close:focus-visible {
-  outline: 2px solid var(--jp-brand-color1);
-  outline-offset: 2px;
+.jp-HistoryViewer-timeline-container {
+  width: 40%;
+  border-right: 1px solid var(--jp-border-color1);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.jp-HistoryViewer-diff-container {
+  flex: 1;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.jp-HistoryViewer-section-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--jp-ui-font-color0);
+  margin: 0;
+  padding: var(--jp-collab-spacing-sm) var(--jp-collab-spacing-md);
+  border-bottom: 1px solid var(--jp-border-color1);
+  background-color: var(--jp-layout-color1);
 }
 
 .jp-HistoryViewer-timeline {
   flex: 1;
   overflow-y: auto;
-  padding: var(--jp-collab-spacing-md);
+  padding: var(--jp-collab-spacing-sm);
 }
 
-.jp-HistoryViewer-entry {
+.jp-HistoryViewer-version {
   margin-bottom: var(--jp-collab-spacing-md);
   padding: var(--jp-collab-spacing-sm);
   background-color: var(--jp-layout-color1);
   border: 1px solid var(--jp-border-color1);
   border-radius: 4px;
-  cursor: pointer;
   transition: background-color 0.15s ease;
 }
 
-.jp-HistoryViewer-entry:hover {
-  background-color: var(--jp-layout-color2);
-}
-
-.jp-HistoryViewer-entry.jp-mod-active {
+.jp-HistoryViewer-version.jp-mod-selected {
   background-color: var(--jp-brand-color3);
   border-color: var(--jp-brand-color1);
 }
 
-.jp-HistoryViewer-entry-header {
+.jp-HistoryViewer-version-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   margin-bottom: var(--jp-collab-spacing-xs);
 }
 
-.jp-HistoryViewer-entry-user {
-  display: flex;
-  align-items: center;
-}
-
-.jp-HistoryViewer-entry-avatar {
-  width: var(--jp-collab-presence-avatar-size-xs);
-  height: var(--jp-collab-presence-avatar-size-xs);
-  border-radius: 50%;
-  margin-right: var(--jp-collab-spacing-xs);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 10px;
+.jp-HistoryViewer-version-title {
   font-weight: 600;
-}
-
-.jp-HistoryViewer-entry-name {
-  font-weight: 600;
-  font-size: 12px;
+  font-size: 13px;
   color: var(--jp-ui-font-color0);
 }
 
-.jp-HistoryViewer-entry-time {
+.jp-HistoryViewer-version-date {
   font-size: 11px;
   font-family: var(--jp-code-font-family);
   color: var(--jp-ui-font-color2);
 }
 
-.jp-HistoryViewer-entry-summary {
+.jp-HistoryViewer-version-info {
+  margin-bottom: var(--jp-collab-spacing-sm);
+}
+
+.jp-HistoryViewer-version-author {
   font-size: 12px;
   color: var(--jp-ui-font-color1);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+}
+
+.jp-HistoryViewer-version-message {
+  font-size: 12px;
+  color: var(--jp-ui-font-color2);
+  margin-top: var(--jp-collab-spacing-xs);
+  font-style: italic;
+}
+
+.jp-HistoryViewer-version-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: var(--jp-collab-spacing-sm);
+}
+
+.jp-HistoryViewer-version-select-old,
+.jp-HistoryViewer-version-select-new,
+.jp-HistoryViewer-version-restore {
+  padding: var(--jp-collab-spacing-xs) var(--jp-collab-spacing-sm);
+  background-color: var(--jp-layout-color2);
+  border: 1px solid var(--jp-border-color1);
+  border-radius: 4px;
+  font-size: 12px;
+  cursor: pointer;
+  color: var(--jp-ui-font-color1);
+}
+
+.jp-HistoryViewer-version-select-old:hover,
+.jp-HistoryViewer-version-select-new:hover,
+.jp-HistoryViewer-version-restore:hover {
+  background-color: var(--jp-layout-color3);
+}
+
+.jp-HistoryViewer-version-select-old:focus-visible,
+.jp-HistoryViewer-version-select-new:focus-visible,
+.jp-HistoryViewer-version-restore:focus-visible {
+  outline: 2px solid var(--jp-brand-color1);
+  outline-offset: 2px;
+}
+
+.jp-HistoryViewer-version-select-old.jp-mod-selected,
+.jp-HistoryViewer-version-select-new.jp-mod-selected {
+  background-color: var(--jp-brand-color1);
+  color: white;
+  border-color: var(--jp-brand-color0);
+}
+
+.jp-HistoryViewer-version-select-old:disabled,
+.jp-HistoryViewer-version-select-new:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  background-color: var(--jp-layout-color2);
+}
+
+.jp-HistoryViewer-version-restore {
+  margin-left: auto;
+}
+
+.jp-HistoryViewer-loading,
+.jp-HistoryViewer-error,
+.jp-HistoryViewer-empty,
+.jp-HistoryViewer-diff-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--jp-collab-spacing-lg);
+  color: var(--jp-ui-font-color2);
+  font-size: 13px;
+  text-align: center;
+  height: 100%;
+}
+
+.jp-HistoryViewer-error {
+  color: var(--jp-error-color0);
 }
 
 .jp-HistoryViewer-diff {
-  margin-top: var(--jp-collab-spacing-sm);
-  padding: var(--jp-collab-spacing-xs);
-  background-color: var(--jp-layout-color0);
-  border-radius: 2px;
-  font-family: var(--jp-code-font-family);
-  font-size: 12px;
-  overflow: hidden;
+  flex: 1;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
 }
 
+.jp-HistoryViewer-diff-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--jp-collab-spacing-sm) var(--jp-collab-spacing-md);
+  border-bottom: 1px solid var(--jp-border-color1);
+  background-color: var(--jp-layout-color1);
+}
+
+.jp-HistoryViewer-diff-title {
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--jp-ui-font-color0);
+}
+
+.jp-HistoryViewer-diff-controls {
+  display: flex;
+  align-items: center;
+}
+
+.jp-HistoryViewer-diff-type {
+  padding: var(--jp-collab-spacing-xs) var(--jp-collab-spacing-sm);
+  background-color: var(--jp-layout-color2);
+  border: 1px solid var(--jp-border-color1);
+  border-radius: 4px;
+  font-size: 12px;
+  color: var(--jp-ui-font-color1);
+}
+
+.jp-HistoryViewer-diff-type:focus {
+  outline: none;
+  border-color: var(--jp-brand-color1);
+  box-shadow: 0 0 0 1px var(--jp-brand-color1);
+}
+
+.jp-HistoryViewer-diff-content {
+  flex: 1;
+  overflow: auto;
+  padding: var(--jp-collab-spacing-md);
+  font-family: var(--jp-code-font-family);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+/* Diff visualization styles */
 .jp-HistoryViewer-diff-line {
   white-space: pre;
   overflow-x: auto;
@@ -706,47 +815,140 @@
 
 .jp-HistoryViewer-diff-addition {
   background-color: rgba(46, 204, 113, 0.2);
+  border-left: 3px solid #2ecc71;
+  padding-left: 3px;
 }
 
 .jp-HistoryViewer-diff-deletion {
   background-color: rgba(231, 76, 60, 0.2);
+  border-left: 3px solid #e74c3c;
+  padding-left: 3px;
   text-decoration: line-through;
 }
 
-.jp-HistoryViewer-controls {
+/* Side-by-side diff styles */
+.jp-HistoryViewer-diff-side-by-side {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: var(--jp-collab-spacing-sm) var(--jp-collab-spacing-md);
-  border-top: 1px solid var(--jp-border-color1);
+  width: 100%;
 }
 
-.jp-HistoryViewer-control {
-  padding: var(--jp-collab-spacing-xs) var(--jp-collab-spacing-sm);
-  background-color: var(--jp-layout-color2);
+.jp-HistoryViewer-diff-old,
+.jp-HistoryViewer-diff-new {
+  flex: 1;
+  overflow-x: auto;
+  padding: var(--jp-collab-spacing-sm);
   border: 1px solid var(--jp-border-color1);
+  margin: 0 var(--jp-collab-spacing-xs);
+}
+
+.jp-HistoryViewer-diff-old-header,
+.jp-HistoryViewer-diff-new-header {
+  font-weight: 600;
+  margin-bottom: var(--jp-collab-spacing-sm);
+  padding-bottom: var(--jp-collab-spacing-xs);
+  border-bottom: 1px solid var(--jp-border-color1);
+}
+
+/* Restore confirmation dialog */
+.jp-HistoryViewer-restore-confirm-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.jp-HistoryViewer-restore-confirm {
+  background-color: var(--jp-layout-color0);
   border-radius: 4px;
-  font-size: 12px;
+  box-shadow: var(--jp-elevation-z6);
+  width: 400px;
+  max-width: 90%;
+  padding: var(--jp-collab-spacing-md);
+}
+
+.jp-HistoryViewer-restore-confirm-header {
+  font-weight: 600;
+  font-size: 16px;
+  color: var(--jp-ui-font-color0);
+  margin-bottom: var(--jp-collab-spacing-md);
+  padding-bottom: var(--jp-collab-spacing-sm);
+  border-bottom: 1px solid var(--jp-border-color1);
+}
+
+.jp-HistoryViewer-restore-confirm-content {
+  margin-bottom: var(--jp-collab-spacing-md);
+}
+
+.jp-HistoryViewer-restore-confirm-warning {
+  color: var(--jp-warn-color0);
+  font-weight: 600;
+}
+
+.jp-HistoryViewer-restore-confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--jp-collab-spacing-sm);
+}
+
+.jp-HistoryViewer-restore-confirm-cancel,
+.jp-HistoryViewer-restore-confirm-ok {
+  padding: var(--jp-collab-spacing-sm) var(--jp-collab-spacing-md);
+  border-radius: 4px;
+  font-size: 13px;
   cursor: pointer;
 }
 
-.jp-HistoryViewer-control:hover {
+.jp-HistoryViewer-restore-confirm-cancel {
+  background-color: var(--jp-layout-color2);
+  border: 1px solid var(--jp-border-color1);
+  color: var(--jp-ui-font-color1);
+}
+
+.jp-HistoryViewer-restore-confirm-ok {
+  background-color: var(--jp-warn-color0);
+  border: 1px solid var(--jp-warn-color0);
+  color: white;
+}
+
+.jp-HistoryViewer-restore-confirm-cancel:hover {
   background-color: var(--jp-layout-color3);
 }
 
-.jp-HistoryViewer-control:focus-visible {
-  outline: 2px solid var(--jp-brand-color1);
-  outline-offset: 2px;
+.jp-HistoryViewer-restore-confirm-ok:hover {
+  background-color: var(--jp-warn-color1);
 }
 
-.jp-HistoryViewer-control.jp-mod-restore {
-  background-color: var(--jp-brand-color1);
-  color: white;
-  border-color: var(--jp-brand-color0);
-}
-
-.jp-HistoryViewer-control.jp-mod-restore:hover {
-  background-color: var(--jp-brand-color0);
+/* Responsive styles for smaller screens */
+@media only screen and (max-width: 768px) {
+  .jp-HistoryViewer-split {
+    flex-direction: column;
+  }
+  
+  .jp-HistoryViewer-timeline-container {
+    width: 100%;
+    height: 40%;
+    border-right: none;
+    border-bottom: 1px solid var(--jp-border-color1);
+  }
+  
+  .jp-HistoryViewer-diff-container {
+    height: 60%;
+  }
+  
+  .jp-HistoryViewer-diff-side-by-side {
+    flex-direction: column;
+  }
+  
+  .jp-HistoryViewer-diff-old,
+  .jp-HistoryViewer-diff-new {
+    margin: var(--jp-collab-spacing-xs) 0;
+  }
 }
 
 /* -------------------------------------------------------------------------- */
