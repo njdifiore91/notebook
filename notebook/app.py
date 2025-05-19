@@ -32,10 +32,19 @@ from jupyterlab_server.config import (  # type:ignore[attr-defined]
 from jupyterlab_server.handlers import _camelCase, is_url
 from notebook_shim.shim import NotebookConfigShimMixin  # type:ignore[import-untyped]
 from tornado import web
-from traitlets import Bool, Unicode, default
+from traitlets import Bool, Dict, Float, Integer, Unicode, default
 from traitlets.config.loader import Config
 
 from ._version import __version__
+
+# Import collaboration modules
+try:
+    from notebook.collab.handlers import CollaborationWebSocketHandler
+    from notebook.collab.auth import CollaborationAuthHandler
+    from notebook.collab import initialize_collaboration_services
+    COLLAB_ENABLED = True
+except ImportError:
+    COLLAB_ENABLED = False
 
 HERE = Path(__file__).parent.resolve()
 
@@ -126,6 +135,11 @@ class NotebookBaseHandler(ExtensionHandlerJinjaMixin, ExtensionHandlerMixin, Jup
         page_config_hook = self.settings.get("page_config_hook", None)
         if page_config_hook:
             page_config = page_config_hook(self, page_config)
+
+        # Add collaboration configuration if enabled
+        if hasattr(app, 'collaboration_enabled') and app.collaboration_enabled:
+            page_config['collaborationEnabled'] = True
+            page_config['collaborationWebSocketUrl'] = ujoin(base_url, 'api', 'collaboration')
 
         return page_config
 
@@ -271,6 +285,61 @@ class JupyterNotebookApp(NotebookConfigShimMixin, LabServerApp):  # type:ignore[
         """,
     )
 
+    # Collaboration-specific configuration options
+    collaboration_enabled = Bool(
+        True,
+        config=True,
+        help="Whether to enable real-time collaborative editing features",
+    )
+    
+    collaboration_websocket_max_message_size = Integer(
+        10 * 1024 * 1024,  # 10MB
+        config=True,
+        help="Maximum WebSocket message size for collaboration in bytes",
+    )
+    
+    collaboration_ping_interval = Integer(
+        30,  # 30 seconds
+        config=True,
+        help="WebSocket ping interval in seconds to keep connections alive",
+    )
+    
+    collaboration_ping_timeout = Integer(
+        10,  # 10 seconds
+        config=True,
+        help="WebSocket ping timeout in seconds",
+    )
+    
+    collaboration_max_buffer_size = Integer(
+        100 * 1024 * 1024,  # 100MB
+        config=True,
+        help="Maximum buffer size for collaboration messages in bytes",
+    )
+    
+    collaboration_compression_level = Integer(
+        6,  # ZLIB compression level (0-9)
+        config=True,
+        help="ZLIB compression level for collaboration messages (0-9)",
+    )
+    
+    collaboration_lock_timeout = Integer(
+        300,  # 5 minutes
+        config=True,
+        help="Timeout in seconds for cell locks before automatic release",
+    )
+    
+    collaboration_user_presence_timeout = Integer(
+        300,  # 5 minutes
+        config=True,
+        help="Timeout in seconds for user presence information after disconnection",
+    )
+    
+    collaboration_default_permissions = Dict(
+        {},
+        config=True,
+        help="Default permissions for collaborative notebooks",
+    )
+
     flags: Flags = flags  # type:ignore[assignment]
     flags["expose-app-in-browser"] = (
         {"JupyterNotebookApp": {"expose_app_in_browser": True}},
@@ -280,6 +349,17 @@ class JupyterNotebookApp(NotebookConfigShimMixin, LabServerApp):  # type:ignore[
     flags["custom-css"] = (
         {"JupyterNotebookApp": {"custom_css": True}},
         "Load custom CSS in template html files. Default is True",
+    )
+    
+    # Add collaboration-specific flags
+    flags["enable-collaboration"] = (
+        {"JupyterNotebookApp": {"collaboration_enabled": True}},
+        "Enable real-time collaborative editing features",
+    )
+    
+    flags["disable-collaboration"] = (
+        {"JupyterNotebookApp": {"collaboration_enabled": False}},
+        "Disable real-time collaborative editing features",
     )
 
     @default("static_dir")
@@ -356,6 +436,31 @@ class JupyterNotebookApp(NotebookConfigShimMixin, LabServerApp):  # type:ignore[
         self.handlers.append(("/consoles/(.*)", ConsoleHandler))
         self.handlers.append(("/terminals/(.*)", TerminalHandler))
         self.handlers.append(("/custom/custom.css", CustomCssHandler))
+        
+        # Register collaboration WebSocket handlers if enabled
+        if COLLAB_ENABLED and self.collaboration_enabled:
+            self.log.info("Initializing collaboration WebSocket handlers")
+            # Add collaboration WebSocket handler
+            self.handlers.append(("/api/collaboration/(.*)", CollaborationWebSocketHandler))
+            # Add collaboration auth handler for permission management
+            self.handlers.append(("/api/collaboration-auth/(.*)", CollaborationAuthHandler))
+            
+            # Add collaboration configuration to settings
+            self.serverapp.web_app.settings["collaboration_config"] = {
+                "enabled": self.collaboration_enabled,
+                "websocket_max_message_size": self.collaboration_websocket_max_message_size,
+                "ping_interval": self.collaboration_ping_interval,
+                "ping_timeout": self.collaboration_ping_timeout,
+                "max_buffer_size": self.collaboration_max_buffer_size,
+                "compression_level": self.collaboration_compression_level,
+                "lock_timeout": self.collaboration_lock_timeout,
+                "user_presence_timeout": self.collaboration_user_presence_timeout,
+                "default_permissions": self.collaboration_default_permissions,
+            }
+            
+            # Initialize collaboration services
+            initialize_collaboration_services(self.serverapp)
+        
         super().initialize_handlers()
 
     def initialize(self, argv: list[str] | None = None) -> None:  # noqa: ARG002
