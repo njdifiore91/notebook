@@ -1,0 +1,92 @@
+{
+  "jupyter.lab.setting-icon": "notebook-ui-components:comment",
+  "jupyter.lab.setting-icon-label": "Jupyter Notebook Comments",
+  "title": "Jupyter Notebook Comment System",
+  "description": "Configuration for the collaborative notebook comment and review system",
+  "properties": {
+    "enabled": {
+      "type": "boolean",
+      "title": "Enable Comment System",
+      "description": "Whether to enable the comment and review system for collaborative notebooks",
+      "default": true
+    },
+    "threading": {
+      "type": "boolean",
+      "title": "Enable Threaded Comments",
+      "description": "Allow threaded replies to comments for more organized discussions",
+      "default": true
+    },
+    "notifications": {
+      "type": "string",
+      "title": "Notification Level",
+      "description": "Configure which comment events trigger notifications",
+      "enum": ["all", "mentions", "none"],
+      "default": "mentions"
+    },
+    "mentionHighlighting": {
+      "type": "boolean",
+      "title": "Highlight Mentions",
+      "description": "Highlight text when a user is mentioned in a comment",
+      "default": true
+    },
+    "richText": {
+      "type": "boolean",
+      "title": "Rich Text Support",
+      "description": "Enable markdown formatting in comments",
+      "default": true
+    },
+    "allowAnonymous": {
+      "type": "boolean",
+      "title": "Allow Anonymous Comments",
+      "description": "Allow users to post comments without identifying information",
+      "default": false
+    },
+    "displayMode": {
+      "type": "string",
+      "title": "Comment Display Mode",
+      "description": "How comments should be displayed in the notebook",
+      "enum": ["inline", "sidebar", "both"],
+      "default": "both"
+    },
+    "autoHide": {
+      "type": "boolean",
+      "title": "Auto-hide Comment Indicators",
+      "description": "Automatically hide comment indicators when not in use",
+      "default": true
+    }
+  },
+  "jupyter.lab.menus": {
+    "main": [
+      {
+        "id": "jp-mainmenu-view",
+        "items": [
+          {
+            "type": "separator",
+            "rank": 10.5
+          },
+          {
+            "command": "notebook:toggle-comments",
+            "rank": 10.5
+          },
+          {
+            "type": "separator",
+            "rank": 10.5
+          }
+        ]
+      }
+    ],
+    "context": [
+      {
+        "selector": ".jp-Notebook-cell",
+        "items": [
+          {
+            "command": "notebook:add-comment",
+            "rank": 5
+          }
+        ]
+      }
+    ]
+  },
+  "additionalProperties": false,
+  "type": "object"
+}
