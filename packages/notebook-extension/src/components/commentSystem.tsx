@@ -1,69 +1,270 @@
 // Copyright (c) Jupyter Development Team.
 // Distributed under the terms of the Modified BSD License.
 
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { ReactWidget } from '@jupyterlab/apputils';
 import { ITranslator, nullTranslator } from '@jupyterlab/translation';
-import { NotebookPanel, Notebook } from '@jupyterlab/notebook';
 import { Cell } from '@jupyterlab/cells';
-import { IObservableList } from '@jupyterlab/observables';
-import { Message } from '@lumino/messaging';
-import { Widget } from '@lumino/widgets';
-import { UUID } from '@lumino/coreutils';
+import { Avatar, Button, IconButton, Tooltip } from '@jupyterlab/ui-components';
 
 /**
- * Interface for a comment author
+ * CSS styles for the comment system.
  */
-export interface ICommentAuthor {
-  id: string;
-  name: string;
-  avatarUrl?: string;
-  color?: string;
-}
+const COMMENT_SYSTEM_CLASS = 'jp-CommentSystem';
+const COMMENT_THREAD_CLASS = 'jp-CommentThread';
+const COMMENT_ITEM_CLASS = 'jp-CommentItem';
+const COMMENT_FORM_CLASS = 'jp-CommentForm';
 
 /**
- * Comment status enum
+ * Style definitions for the comment system.
+ * 
+ * These styles will be added to a separate CSS file in a real implementation,
+ * but are included here for completeness.
+ * 
+ * ```css
+ * .jp-CommentSystem {
+ *   display: flex;
+ *   flex-direction: column;
+ *   height: 100%;
+ *   overflow: hidden;
+ *   background-color: var(--jp-layout-color1);
+ *   color: var(--jp-ui-font-color1);
+ *   font-size: 13px;
+ *   line-height: 18px;
+ *   font-weight: 400;
+ * }
+ * 
+ * .jp-CommentSystem-header {
+ *   display: flex;
+ *   justify-content: space-between;
+ *   align-items: center;
+ *   padding: 8px 12px;
+ *   border-bottom: 1px solid var(--jp-border-color2);
+ * }
+ * 
+ * .jp-CommentSystem-header h3 {
+ *   margin: 0;
+ *   font-size: 14px;
+ *   font-weight: 600;
+ * }
+ * 
+ * .jp-CommentSystem-content {
+ *   flex: 1;
+ *   overflow-y: auto;
+ *   padding: 12px;
+ * }
+ * 
+ * .jp-CommentSystem-error {
+ *   padding: 8px 12px;
+ *   color: var(--jp-error-color1);
+ *   background-color: var(--jp-error-color3);
+ *   border-radius: 2px;
+ *   margin-bottom: 8px;
+ * }
+ * 
+ * .jp-CommentSystem-loading,
+ * .jp-CommentSystem-empty {
+ *   display: flex;
+ *   justify-content: center;
+ *   align-items: center;
+ *   padding: 24px;
+ *   color: var(--jp-ui-font-color2);
+ * }
+ * 
+ * .jp-CommentSystem-threads {
+ *   display: flex;
+ *   flex-direction: column;
+ *   gap: 16px;
+ * }
+ * 
+ * .jp-CommentThread {
+ *   display: flex;
+ *   flex-direction: column;
+ *   border: 1px solid var(--jp-border-color2);
+ *   border-radius: 4px;
+ *   overflow: hidden;
+ * }
+ * 
+ * .jp-CommentThread-replies {
+ *   display: flex;
+ *   flex-direction: column;
+ *   padding-left: 24px;
+ *   border-top: 1px solid var(--jp-border-color1);
+ * }
+ * 
+ * .jp-CommentItem {
+ *   display: flex;
+ *   flex-direction: column;
+ *   padding: 12px;
+ *   background-color: var(--jp-layout-color1);
+ * }
+ * 
+ * .jp-CommentItem-reply {
+ *   border-top: 1px solid var(--jp-border-color1);
+ * }
+ * 
+ * .jp-CommentItem-resolved {
+ *   opacity: 0.7;
+ *   background-color: var(--jp-layout-color2);
+ * }
+ * 
+ * .jp-CommentItem-header {
+ *   display: flex;
+ *   justify-content: space-between;
+ *   align-items: center;
+ *   margin-bottom: 8px;
+ * }
+ * 
+ * .jp-CommentItem-author {
+ *   display: flex;
+ *   align-items: center;
+ *   gap: 8px;
+ * }
+ * 
+ * .jp-CommentItem-avatar-placeholder {
+ *   display: flex;
+ *   justify-content: center;
+ *   align-items: center;
+ *   width: 24px;
+ *   height: 24px;
+ *   border-radius: 50%;
+ *   background-color: var(--jp-brand-color1);
+ *   color: white;
+ *   font-weight: 600;
+ * }
+ * 
+ * .jp-CommentItem-author-name {
+ *   font-weight: 600;
+ * }
+ * 
+ * .jp-CommentItem-timestamp {
+ *   font-size: 12px;
+ *   color: var(--jp-ui-font-color2);
+ * }
+ * 
+ * .jp-CommentItem-content {
+ *   margin-bottom: 8px;
+ * }
+ * 
+ * .jp-CommentItem-content p {
+ *   margin: 0;
+ *   white-space: pre-wrap;
+ *   word-break: break-word;
+ * }
+ * 
+ * .jp-CommentItem-actions {
+ *   display: flex;
+ *   gap: 8px;
+ *   align-items: center;
+ * }
+ * 
+ * .jp-CommentItem-resolved-info {
+ *   margin-top: 8px;
+ *   font-size: 12px;
+ *   color: var(--jp-success-color1);
+ * }
+ * 
+ * .jp-CommentForm {
+ *   display: flex;
+ *   flex-direction: column;
+ *   gap: 8px;
+ *   padding: 12px;
+ *   background-color: var(--jp-layout-color1);
+ * }
+ * 
+ * .jp-CommentForm-textarea {
+ *   width: 100%;
+ *   min-height: 80px;
+ *   padding: 8px;
+ *   border: 1px solid var(--jp-border-color1);
+ *   border-radius: 4px;
+ *   background-color: var(--jp-layout-color0);
+ *   color: var(--jp-ui-font-color1);
+ *   resize: vertical;
+ * }
+ * 
+ * .jp-CommentForm-textarea:focus {
+ *   outline: none;
+ *   border-color: var(--jp-brand-color1);
+ * }
+ * 
+ * .jp-CommentForm-actions {
+ *   display: flex;
+ *   justify-content: flex-end;
+ *   gap: 8px;
+ * }
+ * ```
  */
-export enum CommentStatus {
-  Open = 'open',
-  Resolved = 'resolved'
-}
 
 /**
- * Interface for a single comment
+ * Interface for a comment in the comment system
  */
 export interface IComment {
+  /**
+   * Unique identifier for the comment
+   */
   id: string;
-  author: ICommentAuthor;
-  content: string;
-  timestamp: number;
-  cellId?: string;
-  selectionRange?: {
-    start: number;
-    end: number;
-  };
-  parentId?: string;
-  edited?: boolean;
-  editTimestamp?: number;
-  mentions?: string[]; // Array of user IDs mentioned in the comment
-}
 
-/**
- * Interface for a comment thread
- */
-export interface ICommentThread {
-  id: string;
-  comments: IComment[];
-  status: CommentStatus;
+  /**
+   * The cell ID this comment is attached to
+   */
   cellId: string;
-  selectionRange?: {
+
+  /**
+   * Optional selection range within the cell
+   */
+  range?: {
     start: number;
     end: number;
   };
-  createdAt: number;
-  updatedAt: number;
-  resolvedBy?: string; // User ID who resolved the thread
-  resolvedAt?: number; // Timestamp when the thread was resolved
+
+  /**
+   * The comment text content
+   */
+  text: string;
+
+  /**
+   * The user who created the comment
+   */
+  author: {
+    id: string;
+    name: string;
+    avatarUrl?: string;
+  };
+
+  /**
+   * Creation timestamp
+   */
+  createdAt: Date;
+
+  /**
+   * Last update timestamp
+   */
+  updatedAt: Date;
+
+  /**
+   * Whether the comment has been resolved
+   */
+  resolved: boolean;
+
+  /**
+   * The user who resolved the comment, if any
+   */
+  resolvedBy?: {
+    id: string;
+    name: string;
+    avatarUrl?: string;
+  };
+
+  /**
+   * Resolution timestamp, if resolved
+   */
+  resolvedAt?: Date;
+
+  /**
+   * Parent comment ID for replies
+   */
+  parentId?: string;
 }
 
 /**
@@ -71,59 +272,533 @@ export interface ICommentThread {
  */
 export interface ICommentService {
   /**
-   * Get all comment threads for a notebook
+   * Get all comments for a specific cell
+   * 
+   * @param cellId - The cell ID to get comments for
+   * @returns A promise that resolves to an array of comments
    */
-  getThreads(): ICommentThread[];
+  getCommentsForCell(cellId: string): Promise<IComment[]>;
 
   /**
-   * Add a new comment thread
+   * Add a new comment to a cell
+   * 
+   * @param cellId - The cell ID to add the comment to
+   * @param text - The comment text
+   * @param range - Optional selection range within the cell
+   * @returns A promise that resolves to the created comment
    */
-  addThread(cellId: string, comment: Omit<IComment, 'id' | 'parentId'>, selectionRange?: { start: number; end: number }): Promise<ICommentThread>;
+  addComment(cellId: string, text: string, range?: { start: number; end: number }): Promise<IComment>;
 
   /**
-   * Add a reply to an existing thread
+   * Add a reply to an existing comment
+   * 
+   * @param parentId - The parent comment ID
+   * @param text - The reply text
+   * @returns A promise that resolves to the created reply
    */
-  addReply(threadId: string, comment: Omit<IComment, 'id' | 'cellId' | 'selectionRange'>): Promise<IComment>;
+  addReply(parentId: string, text: string): Promise<IComment>;
 
   /**
-   * Update the status of a thread
+   * Update an existing comment
+   * 
+   * @param commentId - The comment ID to update
+   * @param text - The new comment text
+   * @returns A promise that resolves to the updated comment
    */
-  updateThreadStatus(threadId: string, status: CommentStatus): Promise<ICommentThread>;
-
-  /**
-   * Delete a comment thread
-   */
-  deleteThread(threadId: string): Promise<void>;
+  updateComment(commentId: string, text: string): Promise<IComment>;
 
   /**
    * Delete a comment
+   * 
+   * @param commentId - The comment ID to delete
+   * @returns A promise that resolves when the comment is deleted
    */
   deleteComment(commentId: string): Promise<void>;
 
   /**
-   * Get threads for a specific cell
+   * Resolve a comment
+   * 
+   * @param commentId - The comment ID to resolve
+   * @returns A promise that resolves to the resolved comment
    */
-  getThreadsForCell(cellId: string): ICommentThread[];
+  resolveComment(commentId: string): Promise<IComment>;
 
   /**
-   * Subscribe to comment changes
+   * Unresolve a comment
+   * 
+   * @param commentId - The comment ID to unresolve
+   * @returns A promise that resolves to the unresolved comment
    */
-  subscribe(callback: (threads: ICommentThread[]) => void): void;
+  unresolveComment(commentId: string): Promise<IComment>;
 
   /**
-   * Unsubscribe from comment changes
+   * Subscribe to comment changes for a cell
+   * 
+   * @param cellId - The cell ID to subscribe to
+   * @param callback - The callback to call when comments change
+   * @returns A function to unsubscribe
    */
-  unsubscribe(callback: (threads: ICommentThread[]) => void): void;
+  subscribeToComments(cellId: string, callback: (comments: IComment[]) => void): () => void;
 }
+
+/**
+ * Props for the CommentItem component
+ */
+interface ICommentItemProps {
+  /**
+   * The comment to display
+   */
+  comment: IComment;
+
+  /**
+   * Whether this comment is a reply
+   */
+  isReply?: boolean;
+
+  /**
+   * Callback for when the reply button is clicked
+   */
+  onReply: (commentId: string) => void;
+
+  /**
+   * Callback for when the resolve button is clicked
+   */
+  onResolve: (commentId: string) => void;
+
+  /**
+   * Callback for when the unresolve button is clicked
+   */
+  onUnresolve: (commentId: string) => void;
+
+  /**
+   * Callback for when the edit button is clicked
+   */
+  onEdit: (commentId: string) => void;
+
+  /**
+   * Callback for when the delete button is clicked
+   */
+  onDelete: (commentId: string) => void;
+
+  /**
+   * The translation service
+   */
+  translator: ITranslator;
+}
+
+/**
+ * Component for displaying a single comment
+ */
+const CommentItem: React.FC<ICommentItemProps> = ({
+  comment,
+  isReply = false,
+  onReply,
+  onResolve,
+  onUnresolve,
+  onEdit,
+  onDelete,
+  translator
+}) => {
+  const trans = translator.load('notebook');
+  const formatDate = (date: Date): string => {
+    // Format the date as a relative time (e.g., "2 hours ago")
+    const now = new Date();
+    const diffMs = now.getTime() - date.getTime();
+    const diffSec = Math.floor(diffMs / 1000);
+    const diffMin = Math.floor(diffSec / 60);
+    const diffHour = Math.floor(diffMin / 60);
+    const diffDay = Math.floor(diffHour / 24);
+
+    if (diffDay > 0) {
+      return diffDay === 1
+        ? trans.__('Yesterday')
+        : trans.__('%1 days ago', diffDay.toString());
+    }
+    if (diffHour > 0) {
+      return trans.__('%1 hours ago', diffHour.toString());
+    }
+    if (diffMin > 0) {
+      return trans.__('%1 minutes ago', diffMin.toString());
+    }
+    return trans.__('Just now');
+  };
+
+  return (
+    <div 
+      className={`${COMMENT_ITEM_CLASS} ${isReply ? `${COMMENT_ITEM_CLASS}-reply` : ''} ${comment.resolved ? `${COMMENT_ITEM_CLASS}-resolved` : ''}`}
+      data-comment-id={comment.id}
+    >
+      <div className={`${COMMENT_ITEM_CLASS}-header`}>
+        <div className={`${COMMENT_ITEM_CLASS}-author`}>
+          {comment.author.avatarUrl ? (
+            <Avatar src={comment.author.avatarUrl} alt={comment.author.name} size="small" />
+          ) : (
+            <div className={`${COMMENT_ITEM_CLASS}-avatar-placeholder`}>
+              {comment.author.name.charAt(0).toUpperCase()}
+            </div>
+          )}
+          <span className={`${COMMENT_ITEM_CLASS}-author-name`}>{comment.author.name}</span>
+        </div>
+        <div className={`${COMMENT_ITEM_CLASS}-timestamp`} title={comment.createdAt.toLocaleString()}>
+          {formatDate(comment.createdAt)}
+        </div>
+      </div>
+      <div className={`${COMMENT_ITEM_CLASS}-content`}>
+        <p style={{ fontSize: '13px', lineHeight: '18px', fontWeight: 400 }}>{comment.text}</p>
+      </div>
+      <div className={`${COMMENT_ITEM_CLASS}-actions`}>
+        {!isReply && !comment.resolved && (
+          <Button 
+            className={`${COMMENT_ITEM_CLASS}-reply-button`} 
+            onClick={() => onReply(comment.id)}
+            aria-label={trans.__('Reply to comment')}
+          >
+            {trans.__('Reply')}
+          </Button>
+        )}
+        {!comment.resolved ? (
+          <Button 
+            className={`${COMMENT_ITEM_CLASS}-resolve-button`} 
+            onClick={() => onResolve(comment.id)}
+            aria-label={trans.__('Resolve comment')}
+          >
+            {trans.__('Resolve')}
+          </Button>
+        ) : (
+          <Button 
+            className={`${COMMENT_ITEM_CLASS}-unresolve-button`} 
+            onClick={() => onUnresolve(comment.id)}
+            aria-label={trans.__('Unresolve comment')}
+          >
+            {trans.__('Unresolve')}
+          </Button>
+        )}
+        <Tooltip title={trans.__('Edit')}>
+          <IconButton 
+            className={`${COMMENT_ITEM_CLASS}-edit-button`} 
+            onClick={() => onEdit(comment.id)}
+            aria-label={trans.__('Edit comment')}
+          >
+            <span className="jp-icon-edit" />
+          </IconButton>
+        </Tooltip>
+        <Tooltip title={trans.__('Delete')}>
+          <IconButton 
+            className={`${COMMENT_ITEM_CLASS}-delete-button`} 
+            onClick={() => onDelete(comment.id)}
+            aria-label={trans.__('Delete comment')}
+          >
+            <span className="jp-icon-delete" />
+          </IconButton>
+        </Tooltip>
+      </div>
+      {comment.resolved && (
+        <div className={`${COMMENT_ITEM_CLASS}-resolved-info`}>
+          {trans.__('Resolved by %1 on %2', 
+            comment.resolvedBy?.name || '', 
+            comment.resolvedAt?.toLocaleString() || '')}
+        </div>
+      )}
+    </div>
+  );
+};
+
+/**
+ * Props for the CommentForm component
+ */
+interface ICommentFormProps {
+  /**
+   * The cell ID to add the comment to
+   */
+  cellId: string;
+
+  /**
+   * The parent comment ID for replies
+   */
+  parentId?: string;
+
+  /**
+   * The comment ID for editing
+   */
+  editingCommentId?: string;
+
+  /**
+   * Initial text for the comment form
+   */
+  initialText?: string;
+
+  /**
+   * Callback for when the form is submitted
+   */
+  onSubmit: (text: string) => void;
+
+  /**
+   * Callback for when the form is cancelled
+   */
+  onCancel: () => void;
+
+  /**
+   * The translation service
+   */
+  translator: ITranslator;
+}
+
+/**
+ * Component for adding or editing a comment
+ */
+const CommentForm: React.FC<ICommentFormProps> = ({
+  cellId,
+  parentId,
+  editingCommentId,
+  initialText = '',
+  onSubmit,
+  onCancel,
+  translator
+}) => {
+  const trans = translator.load('notebook');
+  const [text, setText] = useState(initialText);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    // Focus the textarea when the component mounts
+    if (textareaRef.current) {
+      textareaRef.current.focus();
+    }
+  }, []);
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (text.trim()) {
+      onSubmit(text);
+      setText('');
+    }
+  };
+
+  const isEditing = !!editingCommentId;
+  const isReply = !!parentId;
+
+  return (
+    <form className={COMMENT_FORM_CLASS} onSubmit={handleSubmit}>
+      <textarea
+        ref={textareaRef}
+        className={`${COMMENT_FORM_CLASS}-textarea`}
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        placeholder={isReply 
+          ? trans.__('Write a reply...') 
+          : isEditing 
+            ? trans.__('Edit comment...') 
+            : trans.__('Write a comment...')}
+        aria-label={isReply 
+          ? trans.__('Reply text') 
+          : isEditing 
+            ? trans.__('Edit comment text') 
+            : trans.__('Comment text')}
+        style={{ 
+          fontSize: '13px', 
+          lineHeight: '18px',
+          fontWeight: 400 
+        }}
+      />
+      <div className={`${COMMENT_FORM_CLASS}-actions`}>
+        <Button 
+          className={`${COMMENT_FORM_CLASS}-cancel`} 
+          onClick={onCancel}
+          aria-label={trans.__('Cancel')}
+        >
+          {trans.__('Cancel')}
+        </Button>
+        <Button 
+          className={`${COMMENT_FORM_CLASS}-submit`} 
+          type="submit"
+          disabled={!text.trim()}
+          aria-label={isReply 
+            ? trans.__('Submit reply') 
+            : isEditing 
+              ? trans.__('Update comment') 
+              : trans.__('Submit comment')}
+        >
+          {isReply 
+            ? trans.__('Reply') 
+            : isEditing 
+              ? trans.__('Update') 
+              : trans.__('Comment')}
+        </Button>
+      </div>
+    </form>
+  );
+};
+
+/**
+ * Props for the CommentThread component
+ */
+interface ICommentThreadProps {
+  /**
+   * The root comment of the thread
+   */
+  rootComment: IComment;
+
+  /**
+   * The replies to the root comment
+   */
+  replies: IComment[];
+
+  /**
+   * The ID of the comment being replied to, if any
+   */
+  replyingToId: string | null;
+
+  /**
+   * The ID of the comment being edited, if any
+   */
+  editingCommentId: string | null;
+
+  /**
+   * Callback for when a reply is submitted
+   */
+  onReplySubmit: (parentId: string, text: string) => void;
+
+  /**
+   * Callback for when the reply button is clicked
+   */
+  onReplyClick: (commentId: string) => void;
+
+  /**
+   * Callback for when the resolve button is clicked
+   */
+  onResolve: (commentId: string) => void;
+
+  /**
+   * Callback for when the unresolve button is clicked
+   */
+  onUnresolve: (commentId: string) => void;
+
+  /**
+   * Callback for when the edit button is clicked
+   */
+  onEditClick: (commentId: string) => void;
+
+  /**
+   * Callback for when an edit is submitted
+   */
+  onEditSubmit: (commentId: string, text: string) => void;
+
+  /**
+   * Callback for when the delete button is clicked
+   */
+  onDelete: (commentId: string) => void;
+
+  /**
+   * Callback for when a form is cancelled
+   */
+  onCancel: () => void;
+
+  /**
+   * The translation service
+   */
+  translator: ITranslator;
+}
+
+/**
+ * Component for displaying a thread of comments
+ */
+const CommentThread: React.FC<ICommentThreadProps> = ({
+  rootComment,
+  replies,
+  replyingToId,
+  editingCommentId,
+  onReplySubmit,
+  onReplyClick,
+  onResolve,
+  onUnresolve,
+  onEditClick,
+  onEditSubmit,
+  onDelete,
+  onCancel,
+  translator
+}) => {
+  // Find the comment being edited in this thread
+  const editingComment = editingCommentId === rootComment.id 
+    ? rootComment 
+    : replies.find(reply => reply.id === editingCommentId);
+
+  return (
+    <div className={COMMENT_THREAD_CLASS} data-thread-id={rootComment.id}>
+      {editingCommentId === rootComment.id ? (
+        <CommentForm
+          cellId={rootComment.cellId}
+          editingCommentId={rootComment.id}
+          initialText={rootComment.text}
+          onSubmit={(text) => onEditSubmit(rootComment.id, text)}
+          onCancel={onCancel}
+          translator={translator}
+        />
+      ) : (
+        <CommentItem
+          comment={rootComment}
+          onReply={onReplyClick}
+          onResolve={onResolve}
+          onUnresolve={onUnresolve}
+          onEdit={onEditClick}
+          onDelete={onDelete}
+          translator={translator}
+        />
+      )}
+
+      {replies.length > 0 && (
+        <div className={`${COMMENT_THREAD_CLASS}-replies`}>
+          {replies.map(reply => (
+            editingCommentId === reply.id ? (
+              <CommentForm
+                key={reply.id}
+                cellId={reply.cellId}
+                parentId={rootComment.id}
+                editingCommentId={reply.id}
+                initialText={reply.text}
+                onSubmit={(text) => onEditSubmit(reply.id, text)}
+                onCancel={onCancel}
+                translator={translator}
+              />
+            ) : (
+              <CommentItem
+                key={reply.id}
+                comment={reply}
+                isReply={true}
+                onReply={onReplyClick}
+                onResolve={onResolve}
+                onUnresolve={onUnresolve}
+                onEdit={onEditClick}
+                onDelete={onDelete}
+                translator={translator}
+              />
+            )
+          ))}
+        </div>
+      )}
+
+      {replyingToId === rootComment.id && (
+        <div className={`${COMMENT_THREAD_CLASS}-reply-form`}>
+          <CommentForm
+            cellId={rootComment.cellId}
+            parentId={rootComment.id}
+            onSubmit={(text) => onReplySubmit(rootComment.id, text)}
+            onCancel={onCancel}
+            translator={translator}
+          />
+        </div>
+      )}
+    </div>
+  );
+};
 
 /**
  * Props for the CommentSystem component
  */
-interface ICommentSystemProps {
+export interface ICommentSystemProps {
   /**
-   * The notebook panel
+   * The cell to display comments for
    */
-  notebookPanel: NotebookPanel;
+  cell: Cell;
 
   /**
    * The comment service
@@ -131,333 +806,229 @@ interface ICommentSystemProps {
   commentService: ICommentService;
 
   /**
-   * The translator
+   * The translation service
    */
   translator?: ITranslator;
-
-  /**
-   * The current user
-   */
-  currentUser: ICommentAuthor;
 }
 
 /**
- * Props for the CommentThread component
+ * Main component for the comment system
  */
-interface ICommentThreadProps {
-  thread: ICommentThread;
-  commentService: ICommentService;
-  currentUser: ICommentAuthor;
-  translator: ITranslator;
-  onThreadResolved: (threadId: string) => void;
-  onThreadReopened: (threadId: string) => void;
-}
-
-/**
- * Props for the Comment component
- */
-interface ICommentProps {
-  comment: IComment;
-  translator: ITranslator;
-}
-
-/**
- * Props for the CommentEditor component
- */
-interface ICommentEditorProps {
-  onSubmit: (content: string) => void;
-  placeholder?: string;
-  initialContent?: string;
-  translator: ITranslator;
-  buttonLabel?: string;
-}
-
-/**
- * Format a timestamp as a relative time string
- */
-export const formatRelativeTime = (timestamp: number, translator: ITranslator): string => {
-  const trans = translator.load('notebook');
-  const now = Date.now();
-  const diff = now - timestamp;
-  const seconds = Math.floor(diff / 1000);
-  const minutes = Math.floor(seconds / 60);
-  const hours = Math.floor(minutes / 60);
-  const days = Math.floor(hours / 24);
-
-  if (seconds < 60) {
-    return trans.__('just now');
-  } else if (minutes < 60) {
-    return trans.__('%1 minutes ago', minutes);
-  } else if (hours < 24) {
-    return trans.__('%1 hours ago', hours);
-  } else if (days < 30) {
-    return trans.__('%1 days ago', days);
-  } else {
-    const date = new Date(timestamp);
-    return date.toLocaleDateString();
-  }
-};
-
-/**
- * Process comment text to highlight mentions
- */
-const processCommentText = (text: string): React.ReactNode => {
-  // Simple regex to find @mentions
-  const mentionRegex = /@([\w-]+)/g;
-  const parts = [];
-  let lastIndex = 0;
-  let match;
-
-  while ((match = mentionRegex.exec(text)) !== null) {
-    // Add text before the mention
-    if (match.index > lastIndex) {
-      parts.push(text.substring(lastIndex, match.index));
-    }
-    
-    // Add the mention with special styling
-    parts.push(
-      <span key={`mention-${match.index}`} className="jp-CommentSystem-mention">
-        {match[0]}
-      </span>
-    );
-    
-    lastIndex = match.index + match[0].length;
-  }
-  
-  // Add any remaining text
-  if (lastIndex < text.length) {
-    parts.push(text.substring(lastIndex));
-  }
-  
-  return parts.length > 0 ? parts : text;
-};
-
-/**
- * Component for rendering a single comment
- */
-export const Comment: React.FC<ICommentProps> = ({ comment, translator }) => {
-  return (
-    <div className="jp-CommentSystem-comment">
-      <div className="jp-CommentSystem-commentHeader">
-        <div 
-          className="jp-CommentSystem-commentAvatar"
-          style={{ backgroundColor: comment.author.color || '#1976d2' }}
-        >
-          {comment.author.avatarUrl ? (
-            <img src={comment.author.avatarUrl} alt={comment.author.name} />
-          ) : (
-            comment.author.name.charAt(0).toUpperCase()
-          )}
-        </div>
-        <div className="jp-CommentSystem-commentAuthor">
-          {comment.author.name}
-        </div>
-        <div className="jp-CommentSystem-commentTime">
-          {formatRelativeTime(comment.timestamp, translator)}
-          {comment.edited && (
-            <span className="jp-CommentSystem-commentEdited">
-              {' • '}{translator.load('notebook').__('edited')}
-            </span>
-          )}
-        </div>
-      </div>
-      <div className="jp-CommentSystem-commentContent">
-        {processCommentText(comment.content)}
-      </div>
-    </div>
-  );
-};
-
-/**
- * Component for editing or creating a comment
- */
-export const CommentEditor: React.FC<ICommentEditorProps> = ({ 
-  onSubmit, 
-  placeholder, 
-  initialContent = '', 
-  translator,
-  buttonLabel
+export const CommentSystem: React.FC<ICommentSystemProps> = ({
+  cell,
+  commentService,
+  translator = nullTranslator
 }) => {
   const trans = translator.load('notebook');
-  const [content, setContent] = useState(initialContent);
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const [comments, setComments] = useState<IComment[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [showAddComment, setShowAddComment] = useState(false);
+  const [replyingToId, setReplyingToId] = useState<string | null>(null);
+  const [editingCommentId, setEditingCommentId] = useState<string | null>(null);
 
-  // Auto-resize the textarea as content changes
+  // Load comments for the cell
   useEffect(() => {
-    if (textareaRef.current) {
-      textareaRef.current.style.height = 'auto';
-      textareaRef.current.style.height = `${textareaRef.current.scrollHeight}px`;
-    }
-  }, [content]);
+    const loadComments = async () => {
+      try {
+        setLoading(true);
+        setError(null);
+        const cellComments = await commentService.getCommentsForCell(cell.model.id);
+        setComments(cellComments);
+      } catch (err) {
+        console.error('Error loading comments:', err);
+        setError(trans.__('Failed to load comments'));
+      } finally {
+        setLoading(false);
+      }
+    };
 
-  // Focus the textarea when the component mounts
-  useEffect(() => {
-    if (textareaRef.current) {
-      textareaRef.current.focus();
+    loadComments();
+
+    // Subscribe to comment updates
+    const unsubscribe = commentService.subscribeToComments(cell.model.id, (updatedComments) => {
+      setComments(updatedComments);
+    });
+
+    return () => {
+      unsubscribe();
+    };
+  }, [cell.model.id, commentService, trans]);
+
+  // Group comments into threads (root comments and their replies)
+  const commentThreads = useMemo(() => {
+    // Find root comments (those without a parentId)
+    const rootComments = comments.filter(comment => !comment.parentId);
+    
+    // Create threads with root comments and their replies
+    return rootComments.map(rootComment => {
+      const replies = comments.filter(comment => comment.parentId === rootComment.id);
+      return {
+        rootComment,
+        replies
+      };
+    });
+  }, [comments]);
+
+  // Handle adding a new comment
+  const handleAddComment = async (text: string) => {
+    try {
+      await commentService.addComment(cell.model.id, text);
+      setShowAddComment(false);
+    } catch (err) {
+      console.error('Error adding comment:', err);
+      setError(trans.__('Failed to add comment'));
     }
+  };
+
+  // Handle adding a reply to a comment
+  const handleAddReply = async (parentId: string, text: string) => {
+    try {
+      await commentService.addReply(parentId, text);
+      setReplyingToId(null);
+    } catch (err) {
+      console.error('Error adding reply:', err);
+      setError(trans.__('Failed to add reply'));
+    }
+  };
+
+  // Handle updating a comment
+  const handleUpdateComment = async (commentId: string, text: string) => {
+    try {
+      await commentService.updateComment(commentId, text);
+      setEditingCommentId(null);
+    } catch (err) {
+      console.error('Error updating comment:', err);
+      setError(trans.__('Failed to update comment'));
+    }
+  };
+
+  // Handle resolving a comment
+  const handleResolveComment = async (commentId: string) => {
+    try {
+      await commentService.resolveComment(commentId);
+    } catch (err) {
+      console.error('Error resolving comment:', err);
+      setError(trans.__('Failed to resolve comment'));
+    }
+  };
+
+  // Handle unresolving a comment
+  const handleUnresolveComment = async (commentId: string) => {
+    try {
+      await commentService.unresolveComment(commentId);
+    } catch (err) {
+      console.error('Error unresolving comment:', err);
+      setError(trans.__('Failed to unresolve comment'));
+    }
+  };
+
+  // Handle deleting a comment
+  const handleDeleteComment = async (commentId: string) => {
+    try {
+      await commentService.deleteComment(commentId);
+    } catch (err) {
+      console.error('Error deleting comment:', err);
+      setError(trans.__('Failed to delete comment'));
+    }
+  };
+
+  // Cancel any active forms
+  const handleCancel = () => {
+    setShowAddComment(false);
+    setReplyingToId(null);
+    setEditingCommentId(null);
+  };
+
+  // Handle keyboard shortcuts
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      // Escape key cancels any active forms
+      if (event.key === 'Escape') {
+        handleCancel();
+      }
+
+      // Ctrl+Enter or Cmd+Enter submits the active form
+      if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
+        // Find the active form and submit it
+        const activeForm = document.querySelector('.jp-CommentForm');
+        if (activeForm) {
+          const submitButton = activeForm.querySelector('.jp-CommentForm-submit') as HTMLButtonElement;
+          if (submitButton && !submitButton.disabled) {
+            submitButton.click();
+          }
+        }
+      }
+    };
+
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('keydown', handleKeyDown);
+    };
   }, []);
 
-  const handleSubmit = () => {
-    if (content.trim()) {
-      onSubmit(content);
-      setContent('');
-    }
-  };
-
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    // Submit on Ctrl+Enter or Cmd+Enter
-    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
-      e.preventDefault();
-      handleSubmit();
-    }
-  };
-
   return (
-    <div className="jp-CommentSystem-editor">
-      <textarea
-        ref={textareaRef}
-        className="jp-CommentSystem-editorTextarea"
-        value={content}
-        onChange={(e) => setContent(e.target.value)}
-        placeholder={placeholder || trans.__('Add a comment...')}
-        onKeyDown={handleKeyDown}
-        aria-label={trans.__('Comment text')}
-      />
-      <div className="jp-CommentSystem-editorControls">
-        <button
-          className="jp-CommentSystem-editorSubmit"
-          onClick={handleSubmit}
-          disabled={!content.trim()}
-          aria-label={buttonLabel || trans.__('Submit comment')}
-        >
-          {buttonLabel || trans.__('Comment')}
-        </button>
-        <div className="jp-CommentSystem-editorHint">
-          {trans.__('Press Ctrl+Enter to submit')}
-        </div>
+    <div className={COMMENT_SYSTEM_CLASS} role="region" aria-label={trans.__('Comments')}>
+      <div className={`${COMMENT_SYSTEM_CLASS}-header`}>
+        <h3>{trans.__('Comments')}</h3>
+        {!showAddComment && (
+          <Button 
+            className={`${COMMENT_SYSTEM_CLASS}-add-button`} 
+            onClick={() => setShowAddComment(true)}
+            aria-label={trans.__('Add comment')}
+          >
+            {trans.__('Add Comment')}
+          </Button>
+        )}
       </div>
-    </div>
-  );
-};
 
-/**
- * Component for rendering a comment thread
- */
-export const CommentThread: React.FC<ICommentThreadProps> = ({ 
-  thread, 
-  commentService, 
-  currentUser, 
-  translator,
-  onThreadResolved,
-  onThreadReopened
-}) => {
-  const trans = translator.load('notebook');
-  const [isReplying, setIsReplying] = useState(false);
-  const [isExpanded, setIsExpanded] = useState(true);
-
-  const handleReply = async (content: string) => {
-    try {
-      await commentService.addReply(thread.id, {
-        author: currentUser,
-        content,
-        timestamp: Date.now(),
-      });
-      setIsReplying(false);
-    } catch (error) {
-      console.error('Failed to add reply:', error);
-    }
-  };
-
-  const handleResolve = async () => {
-    try {
-      await commentService.updateThreadStatus(thread.id, CommentStatus.Resolved);
-      onThreadResolved(thread.id);
-    } catch (error) {
-      console.error('Failed to resolve thread:', error);
-    }
-  };
-
-  const handleReopen = async () => {
-    try {
-      await commentService.updateThreadStatus(thread.id, CommentStatus.Open);
-      onThreadReopened(thread.id);
-    } catch (error) {
-      console.error('Failed to reopen thread:', error);
-    }
-  };
-
-  const toggleExpanded = () => {
-    setIsExpanded(!isExpanded);
-  };
-
-  return (
-    <div 
-      className={`jp-CommentSystem-thread ${thread.status === CommentStatus.Resolved ? 'jp-CommentSystem-threadResolved' : ''}`}
-      data-cell-id={thread.cellId}
-    >
-      <div className="jp-CommentSystem-threadHeader">
-        <button 
-          className="jp-CommentSystem-threadToggle"
-          onClick={toggleExpanded}
-          aria-expanded={isExpanded}
-          aria-label={isExpanded ? trans.__('Collapse thread') : trans.__('Expand thread')}
-        >
-          <span className={`jp-CommentSystem-threadToggleIcon ${isExpanded ? 'jp-CommentSystem-threadToggleIconExpanded' : ''}`}>
-            ▶
-          </span>
-        </button>
-        <div className="jp-CommentSystem-threadTitle">
-          {thread.status === CommentStatus.Resolved ? 
-            trans.__('Resolved comment') : 
-            trans.__('Comment thread')}
+      {error && (
+        <div className={`${COMMENT_SYSTEM_CLASS}-error`} role="alert">
+          {error}
         </div>
-        <div className="jp-CommentSystem-threadActions">
-          {thread.status === CommentStatus.Open ? (
-            <button 
-              className="jp-CommentSystem-threadResolve"
-              onClick={handleResolve}
-              aria-label={trans.__('Resolve thread')}
-            >
-              {trans.__('Resolve')}
-            </button>
-          ) : (
-            <button 
-              className="jp-CommentSystem-threadReopen"
-              onClick={handleReopen}
-              aria-label={trans.__('Reopen thread')}
-            >
-              {trans.__('Reopen')}
-            </button>
+      )}
+
+      {loading ? (
+        <div className={`${COMMENT_SYSTEM_CLASS}-loading`}>
+          {trans.__('Loading comments...')}
+        </div>
+      ) : (
+        <div className={`${COMMENT_SYSTEM_CLASS}-content`}>
+          {showAddComment && (
+            <div className={`${COMMENT_SYSTEM_CLASS}-add-form`}>
+              <CommentForm
+                cellId={cell.model.id}
+                onSubmit={handleAddComment}
+                onCancel={handleCancel}
+                translator={translator}
+              />
+            </div>
           )}
-        </div>
-      </div>
-      {isExpanded && (
-        <div className="jp-CommentSystem-threadContent">
-          {thread.comments.map(comment => (
-            <Comment 
-              key={comment.id} 
-              comment={comment} 
-              translator={translator} 
-            />
-          ))}
-          {thread.status === CommentStatus.Open && (
-            <div className="jp-CommentSystem-threadReplyArea">
-              {isReplying ? (
-                <CommentEditor 
-                  onSubmit={handleReply}
+
+          {commentThreads.length > 0 ? (
+            <div className={`${COMMENT_SYSTEM_CLASS}-threads`}>
+              {commentThreads.map(({ rootComment, replies }) => (
+                <CommentThread
+                  key={rootComment.id}
+                  rootComment={rootComment}
+                  replies={replies}
+                  replyingToId={replyingToId}
+                  editingCommentId={editingCommentId}
+                  onReplyClick={setReplyingToId}
+                  onReplySubmit={handleAddReply}
+                  onResolve={handleResolveComment}
+                  onUnresolve={handleUnresolveComment}
+                  onEditClick={setEditingCommentId}
+                  onEditSubmit={handleUpdateComment}
+                  onDelete={handleDeleteComment}
+                  onCancel={handleCancel}
                   translator={translator}
-                  placeholder={trans.__('Add a reply...')}
-                  buttonLabel={trans.__('Reply')}
                 />
-              ) : (
-                <button 
-                  className="jp-CommentSystem-threadReplyButton"
-                  onClick={() => setIsReplying(true)}
-                  aria-label={trans.__('Add a reply')}
-                >
-                  {trans.__('Reply')}
-                </button>
-              )}
+              ))}
+            </div>
+          ) : (
+            <div className={`${COMMENT_SYSTEM_CLASS}-empty`}>
+              {trans.__('No comments yet. Add a comment to start a discussion.')}
             </div>
           )}
         </div>
@@ -467,703 +1038,28 @@ export const CommentThread: React.FC<ICommentThreadProps> = ({
 };
 
 /**
- * Main comment system component
+ * A namespace for CommentSystem statics.
  */
-export const CommentSystem: React.FC<ICommentSystemProps> = ({ 
-  notebookPanel, 
-  commentService, 
-  translator = nullTranslator,
-  currentUser
-}) => {
-  const trans = translator.load('notebook');
-  const [threads, setThreads] = useState<ICommentThread[]>([]);
-  const [selectedCellId, setSelectedCellId] = useState<string | null>(null);
-  const [isAddingComment, setIsAddingComment] = useState(false);
-  const [showResolved, setShowResolved] = useState(false);
-
-  // Update threads when they change
-  useEffect(() => {
-    const handleThreadsChanged = (updatedThreads: ICommentThread[]) => {
-      setThreads(updatedThreads);
-    };
-
-    // Initial load
-    setThreads(commentService.getThreads());
-
-    // Subscribe to changes
-    commentService.subscribe(handleThreadsChanged);
-
-    return () => {
-      commentService.unsubscribe(handleThreadsChanged);
-    };
-  }, [commentService]);
-
-  // Track selected cell
-  useEffect(() => {
-    const notebook = notebookPanel.content;
+export namespace CommentSystemComponent {
+  /**
+   * Create a new CommentSystem widget.
+   *
+   * @param options - The options for creating the comment system.
+   * @returns A widget containing the comment system.
+   */
+  export const create = (options: {
+    cell: Cell;
+    commentService: ICommentService;
+    translator?: ITranslator;
+  }): ReactWidget => {
+    const { cell, commentService, translator = nullTranslator } = options;
     
-    const handleActiveCellChanged = (_: Notebook, cell: Cell | null) => {
-      if (cell) {
-        setSelectedCellId(cell.model.id);
-      } else {
-        setSelectedCellId(null);
-      }
-    };
-
-    // Initial selection
-    if (notebook.activeCell) {
-      setSelectedCellId(notebook.activeCell.model.id);
-    }
-
-    // Listen for changes
-    notebook.activeCellChanged.connect(handleActiveCellChanged);
-
-    return () => {
-      notebook.activeCellChanged.disconnect(handleActiveCellChanged);
-    };
-  }, [notebookPanel]);
-
-  // Handle adding a new comment
-  const handleAddComment = async (content: string) => {
-    if (!selectedCellId) {
-      return;
-    }
-
-    try {
-      await commentService.addThread(
-        selectedCellId,
-        {
-          author: currentUser,
-          content,
-          timestamp: Date.now()
-        }
-      );
-      setIsAddingComment(false);
-    } catch (error) {
-      console.error('Failed to add comment:', error);
-    }
-  };
-
-  // Filter threads based on selected cell and resolved status
-  const filteredThreads = threads.filter(thread => {
-    const isForSelectedCell = selectedCellId && thread.cellId === selectedCellId;
-    const matchesResolvedFilter = 
-      (showResolved && thread.status === CommentStatus.Resolved) || 
-      (!showResolved && thread.status === CommentStatus.Open);
-    
-    return isForSelectedCell && matchesResolvedFilter;
-  });
-  
-  // Sort threads by creation time (newest first)
-  filteredThreads.sort((a, b) => b.createdAt - a.createdAt);
-
-  // Handle keyboard shortcuts
-  useEffect(() => {
-    const handleKeyDown = (event: KeyboardEvent) => {
-      // Alt+C to add a comment
-      if (event.altKey && event.key === 'c') {
-        event.preventDefault();
-        setIsAddingComment(true);
-      }
-      
-      // Alt+R to toggle showing resolved comments
-      if (event.altKey && event.key === 'r') {
-        event.preventDefault();
-        setShowResolved(!showResolved);
-      }
-      
-      // Escape to cancel adding a comment
-      if (event.key === 'Escape' && isAddingComment) {
-        event.preventDefault();
-        setIsAddingComment(false);
-      }
-    };
-
-    document.addEventListener('keydown', handleKeyDown);
-    return () => {
-      document.removeEventListener('keydown', handleKeyDown);
-    };
-  }, [isAddingComment, showResolved]);
-
-  return (
-    <div className="jp-CommentSystem">
-      <div className="jp-CommentSystem-header">
-        <h3 className="jp-CommentSystem-title">
-          {trans.__('Comments')}
-        </h3>
-        <div className="jp-CommentSystem-controls">
-          <label className="jp-CommentSystem-showResolvedLabel">
-            <input
-              type="checkbox"
-              checked={showResolved}
-              onChange={() => setShowResolved(!showResolved)}
-              className="jp-CommentSystem-showResolvedCheckbox"
-              aria-label={trans.__('Show resolved comments')}
-            />
-            {trans.__('Show resolved (Alt+R)')}
-          </label>
-        </div>
-      </div>
-
-      <div className="jp-CommentSystem-content">
-        {selectedCellId ? (
-          <>
-            {filteredThreads.length > 0 ? (
-              <div className="jp-CommentSystem-threads">
-                {filteredThreads.map(thread => (
-                  <CommentThread
-                    key={thread.id}
-                    thread={thread}
-                    commentService={commentService}
-                    currentUser={currentUser}
-                    translator={translator}
-                    onThreadResolved={(threadId) => {
-                      // This is handled by the subscription, but we could add UI feedback here
-                    }}
-                    onThreadReopened={(threadId) => {
-                      // This is handled by the subscription, but we could add UI feedback here
-                    }}
-                  />
-                ))}
-              </div>
-            ) : (
-              <div className="jp-CommentSystem-empty">
-                {showResolved ? 
-                  trans.__('No resolved comments for this cell') : 
-                  trans.__('No comments for this cell')}
-              </div>
-            )}
-
-            {!isAddingComment ? (
-              <button
-                className="jp-CommentSystem-addButton"
-                onClick={() => setIsAddingComment(true)}
-                aria-label={trans.__('Add comment')}
-              >
-                {trans.__('Add comment (Alt+C)')}
-              </button>
-            ) : (
-              <div className="jp-CommentSystem-addCommentArea">
-                <CommentEditor
-                  onSubmit={handleAddComment}
-                  translator={translator}
-                />
-                <button
-                  className="jp-CommentSystem-cancelButton"
-                  onClick={() => setIsAddingComment(false)}
-                  aria-label={trans.__('Cancel')}
-                >
-                  {trans.__('Cancel')}
-                </button>
-              </div>
-            )}
-          </>
-        ) : (
-          <div className="jp-CommentSystem-empty">
-            {trans.__('Select a cell to view or add comments')}
-          </div>
-        )}
-      </div>
-    </div>
-  );
-};
-
-/**
- * A Lumino widget that wraps the CommentSystem React component.
- * This widget can be added to the right sidebar of the notebook interface.
- */
-export class CommentSystemWidget extends ReactWidget {
-  /**
-   * Construct a new CommentSystemWidget.
-   */
-  constructor(options: CommentSystemWidget.IOptions) {
-    super();
-    this._notebookPanel = options.notebookPanel;
-    this._commentService = options.commentService;
-    this._translator = options.translator || nullTranslator;
-    this._currentUser = options.currentUser;
-    this.addClass('jp-CommentSystemWidget');
-    this.id = `comment-system-${UUID.uuid4()}`;
-    this.title.label = this._translator.load('notebook').__('Comments');
-    this.title.caption = this._translator.load('notebook').__('Notebook Comments');
-    this.title.iconClass = 'jp-CommentsIcon';
-    this.title.closable = true;
-  }
-
-  /**
-   * Handle `'activate-request'` messages.
-   */
-  protected onActivateRequest(msg: Message): void {
-    super.onActivateRequest(msg);
-    this.node.tabIndex = -1;
-    this.node.focus();
-  }
-  
-  /**
-   * Handle `'after-attach'` messages.
-   */
-  protected onAfterAttach(msg: Message): void {
-    super.onAfterAttach(msg);
-    // Add the styles when the widget is attached
-    addCommentSystemStyles();
-  }
-
-  /**
-   * Render the CommentSystem component.
-   */
-  protected render(): JSX.Element {
-    return (
-      <CommentSystem
-        notebookPanel={this._notebookPanel}
-        commentService={this._commentService}
-        translator={this._translator}
-        currentUser={this._currentUser}
+    return ReactWidget.create(
+      <CommentSystem 
+        cell={cell} 
+        commentService={commentService} 
+        translator={translator} 
       />
     );
-  }
-
-  private _notebookPanel: NotebookPanel;
-  private _commentService: ICommentService;
-  private _translator: ITranslator;
-  private _currentUser: ICommentAuthor;
-}
-
-/**
- * A namespace for CommentSystemWidget statics.
- */
-export namespace CommentSystemWidget {
-  /**
-   * Options for creating a CommentSystemWidget.
-   */
-  export interface IOptions {
-    /**
-     * The notebook panel that this comment system is associated with.
-     */
-    notebookPanel: NotebookPanel;
-
-    /**
-     * The comment service to use.
-     */
-    commentService: ICommentService;
-
-    /**
-     * The translator to use.
-     */
-    translator?: ITranslator;
-
-    /**
-     * The current user.
-     */
-    currentUser: ICommentAuthor;
-  }
-
-  /**
-   * Create a new CommentSystemWidget.
-   */
-  export function createNode(options: IOptions): CommentSystemWidget {
-    return new CommentSystemWidget(options);
-  }
-  
-  /**
-   * Create a comment button for the cell toolbar.
-   * 
-   * @param cell - The cell to create the button for
-   * @param commentService - The comment service to use
-   * @param translator - The translator to use
-   * @returns A button widget that can be added to the cell toolbar
-   */
-  export function createCellButton(
-    cell: Cell,
-    commentService: ICommentService,
-    translator: ITranslator = nullTranslator
-  ): Widget {
-    const trans = translator.load('notebook');
-    const button = new Widget();
-    button.addClass('jp-CommentSystem-cellButton');
-    button.node.title = trans.__('Add comment to this cell');
-    button.node.setAttribute('aria-label', trans.__('Add comment to this cell'));
-    
-    // Add click handler to open the comment sidebar and focus on this cell
-    button.node.addEventListener('click', () => {
-      // This would need to be implemented in the plugin that uses this component
-      // to open the comment sidebar and focus on this cell
-    });
-    
-    // Update the button appearance based on whether there are comments for this cell
-    const updateButton = () => {
-      const threads = commentService.getThreadsForCell(cell.model.id);
-      const hasComments = threads.length > 0;
-      const hasOpenComments = threads.some(t => t.status === CommentStatus.Open);
-      
-      button.node.classList.toggle('jp-CommentSystem-cellButtonHasComments', hasComments);
-      button.node.classList.toggle('jp-CommentSystem-cellButtonHasOpenComments', hasOpenComments);
-      
-      // Update the tooltip to show the comment count
-      if (hasComments) {
-        const openCount = threads.filter(t => t.status === CommentStatus.Open).length;
-        const resolvedCount = threads.filter(t => t.status === CommentStatus.Resolved).length;
-        
-        if (openCount > 0 && resolvedCount > 0) {
-          button.node.title = trans.__('%1 open comments, %2 resolved', openCount, resolvedCount);
-        } else if (openCount > 0) {
-          button.node.title = trans.__('%1 open comments', openCount);
-        } else {
-          button.node.title = trans.__('%1 resolved comments', resolvedCount);
-        }
-      } else {
-        button.node.title = trans.__('Add comment to this cell');
-      }
-    };
-    
-    // Initial update
-    updateButton();
-    
-    // Subscribe to comment changes
-    commentService.subscribe(() => {
-      updateButton();
-    });
-    
-    return button;
-  }
-}
-
-/**
- * Add the default styles to the document.
- */
-export function addCommentSystemStyles(): void {
-  // Don't add styles if they already exist
-  if (document.getElementById('jp-CommentSystem-styles')) {
-    return;
-  }
-  
-  const style = document.createElement('style');
-  style.id = 'jp-CommentSystem-styles';
-  style.textContent = `
-    .jp-CommentSystem {
-      display: flex;
-      flex-direction: column;
-      height: 100%;
-      overflow: hidden;
-      background-color: var(--jp-layout-color1);
-      color: var(--jp-ui-font-color1);
-    }
-
-    .jp-CommentSystem-header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      padding: 8px 12px;
-      border-bottom: 1px solid var(--jp-border-color2);
-    }
-
-    .jp-CommentSystem-title {
-      font-size: var(--jp-ui-font-size2);
-      font-weight: 600;
-      margin: 0;
-    }
-
-    .jp-CommentSystem-controls {
-      display: flex;
-      align-items: center;
-    }
-
-    .jp-CommentSystem-showResolvedLabel {
-      display: flex;
-      align-items: center;
-      font-size: var(--jp-ui-font-size1);
-      cursor: pointer;
-    }
-
-    .jp-CommentSystem-showResolvedCheckbox {
-      margin-right: 4px;
-    }
-
-    .jp-CommentSystem-content {
-      flex: 1;
-      overflow-y: auto;
-      padding: 12px;
-    }
-
-    .jp-CommentSystem-empty {
-      display: flex;
-      justify-content: center;
-      align-items: center;
-      height: 100px;
-      color: var(--jp-ui-font-color2);
-      font-style: italic;
-    }
-
-    .jp-CommentSystem-threads {
-      display: flex;
-      flex-direction: column;
-      gap: 16px;
-      margin-bottom: 16px;
-    }
-
-    .jp-CommentSystem-thread {
-      border: 1px solid var(--jp-border-color2);
-      border-radius: 4px;
-      overflow: hidden;
-    }
-
-    .jp-CommentSystem-threadResolved {
-      opacity: 0.7;
-    }
-
-    .jp-CommentSystem-threadHeader {
-      display: flex;
-      align-items: center;
-      padding: 8px 12px;
-      background-color: var(--jp-layout-color2);
-      border-bottom: 1px solid var(--jp-border-color2);
-    }
-
-    .jp-CommentSystem-threadToggle {
-      background: none;
-      border: none;
-      cursor: pointer;
-      padding: 0;
-      margin-right: 8px;
-      color: var(--jp-ui-font-color1);
-    }
-
-    .jp-CommentSystem-threadToggleIcon {
-      display: inline-block;
-      transition: transform 0.15s ease-in-out;
-    }
-
-    .jp-CommentSystem-threadToggleIconExpanded {
-      transform: rotate(90deg);
-    }
-
-    .jp-CommentSystem-threadTitle {
-      flex: 1;
-      font-weight: 500;
-    }
-
-    .jp-CommentSystem-threadActions {
-      display: flex;
-      gap: 8px;
-    }
-
-    .jp-CommentSystem-threadResolve,
-    .jp-CommentSystem-threadReopen {
-      background-color: var(--jp-layout-color3);
-      border: none;
-      border-radius: 4px;
-      padding: 4px 8px;
-      font-size: var(--jp-ui-font-size1);
-      cursor: pointer;
-      color: var(--jp-ui-font-color1);
-    }
-
-    .jp-CommentSystem-threadResolve:hover,
-    .jp-CommentSystem-threadReopen:hover {
-      background-color: var(--jp-layout-color4);
-    }
-
-    .jp-CommentSystem-threadContent {
-      padding: 12px;
-    }
-
-    .jp-CommentSystem-comment {
-      margin-bottom: 12px;
-    }
-
-    .jp-CommentSystem-commentHeader {
-      display: flex;
-      align-items: center;
-      margin-bottom: 4px;
-    }
-
-    .jp-CommentSystem-commentAvatar {
-      width: 24px;
-      height: 24px;
-      border-radius: 50%;
-      display: flex;
-      justify-content: center;
-      align-items: center;
-      color: white;
-      font-weight: 500;
-      margin-right: 8px;
-      overflow: hidden;
-    }
-
-    .jp-CommentSystem-commentAvatar img {
-      width: 100%;
-      height: 100%;
-      object-fit: cover;
-    }
-
-    .jp-CommentSystem-commentAuthor {
-      font-weight: 500;
-      margin-right: 8px;
-    }
-
-    .jp-CommentSystem-commentTime {
-      font-size: var(--jp-ui-font-size0);
-      color: var(--jp-ui-font-color2);
-    }
-    
-    .jp-CommentSystem-commentEdited {
-      font-size: var(--jp-ui-font-size0);
-      color: var(--jp-ui-font-color2);
-      font-style: italic;
-    }
-
-    .jp-CommentSystem-commentContent {
-      font-size: 13px;
-      line-height: 18px;
-      font-weight: 400;
-      white-space: pre-wrap;
-      word-break: break-word;
-      padding-left: 32px;
-    }
-    
-    /* Highlight user mentions in comments */
-    .jp-CommentSystem-commentContent .jp-CommentSystem-mention {
-      background-color: rgba(var(--jp-brand-color1-rgb), 0.1);
-      border-radius: 2px;
-      padding: 0 2px;
-      font-weight: 500;
-    }
-
-    .jp-CommentSystem-threadReplyArea {
-      margin-top: 12px;
-    }
-
-    .jp-CommentSystem-threadReplyButton {
-      background: none;
-      border: 1px solid var(--jp-border-color2);
-      border-radius: 4px;
-      padding: 6px 12px;
-      font-size: var(--jp-ui-font-size1);
-      cursor: pointer;
-      color: var(--jp-ui-font-color1);
-    }
-
-    .jp-CommentSystem-threadReplyButton:hover {
-      background-color: var(--jp-layout-color2);
-    }
-
-    .jp-CommentSystem-editor {
-      margin-bottom: 8px;
-    }
-
-    .jp-CommentSystem-editorTextarea {
-      width: 100%;
-      min-height: 80px;
-      padding: 8px;
-      border: 1px solid var(--jp-border-color2);
-      border-radius: 4px;
-      resize: vertical;
-      font-family: var(--jp-ui-font-family);
-      font-size: 13px;
-      line-height: 18px;
-      background-color: var(--jp-layout-color1);
-      color: var(--jp-ui-font-color1);
-    }
-
-    .jp-CommentSystem-editorTextarea:focus {
-      outline: none;
-      border-color: var(--jp-brand-color1);
-    }
-
-    .jp-CommentSystem-editorControls {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      margin-top: 8px;
-    }
-
-    .jp-CommentSystem-editorSubmit {
-      background-color: var(--jp-brand-color1);
-      color: white;
-      border: none;
-      border-radius: 4px;
-      padding: 6px 12px;
-      font-size: var(--jp-ui-font-size1);
-      cursor: pointer;
-    }
-
-    .jp-CommentSystem-editorSubmit:disabled {
-      background-color: var(--jp-layout-color3);
-      color: var(--jp-ui-font-color2);
-      cursor: not-allowed;
-    }
-
-    .jp-CommentSystem-editorHint {
-      font-size: var(--jp-ui-font-size0);
-      color: var(--jp-ui-font-color2);
-    }
-
-    .jp-CommentSystem-addButton {
-      background-color: var(--jp-brand-color1);
-      color: white;
-      border: none;
-      border-radius: 4px;
-      padding: 8px 16px;
-      font-size: var(--jp-ui-font-size1);
-      cursor: pointer;
-      width: 100%;
-      margin-top: 16px;
-    }
-
-    .jp-CommentSystem-addButton:hover {
-      background-color: var(--jp-brand-color0);
-    }
-
-    .jp-CommentSystem-addCommentArea {
-      margin-top: 16px;
-    }
-
-    .jp-CommentSystem-cancelButton {
-      background: none;
-      border: none;
-      color: var(--jp-ui-font-color2);
-      cursor: pointer;
-      padding: 4px 8px;
-      font-size: var(--jp-ui-font-size1);
-      margin-top: 8px;
-    }
-
-    .jp-CommentSystem-cancelButton:hover {
-      text-decoration: underline;
-    }
-
-    /* Icon for the comment system tab */
-    .jp-CommentsIcon {
-      background-image: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>');
-      background-size: 16px;
-      background-repeat: no-repeat;
-      background-position: center;
-    }
-    
-    /* Cell comment button styles */
-    .jp-CommentSystem-cellButton {
-      width: 16px;
-      height: 16px;
-      background-image: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>');
-      background-size: 16px;
-      background-repeat: no-repeat;
-      background-position: center;
-      opacity: 0.5;
-      cursor: pointer;
-      margin: 0 4px;
-    }
-    
-    .jp-CommentSystem-cellButton:hover {
-      opacity: 1;
-    }
-    
-    .jp-CommentSystem-cellButtonHasComments {
-      opacity: 0.8;
-    }
-    
-    .jp-CommentSystem-cellButtonHasOpenComments {
-      opacity: 1;
-      background-image: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="%231976d2" stroke="%231976d2" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>');
-    }
-  `;
-  document.head.appendChild(style);
+  };
 }
