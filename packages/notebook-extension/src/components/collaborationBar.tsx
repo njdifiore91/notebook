@@ -1,983 +1,821 @@
-import React, { useEffect, useState, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { ReactWidget } from '@jupyterlab/apputils';
 import { ITranslator, nullTranslator } from '@jupyterlab/translation';
-import { NotebookPanel } from '@jupyterlab/notebook';
-import { Token } from '@lumino/coreutils';
-import { ISignal, Signal } from '@lumino/signaling';
-import { Widget } from '@lumino/widgets';
+import { Awareness } from 'y-protocols/awareness';
+import { UserPresence, IUser } from './userPresence';
+
+// Styles will be added when the widget is created
 
 /**
- * The collaboration service token.
+ * CSS styles for the CollaborationBar component
  */
-export const ICollaborationService = new Token<ICollaborationService>(
-  'jupyter-notebook/collaboration:ICollaborationService'
-);
-
-/**
- * The presence service token.
- */
-export const IPresenceService = new Token<IPresenceService>(
-  'jupyter-notebook/collaboration:IPresenceService'
-);
-
-/**
- * The lock service token.
- */
-export const ILockService = new Token<ILockService>(
-  'jupyter-notebook/collaboration:ILockService'
-);
-
-/**
- * The history service token.
- */
-export const IHistoryService = new Token<IHistoryService>(
-  'jupyter-notebook/collaboration:IHistoryService'
-);
-
-/**
- * The permissions service token.
- */
-export const IPermissionsService = new Token<IPermissionsService>(
-  'jupyter-notebook/collaboration:IPermissionsService'
-);
-
-/**
- * The comment service token.
- */
-export const ICommentService = new Token<ICommentService>(
-  'jupyter-notebook/collaboration:ICommentService'
-);
-
-/**
- * Interface for the collaboration service.
- */
-export interface ICollaborationService {
-  /**
-   * Whether collaboration is enabled.
-   */
-  readonly isEnabled: boolean;
-
-  /**
-   * Whether the current user is connected to the collaboration server.
-   */
-  readonly isConnected: boolean;
-
-  /**
-   * Connect to the collaboration server.
-   */
-  connect(): Promise<void>;
-
-  /**
-   * Disconnect from the collaboration server.
-   */
-  disconnect(): Promise<void>;
-
-  /**
-   * Signal emitted when the connection status changes.
-   */
-  readonly connectionStatusChanged: ISignal<ICollaborationService, boolean>;
+const styles = `
+.jp-CollaborationBar {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--jp-collab-spacing-sm);
+  background-color: var(--jp-layout-color1);
+  border-bottom: 1px solid var(--jp-border-color2);
+  height: var(--jp-collab-presence-avatar-size, 40px);
+  font-family: var(--jp-ui-font-family);
+  position: relative;
+  z-index: 10;
 }
 
-/**
- * Interface for the presence service.
- */
-export interface IPresenceService {
-  /**
-   * The list of active users.
-   */
-  readonly users: ICollaborator[];
-
-  /**
-   * Signal emitted when the user list changes.
-   */
-  readonly usersChanged: ISignal<IPresenceService, ICollaborator[]>;
-
-  /**
-   * Signal emitted when a user's cursor position changes.
-   */
-  readonly cursorChanged: ISignal<IPresenceService, ICursorPosition>;
+.jp-CollaborationBar-left {
+  display: flex;
+  align-items: center;
 }
 
-/**
- * Interface for the lock service.
- */
-export interface ILockService {
-  /**
-   * The list of locked cells.
-   */
-  readonly lockedCells: ILockedCell[];
-
-  /**
-   * Signal emitted when the locked cells list changes.
-   */
-  readonly lockedCellsChanged: ISignal<ILockService, ILockedCell[]>;
-
-  /**
-   * Lock a cell.
-   */
-  lockCell(cellId: string): Promise<boolean>;
-
-  /**
-   * Unlock a cell.
-   */
-  unlockCell(cellId: string): Promise<boolean>;
+.jp-CollaborationBar-right {
+  display: flex;
+  align-items: center;
 }
 
-/**
- * Interface for the history service.
- */
-export interface IHistoryService {
-  /**
-   * The list of document versions.
-   */
-  readonly versions: IDocumentVersion[];
-
-  /**
-   * Signal emitted when the versions list changes.
-   */
-  readonly versionsChanged: ISignal<IHistoryService, IDocumentVersion[]>;
-
-  /**
-   * Restore the document to a specific version.
-   */
-  restoreVersion(versionId: string): Promise<boolean>;
+.jp-CollaborationBar-status {
+  display: flex;
+  align-items: center;
+  margin-right: var(--jp-collab-spacing-md);
+  font-size: var(--jp-ui-font-size1);
+  color: var(--jp-ui-font-color1);
 }
 
-/**
- * Interface for the permissions service.
- */
-export interface IPermissionsService {
-  /**
-   * The current user's permission level.
-   */
-  readonly currentUserPermission: PermissionLevel;
-
-  /**
-   * The list of user permissions.
-   */
-  readonly userPermissions: IUserPermission[];
-
-  /**
-   * Signal emitted when the permissions list changes.
-   */
-  readonly permissionsChanged: ISignal<IPermissionsService, IUserPermission[]>;
-
-  /**
-   * Update a user's permission level.
-   */
-  updatePermission(userId: string, level: PermissionLevel): Promise<boolean>;
+.jp-CollaborationBar-statusIcon {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  margin-right: var(--jp-collab-spacing-xs);
 }
 
-/**
- * Interface for the comment service.
- */
-export interface ICommentService {
-  /**
-   * The list of comments.
-   */
-  readonly comments: IComment[];
-
-  /**
-   * Signal emitted when the comments list changes.
-   */
-  readonly commentsChanged: ISignal<ICommentService, IComment[]>;
-
-  /**
-   * Add a comment.
-   */
-  addComment(cellId: string, text: string): Promise<IComment>;
-
-  /**
-   * Resolve a comment.
-   */
-  resolveComment(commentId: string): Promise<boolean>;
+.jp-CollaborationBar-statusIcon-connected {
+  background-color: var(--jp-success-color0);
 }
 
+.jp-CollaborationBar-statusIcon-connecting {
+  background-color: var(--jp-warn-color0);
+  animation: jp-CollaborationBar-pulse 1.5s infinite;
+}
+
+.jp-CollaborationBar-statusIcon-disconnected {
+  background-color: var(--jp-error-color0);
+}
+
+@keyframes jp-CollaborationBar-pulse {
+  0% {
+    opacity: 0.6;
+  }
+  50% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0.6;
+  }
+}
+
+.jp-CollaborationBar-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background-color: transparent;
+  border: none;
+  border-radius: var(--jp-border-radius);
+  padding: var(--jp-collab-spacing-xs) var(--jp-collab-spacing-sm);
+  margin-left: var(--jp-collab-spacing-sm);
+  cursor: pointer;
+  color: var(--jp-ui-font-color1);
+  font-size: var(--jp-ui-font-size1);
+  transition: background-color 0.2s ease;
+}
+
+.jp-CollaborationBar-button:hover {
+  background-color: var(--jp-layout-color2);
+}
+
+.jp-CollaborationBar-button:focus {
+  outline: 2px solid var(--jp-brand-color1);
+  outline-offset: 2px;
+}
+
+.jp-CollaborationBar-button svg {
+  width: 16px;
+  height: 16px;
+  margin-right: var(--jp-collab-spacing-xs);
+  fill: currentColor;
+}
+
+.jp-CollaborationBar-activityFeed {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  width: 300px;
+  max-height: 400px;
+  overflow-y: auto;
+  background-color: var(--jp-layout-color1);
+  border: 1px solid var(--jp-border-color2);
+  border-radius: var(--jp-border-radius);
+  box-shadow: var(--jp-elevation-z6);
+  z-index: 100;
+  display: none;
+}
+
+.jp-CollaborationBar-activityFeed.jp-CollaborationBar-activityFeed-visible {
+  display: block;
+}
+
+.jp-CollaborationBar-activityItem {
+  padding: var(--jp-collab-spacing-sm);
+  border-bottom: 1px solid var(--jp-border-color2);
+  font-size: var(--jp-ui-font-size1);
+}
+
+.jp-CollaborationBar-activityItem:last-child {
+  border-bottom: none;
+}
+
+.jp-CollaborationBar-activityHeader {
+  display: flex;
+  align-items: center;
+  margin-bottom: var(--jp-collab-spacing-xs);
+}
+
+.jp-CollaborationBar-activityAvatar {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  margin-right: var(--jp-collab-spacing-xs);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--jp-ui-inverse-font-color0);
+  font-weight: 600;
+  font-size: 12px;
+}
+
+.jp-CollaborationBar-activityUser {
+  font-weight: 600;
+  margin-right: var(--jp-collab-spacing-xs);
+}
+
+.jp-CollaborationBar-activityTime {
+  font-size: var(--jp-ui-font-size0);
+  color: var(--jp-ui-font-color2);
+}
+
+.jp-CollaborationBar-activityContent {
+  color: var(--jp-ui-font-color1);
+}
+
+.jp-CollaborationBar-notification {
+  position: absolute;
+  top: 100%;
+  right: 20px;
+  width: 300px;
+  background-color: var(--jp-layout-color1);
+  border: 1px solid var(--jp-border-color2);
+  border-radius: var(--jp-border-radius);
+  box-shadow: var(--jp-elevation-z6);
+  z-index: 100;
+  padding: var(--jp-collab-spacing-sm);
+  animation: jp-CollaborationBar-notification-slide 0.3s ease-out;
+  transform-origin: top right;
+}
+
+@keyframes jp-CollaborationBar-notification-slide {
+  0% {
+    transform: translateY(-20px);
+    opacity: 0;
+  }
+  100% {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+.jp-CollaborationBar-notificationHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: var(--jp-collab-spacing-xs);
+}
+
+.jp-CollaborationBar-notificationTitle {
+  font-weight: 600;
+  font-size: var(--jp-ui-font-size1);
+}
+
+.jp-CollaborationBar-notificationClose {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--jp-ui-font-color2);
+  padding: 2px;
+}
+
+.jp-CollaborationBar-notificationClose:hover {
+  color: var(--jp-ui-font-color1);
+}
+
+.jp-CollaborationBar-notificationContent {
+  font-size: var(--jp-ui-font-size1);
+  color: var(--jp-ui-font-color1);
+}
+
+/* Responsive styles */
+@media (max-width: 768px) {
+  .jp-CollaborationBar {
+    padding: var(--jp-collab-spacing-xs);
+  }
+  
+  .jp-CollaborationBar-status span {
+    display: none;
+  }
+  
+  .jp-CollaborationBar-button span {
+    display: none;
+  }
+  
+  .jp-CollaborationBar-button svg {
+    margin-right: 0;
+  }
+  
+  .jp-CollaborationBar-activityFeed {
+    width: 250px;
+  }
+}
+
+/* Respect reduced motion preferences */
+@media (prefers-reduced-motion: reduce) {
+  .jp-CollaborationBar-statusIcon-connecting {
+    animation: none;
+  }
+  
+  .jp-CollaborationBar-notification {
+    animation: none;
+  }
+}
+`;
+
 /**
- * Interface for a collaborator.
+ * Connection status type
  */
-export interface ICollaborator {
-  /**
-   * The user ID.
-   */
+type ConnectionStatus = 'connected' | 'connecting' | 'disconnected';
+
+/**
+ * Activity item type
+ */
+interface IActivityItem {
+  /** Unique ID for the activity item */
   id: string;
-
-  /**
-   * The user name.
-   */
-  name: string;
-
-  /**
-   * The user color.
-   */
-  color: string;
-
-  /**
-   * The user avatar URL.
-   */
-  avatarUrl?: string;
-
-  /**
-   * The user's last active timestamp.
-   */
-  lastActive: number;
-
-  /**
-   * The user's current status.
-   */
-  status: 'active' | 'idle' | 'offline';
-}
-
-/**
- * Interface for a cursor position.
- */
-export interface ICursorPosition {
-  /**
-   * The user ID.
-   */
-  userId: string;
-
-  /**
-   * The cell ID.
-   */
-  cellId: string;
-
-  /**
-   * The cursor position within the cell.
-   */
-  position: number;
-
-  /**
-   * The selection range, if any.
-   */
-  selection?: { start: number; end: number };
-}
-
-/**
- * Interface for a locked cell.
- */
-export interface ILockedCell {
-  /**
-   * The cell ID.
-   */
-  cellId: string;
-
-  /**
-   * The user ID who locked the cell.
-   */
-  userId: string;
-
-  /**
-   * The timestamp when the cell was locked.
-   */
+  /** User who performed the activity */
+  user: IUser;
+  /** Type of activity */
+  type: 'join' | 'leave' | 'edit' | 'comment' | 'lock' | 'unlock' | 'permission';
+  /** Timestamp of the activity */
   timestamp: number;
+  /** Additional details about the activity */
+  details?: {
+    /** Cell ID if applicable */
+    cellId?: string;
+    /** Comment ID if applicable */
+    commentId?: string;
+    /** Permission level if applicable */
+    permission?: string;
+    /** Any other relevant information */
+    [key: string]: any;
+  };
 }
 
 /**
- * Interface for a document version.
+ * Notification type
  */
-export interface IDocumentVersion {
-  /**
-   * The version ID.
-   */
+interface INotification {
+  /** Unique ID for the notification */
   id: string;
-
-  /**
-   * The user ID who created the version.
-   */
-  userId: string;
-
-  /**
-   * The timestamp when the version was created.
-   */
-  timestamp: number;
-
-  /**
-   * The version description.
-   */
-  description?: string;
-}
-
-/**
- * Permission level for a user.
- */
-export type PermissionLevel = 'admin' | 'edit' | 'comment' | 'view';
-
-/**
- * Interface for a user permission.
- */
-export interface IUserPermission {
-  /**
-   * The user ID.
-   */
-  userId: string;
-
-  /**
-   * The permission level.
-   */
-  level: PermissionLevel;
-}
-
-/**
- * Interface for a comment.
- */
-export interface IComment {
-  /**
-   * The comment ID.
-   */
-  id: string;
-
-  /**
-   * The cell ID.
-   */
-  cellId: string;
-
-  /**
-   * The user ID who created the comment.
-   */
-  userId: string;
-
-  /**
-   * The timestamp when the comment was created.
-   */
-  timestamp: number;
-
-  /**
-   * The comment text.
-   */
-  text: string;
-
-  /**
-   * Whether the comment is resolved.
-   */
-  resolved: boolean;
-
-  /**
-   * The replies to the comment.
-   */
-  replies: ICommentReply[];
-}
-
-/**
- * Interface for a comment reply.
- */
-export interface ICommentReply {
-  /**
-   * The reply ID.
-   */
-  id: string;
-
-  /**
-   * The user ID who created the reply.
-   */
-  userId: string;
-
-  /**
-   * The timestamp when the reply was created.
-   */
-  timestamp: number;
-
-  /**
-   * The reply text.
-   */
-  text: string;
-}
-
-/**
- * Interface for a notification.
- */
-export interface INotification {
-  /**
-   * The notification ID.
-   */
-  id: string;
-
-  /**
-   * The notification type.
-   */
+  /** Title of the notification */
+  title: string;
+  /** Content of the notification */
+  content: string;
+  /** Type of notification */
   type: 'info' | 'warning' | 'error' | 'success';
-
-  /**
-   * The notification message.
-   */
-  message: string;
-
-  /**
-   * The timestamp when the notification was created.
-   */
+  /** Timestamp of the notification */
   timestamp: number;
-
-  /**
-   * Whether the notification has been read.
-   */
-  read: boolean;
-
-  /**
-   * The action to perform when the notification is clicked, if any.
-   */
-  action?: () => void;
+  /** Auto-dismiss timeout in milliseconds (0 for no auto-dismiss) */
+  timeout: number;
 }
 
 /**
- * Interface for the collaboration bar props.
+ * Props for the CollaborationBar component
  */
-interface ICollaborationBarProps {
-  /**
-   * The notebook panel.
-   */
-  notebookPanel: NotebookPanel;
-
-  /**
-   * The collaboration service.
-   */
-  collaborationService: ICollaborationService;
-
-  /**
-   * The presence service.
-   */
-  presenceService: IPresenceService;
-
-  /**
-   * The lock service.
-   */
-  lockService: ILockService;
-
-  /**
-   * The history service.
-   */
-  historyService: IHistoryService;
-
-  /**
-   * The permissions service.
-   */
-  permissionsService: IPermissionsService;
-
-  /**
-   * The comment service.
-   */
-  commentService: ICommentService;
-
-  /**
-   * The translator.
-   */
+export interface ICollaborationBarProps {
+  /** The Yjs awareness instance */
+  awareness: Awareness;
+  /** The translator instance */
   translator?: ITranslator;
+  /** Connection status */
+  connectionStatus?: ConnectionStatus;
+  /** Callback when the history button is clicked */
+  onHistoryClick?: () => void;
+  /** Callback when the permissions button is clicked */
+  onPermissionsClick?: () => void;
+  /** Callback when the comments button is clicked */
+  onCommentsClick?: () => void;
+  /** Callback when a user avatar is clicked */
+  onUserClick?: (user: IUser) => void;
 }
 
 /**
- * CollaborationBar component that provides the main collaboration status bar for collaborative notebooks.
- * It displays the overall collaboration status, active users, and provides access to collaboration features.
+ * A component that displays the collaboration status bar
  */
 export const CollaborationBar: React.FC<ICollaborationBarProps> = ({
-  notebookPanel,
-  collaborationService,
-  presenceService,
-  lockService,
-  historyService,
-  permissionsService,
-  commentService,
-  translator = nullTranslator
+  awareness,
+  translator = nullTranslator,
+  connectionStatus = 'connected',
+  onHistoryClick,
+  onPermissionsClick,
+  onCommentsClick,
+  onUserClick
 }) => {
   const trans = translator.load('notebook');
-  const [isConnected, setIsConnected] = useState(collaborationService.isConnected);
-  const [users, setUsers] = useState<ICollaborator[]>(presenceService.users);
-  const [lockedCells, setLockedCells] = useState<ILockedCell[]>(lockService.lockedCells);
-  const [comments, setComments] = useState<IComment[]>(commentService.comments);
+  const [activityFeedVisible, setActivityFeedVisible] = useState(false);
+  const [activityItems, setActivityItems] = useState<IActivityItem[]>([]);
   const [notifications, setNotifications] = useState<INotification[]>([]);
-  const [showActivityFeed, setShowActivityFeed] = useState(false);
-  const [showNotifications, setShowNotifications] = useState(false);
-  const [showHistoryViewer, setShowHistoryViewer] = useState(false);
-  const [showPermissionsDialog, setShowPermissionsDialog] = useState(false);
-  const [barWidth, setBarWidth] = useState('100%');
-  const barRef = useRef<HTMLDivElement>(null);
-
-  // Calculate unread notifications count
-  const unreadNotificationsCount = notifications.filter(n => !n.read).length;
-
-  // Update connection status when it changes
+  const activityFeedRef = useRef<HTMLDivElement>(null);
+  const activityButtonRef = useRef<HTMLButtonElement>(null);
+  
+  // Toggle activity feed visibility
+  const toggleActivityFeed = useCallback(() => {
+    setActivityFeedVisible(!activityFeedVisible);
+  }, [activityFeedVisible]);
+  
+  // Close activity feed when clicking outside
   useEffect(() => {
-    const onConnectionStatusChanged = (sender: ICollaborationService, connected: boolean) => {
-      setIsConnected(connected);
-      // Add notification for connection status change
-      addNotification({
-        id: `connection-${Date.now()}`,
-        type: connected ? 'success' : 'error',
-        message: connected ? trans.__('Connected to collaboration server') : trans.__('Disconnected from collaboration server'),
-        timestamp: Date.now(),
-        read: false
-      });
-    };
-
-    collaborationService.connectionStatusChanged.connect(onConnectionStatusChanged);
-    return () => {
-      collaborationService.connectionStatusChanged.disconnect(onConnectionStatusChanged);
-    };
-  }, [collaborationService, trans]);
-
-  // Update users when they change
-  useEffect(() => {
-    const onUsersChanged = (sender: IPresenceService, updatedUsers: ICollaborator[]) => {
-      setUsers(updatedUsers);
-      
-      // Check for new users and add notifications
-      const currentUserIds = users.map(u => u.id);
-      const newUsers = updatedUsers.filter(u => !currentUserIds.includes(u.id));
-      
-      newUsers.forEach(user => {
-        addNotification({
-          id: `user-joined-${user.id}-${Date.now()}`,
-          type: 'info',
-          message: trans.__('%1 joined the collaboration', user.name),
-          timestamp: Date.now(),
-          read: false
-        });
-      });
-    };
-
-    presenceService.usersChanged.connect(onUsersChanged);
-    return () => {
-      presenceService.usersChanged.disconnect(onUsersChanged);
-    };
-  }, [presenceService, users, trans]);
-
-  // Update locked cells when they change
-  useEffect(() => {
-    const onLockedCellsChanged = (sender: ILockService, updatedLockedCells: ILockedCell[]) => {
-      setLockedCells(updatedLockedCells);
-      
-      // Check for newly locked cells and add notifications
-      const currentLockedCellIds = lockedCells.map(lc => lc.cellId);
-      const newLockedCells = updatedLockedCells.filter(lc => !currentLockedCellIds.includes(lc.cellId));
-      
-      newLockedCells.forEach(lockedCell => {
-        const user = users.find(u => u.id === lockedCell.userId);
-        if (user) {
-          addNotification({
-            id: `cell-locked-${lockedCell.cellId}-${Date.now()}`,
-            type: 'info',
-            message: trans.__('%1 locked a cell', user.name),
-            timestamp: Date.now(),
-            read: false
-          });
-        }
-      });
-    };
-
-    lockService.lockedCellsChanged.connect(onLockedCellsChanged);
-    return () => {
-      lockService.lockedCellsChanged.disconnect(onLockedCellsChanged);
-    };
-  }, [lockService, lockedCells, users, trans]);
-
-  // Update comments when they change
-  useEffect(() => {
-    const onCommentsChanged = (sender: ICommentService, updatedComments: IComment[]) => {
-      setComments(updatedComments);
-      
-      // Check for new comments and add notifications
-      const currentCommentIds = comments.map(c => c.id);
-      const newComments = updatedComments.filter(c => !currentCommentIds.includes(c.id));
-      
-      newComments.forEach(comment => {
-        const user = users.find(u => u.id === comment.userId);
-        if (user) {
-          addNotification({
-            id: `comment-added-${comment.id}-${Date.now()}`,
-            type: 'info',
-            message: trans.__('%1 added a comment', user.name),
-            timestamp: Date.now(),
-            read: false,
-            action: () => {
-              // TODO: Scroll to the comment
-            }
-          });
-        }
-      });
-    };
-
-    commentService.commentsChanged.connect(onCommentsChanged);
-    return () => {
-      commentService.commentsChanged.disconnect(onCommentsChanged);
-    };
-  }, [commentService, comments, users, trans]);
-
-  // Handle window resize to update bar width
-  useEffect(() => {
-    const updateBarWidth = () => {
-      if (barRef.current) {
-        const notebookContainer = document.querySelector('.jp-NotebookPanel-notebook');
-        if (notebookContainer) {
-          setBarWidth(`${notebookContainer.clientWidth}px`);
-        }
+    const handleClickOutside = (event: MouseEvent) => {
+      if (
+        activityFeedRef.current && 
+        !activityFeedRef.current.contains(event.target as Node) &&
+        activityButtonRef.current &&
+        !activityButtonRef.current.contains(event.target as Node)
+      ) {
+        setActivityFeedVisible(false);
       }
     };
-
-    // Initial update
-    updateBarWidth();
-
-    // Update on window resize
-    window.addEventListener('resize', updateBarWidth);
+    
+    if (activityFeedVisible) {
+      document.addEventListener('mousedown', handleClickOutside);
+    } else {
+      document.removeEventListener('mousedown', handleClickOutside);
+    }
+    
     return () => {
-      window.removeEventListener('resize', updateBarWidth);
+      document.removeEventListener('mousedown', handleClickOutside);
     };
-  }, []);
-
+  }, [activityFeedVisible]);
+  
+  // Track user presence changes and update activity feed
+  useEffect(() => {
+    const handleAwarenessChange = ({ added, updated, removed }: any) => {
+      const newActivityItems: IActivityItem[] = [];
+      
+      // Handle added users (joined)
+      added.forEach((clientId: number) => {
+        const state = awareness.getStates().get(clientId);
+        if (state && state.user) {
+          newActivityItems.push({
+            id: `join-${clientId}-${Date.now()}`,
+            user: {
+              id: clientId,
+              state: state.user
+            },
+            type: 'join',
+            timestamp: Date.now()
+          });
+          
+          // Show notification for new user
+          addNotification({
+            id: `join-notification-${clientId}-${Date.now()}`,
+            title: trans.__('User joined'),
+            content: trans.__('%1 joined the collaboration', state.user.name),
+            type: 'info',
+            timestamp: Date.now(),
+            timeout: 5000
+          });
+        }
+      });
+      
+      // Handle removed users (left)
+      removed.forEach((clientId: number) => {
+        // We need to find the user in our activity items since they're already removed from awareness
+        const existingItems = activityItems.filter(item => item.user.id === clientId);
+        if (existingItems.length > 0) {
+          const user = existingItems[0].user;
+          newActivityItems.push({
+            id: `leave-${clientId}-${Date.now()}`,
+            user,
+            type: 'leave',
+            timestamp: Date.now()
+          });
+          
+          // Show notification for user leaving
+          addNotification({
+            id: `leave-notification-${clientId}-${Date.now()}`,
+            title: trans.__('User left'),
+            content: trans.__('%1 left the collaboration', user.state.name),
+            type: 'info',
+            timestamp: Date.now(),
+            timeout: 5000
+          });
+        }
+      });
+      
+      if (newActivityItems.length > 0) {
+        setActivityItems(prevItems => {
+          // Keep only the last 50 items to prevent the list from growing too large
+          const updatedItems = [...newActivityItems, ...prevItems];
+          return updatedItems.slice(0, 50);
+        });
+      }
+    };
+    
+    // Subscribe to awareness changes
+    awareness.on('change', handleAwarenessChange);
+    
+    // Listen for custom activity events from other components
+    const handleCustomActivity = (event: CustomEvent) => {
+      const { type, details, timestamp } = event.detail;
+      
+      // Get the local user from awareness
+      const localState = awareness.getLocalState();
+      if (localState && localState.user) {
+        const user: IUser = {
+          id: awareness.clientID,
+          state: localState.user
+        };
+        
+        const activityItem: IActivityItem = {
+          id: `activity-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+          user,
+          type,
+          timestamp: timestamp || Date.now(),
+          details
+        };
+        
+        setActivityItems(prevItems => {
+          const updatedItems = [activityItem, ...prevItems];
+          return updatedItems.slice(0, 50);
+        });
+      }
+    };
+    
+    // Listen for custom notification events from other components
+    const handleCustomNotification = (event: CustomEvent) => {
+      addNotification(event.detail);
+    };
+    
+    // Listen for connection status updates from other components
+    const handleConnectionStatus = (event: CustomEvent) => {
+      const { status } = event.detail;
+      // This would be handled by a parent component that passes connectionStatus as a prop
+      // But we're adding the event listener for completeness
+    };
+    
+    document.addEventListener('jp-collaboration-activity', handleCustomActivity as EventListener);
+    document.addEventListener('jp-collaboration-notification', handleCustomNotification as EventListener);
+    document.addEventListener('jp-collaboration-status', handleConnectionStatus as EventListener);
+    
+    return () => {
+      awareness.off('change', handleAwarenessChange);
+      document.removeEventListener('jp-collaboration-activity', handleCustomActivity as EventListener);
+      document.removeEventListener('jp-collaboration-notification', handleCustomNotification as EventListener);
+      document.removeEventListener('jp-collaboration-status', handleConnectionStatus as EventListener);
+    };
+  }, [awareness, activityItems, trans, addNotification]);
+  
   // Add a notification
   const addNotification = useCallback((notification: INotification) => {
-    setNotifications(prev => [notification, ...prev]);
+    setNotifications(prevNotifications => [
+      notification,
+      ...prevNotifications
+    ]);
+    
+    // Set up auto-dismiss if timeout is greater than 0
+    if (notification.timeout > 0) {
+      setTimeout(() => {
+        dismissNotification(notification.id);
+      }, notification.timeout);
+    }
   }, []);
-
-  // Mark a notification as read
-  const markNotificationAsRead = useCallback((id: string) => {
-    setNotifications(prev => 
-      prev.map(n => n.id === id ? { ...n, read: true } : n)
+  
+  // Dismiss a notification
+  const dismissNotification = useCallback((id: string) => {
+    setNotifications(prevNotifications => 
+      prevNotifications.filter(notification => notification.id !== id)
     );
   }, []);
-
-  // Mark all notifications as read
-  const markAllNotificationsAsRead = useCallback(() => {
-    setNotifications(prev => 
-      prev.map(n => ({ ...n, read: true }))
-    );
-  }, []);
-
-  // Handle connection toggle
-  const handleConnectionToggle = async () => {
-    if (isConnected) {
-      await collaborationService.disconnect();
-    } else {
-      await collaborationService.connect();
+  
+  // Format timestamp
+  const formatTime = (timestamp: number): string => {
+    const date = new Date(timestamp);
+    return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  };
+  
+  // Render activity item content
+  const renderActivityContent = (item: IActivityItem): string => {
+    const { type, user, details } = item;
+    const userName = user.state.name;
+    
+    switch (type) {
+      case 'join':
+        return trans.__('%1 joined the collaboration', userName);
+      case 'leave':
+        return trans.__('%1 left the collaboration', userName);
+      case 'edit':
+        return details?.cellId
+          ? trans.__('%1 edited cell %2', userName, details.cellId)
+          : trans.__('%1 made an edit', userName);
+      case 'comment':
+        return trans.__('%1 added a comment', userName);
+      case 'lock':
+        return details?.cellId
+          ? trans.__('%1 locked cell %2', userName, details.cellId)
+          : trans.__('%1 locked a cell', userName);
+      case 'unlock':
+        return details?.cellId
+          ? trans.__('%1 unlocked cell %2', userName, details.cellId)
+          : trans.__('%1 unlocked a cell', userName);
+      case 'permission':
+        return details?.permission
+          ? trans.__('%1 changed permissions to %2', userName, details.permission)
+          : trans.__('%1 changed permissions', userName);
+      default:
+        return trans.__('%1 performed an action', userName);
     }
   };
-
-  // Handle history viewer toggle
-  const handleHistoryViewerToggle = () => {
-    setShowHistoryViewer(!showHistoryViewer);
-  };
-
-  // Handle permissions dialog toggle
-  const handlePermissionsDialogToggle = () => {
-    setShowPermissionsDialog(!showPermissionsDialog);
-  };
-
-  // Handle activity feed toggle
-  const handleActivityFeedToggle = () => {
-    setShowActivityFeed(!showActivityFeed);
-  };
-
-  // Handle notifications toggle
-  const handleNotificationsToggle = () => {
-    setShowNotifications(!showNotifications);
-    if (!showNotifications) {
-      markAllNotificationsAsRead();
+  
+  // Get status text based on connection status
+  const getStatusText = (): string => {
+    switch (connectionStatus) {
+      case 'connected':
+        return trans.__('Connected');
+      case 'connecting':
+        return trans.__('Connecting...');
+      case 'disconnected':
+        return trans.__('Disconnected');
+      default:
+        return trans.__('Unknown status');
     }
   };
-
-  // Render user avatars
-  const renderUserAvatars = () => {
-    return users.map(user => (
-      <div 
-        key={user.id} 
-        className="jp-CollaborationBar-userAvatar"
-        style={{ 
-          backgroundColor: user.color,
-          opacity: user.status === 'active' ? 1 : 0.5
-        }}
-        title={`${user.name} (${user.status})`}
-        aria-label={trans.__('%1 is %2', user.name, user.status)}
-      >
-        {user.avatarUrl ? (
-          <img src={user.avatarUrl} alt={user.name} />
-        ) : (
-          <span>{user.name.charAt(0).toUpperCase()}</span>
-        )}
-        <span className="jp-CollaborationBar-userStatus" 
-              aria-hidden="true"
-              data-status={user.status}></span>
-      </div>
-    ));
-  };
-
-  // Render activity feed
-  const renderActivityFeed = () => {
-    if (!showActivityFeed) return null;
-
-    // Combine and sort activities from different sources
-    const activities = [
-      // User activities
-      ...users.map(user => ({
-        id: `user-${user.id}`,
-        timestamp: user.lastActive,
-        content: trans.__('%1 is %2', user.name, user.status),
-        type: 'user'
-      })),
-      // Locked cell activities
-      ...lockedCells.map(lockedCell => {
-        const user = users.find(u => u.id === lockedCell.userId);
-        return {
-          id: `lock-${lockedCell.cellId}`,
-          timestamp: lockedCell.timestamp,
-          content: trans.__('%1 locked a cell', user?.name || 'Unknown user'),
-          type: 'lock'
-        };
-      }),
-      // Comment activities
-      ...comments.map(comment => {
-        const user = users.find(u => u.id === comment.userId);
-        return {
-          id: `comment-${comment.id}`,
-          timestamp: comment.timestamp,
-          content: trans.__('%1 commented: %2', user?.name || 'Unknown user', comment.text.substring(0, 30) + (comment.text.length > 30 ? '...' : '')),
-          type: 'comment'
-        };
-      })
-    ].sort((a, b) => b.timestamp - a.timestamp);
-
-    return (
-      <div className="jp-CollaborationBar-activityFeed" aria-label={trans.__('Activity Feed')}>
-        <div className="jp-CollaborationBar-activityFeedHeader">
-          <h3>{trans.__('Activity Feed')}</h3>
-          <button 
-            className="jp-CollaborationBar-closeButton"
-            onClick={handleActivityFeedToggle}
-            aria-label={trans.__('Close activity feed')}
-          >
-            ×
-          </button>
-        </div>
-        <div className="jp-CollaborationBar-activityFeedContent">
-          {activities.length > 0 ? (
-            <ul>
-              {activities.map(activity => (
-                <li key={activity.id} className={`jp-CollaborationBar-activity jp-CollaborationBar-activity-${activity.type}`}>
-                  <span className="jp-CollaborationBar-activityTime">
-                    {new Date(activity.timestamp).toLocaleTimeString()}
-                  </span>
-                  <span className="jp-CollaborationBar-activityContent">
-                    {activity.content}
-                  </span>
-                </li>
-              ))}
-            </ul>
-          ) : (
-            <p className="jp-CollaborationBar-noActivity">{trans.__('No recent activity')}</p>
-          )}
-        </div>
-      </div>
-    );
-  };
-
-  // Render notifications panel
-  const renderNotifications = () => {
-    if (!showNotifications) return null;
-
-    return (
-      <div className="jp-CollaborationBar-notifications" aria-label={trans.__('Notifications')}>
-        <div className="jp-CollaborationBar-notificationsHeader">
-          <h3>{trans.__('Notifications')}</h3>
-          <button 
-            className="jp-CollaborationBar-closeButton"
-            onClick={handleNotificationsToggle}
-            aria-label={trans.__('Close notifications')}
-          >
-            ×
-          </button>
-        </div>
-        <div className="jp-CollaborationBar-notificationsContent">
-          {notifications.length > 0 ? (
-            <ul>
-              {notifications.map(notification => (
-                <li 
-                  key={notification.id} 
-                  className={`jp-CollaborationBar-notification jp-CollaborationBar-notification-${notification.type} ${notification.read ? 'jp-CollaborationBar-notification-read' : ''}`}
-                  onClick={() => {
-                    markNotificationAsRead(notification.id);
-                    if (notification.action) {
-                      notification.action();
-                    }
-                  }}
-                >
-                  <span className="jp-CollaborationBar-notificationTime">
-                    {new Date(notification.timestamp).toLocaleTimeString()}
-                  </span>
-                  <span className="jp-CollaborationBar-notificationMessage">
-                    {notification.message}
-                  </span>
-                </li>
-              ))}
-            </ul>
-          ) : (
-            <p className="jp-CollaborationBar-noNotifications">{trans.__('No notifications')}</p>
-          )}
-        </div>
-      </div>
-    );
-  };
-
+  
+  // SVG icons
+  const historyIcon = (
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+      <path d="M13 3c-4.97 0-9 4.03-9 9H1l3.89 3.89.07.14L9 12H6c0-3.87 3.13-7 7-7s7 3.13 7 7-3.13 7-7 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42C8.27 19.99 10.51 21 13 21c4.97 0 9-4.03 9-9s-4.03-9-9-9zm-1 5v5l4.28 2.54.72-1.21-3.5-2.08V8H12z" />
+    </svg>
+  );
+  
+  const permissionsIcon = (
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+      <path d="M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4zm0 10.99h7c-.53 4.12-3.28 7.79-7 8.94V12H5V6.3l7-3.11v8.8z" />
+    </svg>
+  );
+  
+  const commentsIcon = (
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+      <path d="M21.99 4c0-1.1-.89-2-1.99-2H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h14l4 4-.01-18zM18 14H6v-2h12v2zm0-3H6V9h12v2zm0-3H6V6h12v2z" />
+    </svg>
+  );
+  
+  const activityIcon = (
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+      <path d="M13.5.67s.74 2.65.74 4.8c0 2.06-1.35 3.73-3.41 3.73-2.07 0-3.63-1.67-3.63-3.73l.03-.36C5.21 7.51 4 10.62 4 14c0 4.42 3.58 8 8 8s8-3.58 8-8C20 8.61 17.41 3.8 13.5.67zM11.71 19c-1.78 0-3.22-1.4-3.22-3.14 0-1.62 1.05-2.76 2.81-3.12 1.77-.36 3.6-1.21 4.62-2.58.39 1.29.59 2.65.59 4.04 0 2.65-2.15 4.8-4.8 4.8z" />
+    </svg>
+  );
+  
   return (
-    <div 
-      className={`jp-CollaborationBar ${isConnected ? 'jp-CollaborationBar-connected' : 'jp-CollaborationBar-disconnected'}`}
-      ref={barRef}
-      style={{ width: barWidth }}
-      role="region"
-      aria-label={trans.__('Collaboration Bar')}
-    >
-      {/* Connection status */}
-      <div className="jp-CollaborationBar-status">
-        <button 
-          className={`jp-CollaborationBar-connectionButton ${isConnected ? 'jp-CollaborationBar-connectionButton-connected' : 'jp-CollaborationBar-connectionButton-disconnected'}`}
-          onClick={handleConnectionToggle}
-          aria-label={isConnected ? trans.__('Connected to collaboration server') : trans.__('Disconnected from collaboration server')}
-          title={isConnected ? trans.__('Connected to collaboration server') : trans.__('Disconnected from collaboration server')}
-        >
-          <span className="jp-CollaborationBar-connectionIndicator"></span>
-          <span className="jp-CollaborationBar-connectionText">
-            {isConnected ? trans.__('Connected') : trans.__('Disconnected')}
-          </span>
-        </button>
+    <div className="jp-CollaborationBar" role="region" aria-label={trans.__('Collaboration tools')}>
+      <div className="jp-CollaborationBar-left">
+        <div className="jp-CollaborationBar-status" aria-live="polite">
+          <div 
+            className={`jp-CollaborationBar-statusIcon jp-CollaborationBar-statusIcon-${connectionStatus}`}
+            aria-hidden="true"
+          />
+          <span>{getStatusText()}</span>
+        </div>
+        
+        <UserPresence 
+          awareness={awareness}
+          translator={translator}
+          maxAvatars={5}
+          showStatus={true}
+          onUserClick={onUserClick}
+        />
       </div>
-
-      {/* User presence */}
-      <div className="jp-CollaborationBar-users" aria-label={trans.__('Active users')}>
-        {renderUserAvatars()}
-      </div>
-
-      {/* Collaboration tools */}
-      <div className="jp-CollaborationBar-tools">
-        {/* History button */}
+      
+      <div className="jp-CollaborationBar-right">
         <button 
-          className={`jp-CollaborationBar-toolButton jp-CollaborationBar-historyButton ${showHistoryViewer ? 'jp-CollaborationBar-toolButton-active' : ''}`}
-          onClick={handleHistoryViewerToggle}
-          aria-label={trans.__('Version History')}
-          title={trans.__('Version History')}
-          aria-pressed={showHistoryViewer}
-          disabled={!isConnected}
+          className="jp-CollaborationBar-button"
+          onClick={onHistoryClick}
+          aria-label={trans.__('Version history')}
+          title={trans.__('Version history')}
         >
-          <span className="jp-CollaborationBar-historyIcon"></span>
+          {historyIcon}
+          <span>{trans.__('History')}</span>
         </button>
-
-        {/* Permissions button */}
+        
         <button 
-          className={`jp-CollaborationBar-toolButton jp-CollaborationBar-permissionsButton ${showPermissionsDialog ? 'jp-CollaborationBar-toolButton-active' : ''}`}
-          onClick={handlePermissionsDialogToggle}
-          aria-label={trans.__('Permissions')}
-          title={trans.__('Permissions')}
-          aria-pressed={showPermissionsDialog}
-          disabled={!isConnected || permissionsService.currentUserPermission !== 'admin'}
+          className="jp-CollaborationBar-button"
+          onClick={onPermissionsClick}
+          aria-label={trans.__('Manage permissions')}
+          title={trans.__('Manage permissions')}
         >
-          <span className="jp-CollaborationBar-permissionsIcon"></span>
+          {permissionsIcon}
+          <span>{trans.__('Permissions')}</span>
         </button>
-
-        {/* Activity feed button */}
+        
         <button 
-          className={`jp-CollaborationBar-toolButton jp-CollaborationBar-activityButton ${showActivityFeed ? 'jp-CollaborationBar-toolButton-active' : ''}`}
-          onClick={handleActivityFeedToggle}
-          aria-label={trans.__('Activity Feed')}
-          title={trans.__('Activity Feed')}
-          aria-pressed={showActivityFeed}
-          disabled={!isConnected}
+          className="jp-CollaborationBar-button"
+          onClick={onCommentsClick}
+          aria-label={trans.__('View comments')}
+          title={trans.__('View comments')}
         >
-          <span className="jp-CollaborationBar-activityIcon"></span>
+          {commentsIcon}
+          <span>{trans.__('Comments')}</span>
         </button>
-
-        {/* Notifications button */}
+        
         <button 
-          className={`jp-CollaborationBar-toolButton jp-CollaborationBar-notificationsButton ${showNotifications ? 'jp-CollaborationBar-toolButton-active' : ''}`}
-          onClick={handleNotificationsToggle}
-          aria-label={trans.__('Notifications')}
-          title={trans.__('Notifications')}
-          aria-pressed={showNotifications}
+          className="jp-CollaborationBar-button"
+          onClick={toggleActivityFeed}
+          aria-label={trans.__('Activity feed')}
+          title={trans.__('Activity feed')}
+          aria-expanded={activityFeedVisible}
+          aria-controls="jp-CollaborationBar-activityFeed"
+          ref={activityButtonRef}
         >
-          <span className="jp-CollaborationBar-notificationsIcon"></span>
-          {unreadNotificationsCount > 0 && (
-            <span className="jp-CollaborationBar-notificationsBadge" aria-hidden="true">
-              {unreadNotificationsCount}
-            </span>
+          {activityIcon}
+          <span>{trans.__('Activity')}</span>
+        </button>
+        
+        <div 
+          id="jp-CollaborationBar-activityFeed"
+          className={`jp-CollaborationBar-activityFeed ${activityFeedVisible ? 'jp-CollaborationBar-activityFeed-visible' : ''}`}
+          ref={activityFeedRef}
+          role="log"
+          aria-label={trans.__('Collaboration activity feed')}
+        >
+          {activityItems.length === 0 ? (
+            <div className="jp-CollaborationBar-activityItem">
+              <div className="jp-CollaborationBar-activityContent">
+                {trans.__('No recent activity')}
+              </div>
+            </div>
+          ) : (
+            activityItems.map(item => (
+              <div key={item.id} className="jp-CollaborationBar-activityItem">
+                <div className="jp-CollaborationBar-activityHeader">
+                  <div 
+                    className="jp-CollaborationBar-activityAvatar"
+                    style={{ backgroundColor: item.user.state.color }}
+                  >
+                    {item.user.state.name.substring(0, 2).toUpperCase()}
+                  </div>
+                  <div className="jp-CollaborationBar-activityUser">
+                    {item.user.state.name}
+                  </div>
+                  <div className="jp-CollaborationBar-activityTime">
+                    {formatTime(item.timestamp)}
+                  </div>
+                </div>
+                <div className="jp-CollaborationBar-activityContent">
+                  {renderActivityContent(item)}
+                </div>
+              </div>
+            ))
           )}
-        </button>
+        </div>
       </div>
-
-      {/* Render activity feed if visible */}
-      {renderActivityFeed()}
-
-      {/* Render notifications if visible */}
-      {renderNotifications()}
-
-      {/* Render history viewer if visible */}
-      {showHistoryViewer && (
-        <div className="jp-CollaborationBar-historyViewer">
-          {/* This would be replaced with the actual HistoryViewer component */}
-          <div className="jp-CollaborationBar-historyViewerHeader">
-            <h3>{trans.__('Version History')}</h3>
+      
+      {/* Notifications */}
+      {notifications.map(notification => (
+        <div 
+          key={notification.id} 
+          className="jp-CollaborationBar-notification"
+          role="alert"
+        >
+          <div className="jp-CollaborationBar-notificationHeader">
+            <div className="jp-CollaborationBar-notificationTitle">
+              {notification.title}
+            </div>
             <button 
-              className="jp-CollaborationBar-closeButton"
-              onClick={handleHistoryViewerToggle}
-              aria-label={trans.__('Close version history')}
+              className="jp-CollaborationBar-notificationClose"
+              onClick={() => dismissNotification(notification.id)}
+              aria-label={trans.__('Dismiss notification')}
             >
               ×
             </button>
           </div>
-          <div className="jp-CollaborationBar-historyViewerContent">
-            <p>{trans.__('Version history component will be rendered here')}</p>
+          <div className="jp-CollaborationBar-notificationContent">
+            {notification.content}
           </div>
         </div>
-      )}
-
-      {/* Render permissions dialog if visible */}
-      {showPermissionsDialog && (
-        <div className="jp-CollaborationBar-permissionsDialog">
-          {/* This would be replaced with the actual PermissionsDialog component */}
-          <div className="jp-CollaborationBar-permissionsDialogHeader">
-            <h3>{trans.__('Permissions')}</h3>
-            <button 
-              className="jp-CollaborationBar-closeButton"
-              onClick={handlePermissionsDialogToggle}
-              aria-label={trans.__('Close permissions dialog')}
-            >
-              ×
-            </button>
-          </div>
-          <div className="jp-CollaborationBar-permissionsDialogContent">
-            <p>{trans.__('Permissions dialog component will be rendered here')}</p>
-          </div>
-        </div>
-      )}
+      ))}
     </div>
   );
 };
 
 /**
- * A namespace for CollaborationBarComponent statics.
+ * A namespace for CollaborationBar statics.
  */
-export namespace CollaborationBarComponent {
+export namespace CollaborationBar {
   /**
-   * Create a new CollaborationBarComponent.
-   *
-   * @param options - The options for creating the component.
-   * @returns A new CollaborationBarComponent widget.
+   * Create a new CollaborationBar component
    */
-  export const create = (options: {
-    notebookPanel: NotebookPanel;
-    collaborationService: ICollaborationService;
-    presenceService: IPresenceService;
-    lockService: ILockService;
-    historyService: IHistoryService;
-    permissionsService: IPermissionsService;
-    commentService: ICommentService;
-    translator?: ITranslator;
-  }): ReactWidget => {
-    const widget = ReactWidget.create(
-      <CollaborationBar
-        notebookPanel={options.notebookPanel}
-        collaborationService={options.collaborationService}
-        presenceService={options.presenceService}
-        lockService={options.lockService}
-        historyService={options.historyService}
-        permissionsService={options.permissionsService}
-        commentService={options.commentService}
-        translator={options.translator}
-      />
-    );
-    widget.addClass('jp-CollaborationBarWidget');
+  export function create(options: ICollaborationBarProps): JSX.Element {
+    return <CollaborationBar {...options} />;
+  }
+
+  /**
+   * Create a ReactWidget containing the CollaborationBar component
+   * 
+   * @param options - The options for the CollaborationBar component
+   * @returns A ReactWidget containing the CollaborationBar component
+   */
+  export function createWidget(options: ICollaborationBarProps): ReactWidget {
+    // Add the styles to the document
+    const styleElement = document.createElement('style');
+    styleElement.textContent = styles;
+    document.head.appendChild(styleElement);
+
+    // Create the widget
+    const widget = ReactWidget.create(<CollaborationBar {...options} />);
+    widget.addClass('jp-CollaborationBar-widget');
     return widget;
-  };
+  }
+
+  /**
+   * Add an activity item to the activity feed
+   * 
+   * @param awareness - The Yjs awareness instance
+   * @param type - The type of activity
+   * @param details - Additional details about the activity
+   */
+  export function addActivity(
+    awareness: Awareness,
+    type: IActivityItem['type'],
+    details?: IActivityItem['details']
+  ): void {
+    // This is a helper method that can be called from other components
+    // It creates a custom event that the CollaborationBar component can listen to
+    const event = new CustomEvent('jp-collaboration-activity', {
+      detail: {
+        type,
+        details,
+        timestamp: Date.now()
+      }
+    });
+    document.dispatchEvent(event);
+  }
+
+  /**
+   * Show a notification in the CollaborationBar
+   * 
+   * @param title - The title of the notification
+   * @param content - The content of the notification
+   * @param type - The type of notification
+   * @param timeout - Auto-dismiss timeout in milliseconds (0 for no auto-dismiss)
+   */
+  export function showNotification(
+    title: string,
+    content: string,
+    type: INotification['type'] = 'info',
+    timeout: number = 5000
+  ): void {
+    // This is a helper method that can be called from other components
+    // It creates a custom event that the CollaborationBar component can listen to
+    const event = new CustomEvent('jp-collaboration-notification', {
+      detail: {
+        id: `notification-${Date.now()}`,
+        title,
+        content,
+        type,
+        timestamp: Date.now(),
+        timeout
+      }
+    });
+    document.dispatchEvent(event);
+  }
+
+  /**
+   * Update the connection status in the CollaborationBar
+   * 
+   * @param status - The new connection status
+   */
+  export function updateConnectionStatus(status: ConnectionStatus): void {
+    // This is a helper method that can be called from other components
+    // It creates a custom event that the CollaborationBar component can listen to
+    const event = new CustomEvent('jp-collaboration-status', {
+      detail: { status }
+    });
+    document.dispatchEvent(event);
+  }
 }
