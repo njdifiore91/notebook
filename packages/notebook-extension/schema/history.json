@@ -1,0 +1,48 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema",
+  "title": "Version History",
+  "description": "Version history and change tracking settings for collaborative notebooks.",
+  "jupyter.lab.setting-icon": "notebook-ui-components:jupyter",
+  "jupyter.lab.setting-icon-label": "Version History",
+  "properties": {
+    "enabled": {
+      "type": "boolean",
+      "title": "Enable Version History",
+      "description": "Enable or disable version history tracking for collaborative notebooks",
+      "default": true
+    },
+    "maxVersions": {
+      "type": "number",
+      "title": "Maximum Versions",
+      "description": "Maximum number of versions to retain in history",
+      "default": 100
+    },
+    "retentionDays": {
+      "type": "number",
+      "title": "Retention Period (Days)",
+      "description": "Number of days to retain version history",
+      "default": 30
+    },
+    "diffVisualization": {
+      "type": "string",
+      "title": "Diff Visualization Mode",
+      "description": "How to visualize differences between versions",
+      "enum": ["inline", "side-by-side", "unified"],
+      "default": "inline"
+    },
+    "autoSaveInterval": {
+      "type": "number",
+      "title": "Auto-save Interval (seconds)",
+      "description": "Interval in seconds between automatic version snapshots (0 to disable)",
+      "default": 300
+    },
+    "trackOutputs": {
+      "type": "boolean",
+      "title": "Track Cell Outputs",
+      "description": "Whether to include cell outputs in version history",
+      "default": false
+    }
+  },
+  "additionalProperties": false,
+  "type": "object"
+}
