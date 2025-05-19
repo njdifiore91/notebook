@@ -45,6 +45,24 @@ export namespace INotebookPathOpener {
      * See https://developer.mozilla.org/en-US/docs/Web/API/Window/open for more details.
      */
     features?: string;
+
+    /**
+     * ID of an existing collaboration session to join.
+     * If provided, the notebook will be opened in collaborative mode and join the specified session.
+     */
+    collaborationSessionId?: string;
+
+    /**
+     * Whether to start a new collaboration session for this notebook.
+     * If true, a new collaborative session will be created when the notebook is opened.
+     */
+    startCollaboration?: boolean;
+
+    /**
+     * The permission level to request when joining a collaboration session.
+     * This determines what actions the user can perform in the collaborative session.
+     */
+    collaborationPermission?: CollaborationPermission;
   }
 }
 
