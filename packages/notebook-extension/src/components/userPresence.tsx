@@ -1,701 +1,398 @@
-import React, { useEffect, useState, useCallback, useRef } from 'react';
+import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
+import { ReactWidget } from '@jupyterlab/apputils';
 import { ITranslator, nullTranslator } from '@jupyterlab/translation';
 import { Awareness } from 'y-protocols/awareness';
-import { ReactWidget } from '@jupyterlab/apputils';
+import { IPresenceService } from '../tokens';
 
 /**
- * CSS styles for the UserPresence component
+ * Interface for user state in the awareness protocol
+ * 
+ * This interface defines the structure of user state data that is shared
+ * through the Yjs awareness protocol. Each connected client maintains its own
+ * state object with this structure, which is then synchronized with all other
+ * clients in real-time.
+ * 
+ * The awareness protocol is a simple CRDT (Conflict-free Replicated Data Type)
+ * that manages user status and propagates awareness information like cursor
+ * location, username, and other metadata.
+ * 
+ * @see Technical Specification Section 3.2.2 - Frontend Frameworks
  */
-const styles = `
-.jp-UserPresence {
-  display: flex;
-  flex-direction: column;
-  padding: var(--jp-collab-spacing-sm);
-  font-family: var(--jp-ui-font-family);
-}
-
-.jp-UserPresence-avatars {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  margin-bottom: var(--jp-collab-spacing-xs);
-}
-
-.jp-UserPresence-avatar {
-  width: 32px;
-  height: 32px;
-  border-radius: 50%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  margin-right: calc(-1 * var(--jp-collab-spacing-xs));
-  border: 2px solid var(--jp-layout-color1);
-  color: var(--jp-ui-inverse-font-color0);
-  font-weight: 600;
-  font-size: 13px;
-  position: relative;
-  cursor: pointer;
-  transition: transform 0.2s ease;
-  background-size: cover;
-  background-position: center;
-}
-
-.jp-UserPresence-avatar:hover {
-  transform: translateY(-2px);
-  z-index: 10 !important;
-}
-
-.jp-UserPresence-avatar:focus {
-  outline: 2px solid var(--jp-brand-color1);
-  outline-offset: 2px;
-}
-
-.jp-UserPresence-statusIndicator {
-  position: absolute;
-  bottom: -2px;
-  right: -2px;
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  border: 2px solid var(--jp-layout-color1);
-}
-
-.jp-UserPresence-statusIndicator-active {
-  background-color: var(--jp-success-color0);
-}
-
-.jp-UserPresence-statusIndicator-idle {
-  background-color: var(--jp-warn-color0);
-}
-
-.jp-UserPresence-statusIndicator-away {
-  background-color: var(--jp-error-color0);
-}
-
-.jp-UserPresence-more {
-  width: 32px;
-  height: 32px;
-  border-radius: 50%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background-color: var(--jp-layout-color3);
-  color: var(--jp-ui-font-color1);
-  font-weight: 600;
-  font-size: 13px;
-  cursor: pointer;
-  border: 2px solid var(--jp-layout-color1);
-  transition: background-color 0.2s ease;
-}
-
-.jp-UserPresence-more:hover {
-  background-color: var(--jp-layout-color4);
-}
-
-.jp-UserPresence-more:focus {
-  outline: 2px solid var(--jp-brand-color1);
-  outline-offset: 2px;
-}
-
-.jp-UserPresence-collapse {
-  width: 32px;
-  height: 32px;
-  border-radius: 50%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background-color: var(--jp-layout-color3);
-  color: var(--jp-ui-font-color1);
-  font-weight: 600;
-  font-size: 16px;
-  cursor: pointer;
-  margin-left: var(--jp-collab-spacing-sm);
-  border: 2px solid var(--jp-layout-color1);
-  transition: background-color 0.2s ease;
-}
-
-.jp-UserPresence-collapse:hover {
-  background-color: var(--jp-layout-color4);
-}
-
-.jp-UserPresence-collapse:focus {
-  outline: 2px solid var(--jp-brand-color1);
-  outline-offset: 2px;
-}
-
-.jp-UserPresence-count {
-  font-size: 11px;
-  color: var(--jp-ui-font-color2);
-  margin-top: var(--jp-collab-spacing-xs);
-}
-
-.jp-UserPresence-expanded .jp-UserPresence-avatars {
-  flex-wrap: wrap;
-  max-width: 300px;
-}
-
-.jp-UserPresence-expanded .jp-UserPresence-avatar {
-  margin: var(--jp-collab-spacing-xs);
-}
-
-/* Responsive styles */
-@media (max-width: 524px) {
-  .jp-UserPresence-avatars {
-    max-width: 100px;
-  }
-  
-  .jp-UserPresence-avatar {
-    width: 28px;
-    height: 28px;
-    font-size: 11px;
-  }
-  
-  .jp-UserPresence-more,
-  .jp-UserPresence-collapse {
-    width: 28px;
-    height: 28px;
-  }
-  
-  .jp-UserPresence-count {
-    display: none;
-  }
-}
-
-/* Respect reduced motion preferences */
-@media (prefers-reduced-motion: reduce) {
-  .jp-UserPresence-avatar {
-    transition: none;
-  }
-}
-`;
-
-/**
- * Interface for user awareness state
- */
-export interface IUserAwarenessState {
-  /** The user's name */
+interface IUserState {
+  /** User's name or identifier */
   name: string;
-  /** The user's color */
+  /** User's color for visual identification */
   color: string;
-  /** The user's avatar URL (optional) */
+  /** User's avatar URL or placeholder */
   avatar?: string;
-  /** The user's status (active, idle, etc.) */
-  status?: 'active' | 'idle' | 'away';
-  /** The user's current cell ID (if any) */
-  currentCellId?: string;
-  /** The user's cursor position */
+  /** User's current status (active, idle, etc.) */
+  status?: 'active' | 'idle' | 'viewing' | 'editing';
+  /** User's current cursor position */
   cursor?: {
-    /** The cell ID where the cursor is located */
+    /** Cell ID where cursor is located */
     cellId: string;
-    /** The position within the cell */
+    /** Position within the cell */
     position: number;
   };
-  /** The user's text selection (if any) */
+  /** User's current selection range */
   selection?: {
-    /** The cell ID where the selection is located */
+    /** Cell ID where selection starts */
     cellId: string;
-    /** The start position of the selection */
+    /** Start position of selection */
     start: number;
-    /** The end position of the selection */
+    /** End position of selection */
     end: number;
   };
-}
-
-/**
- * Interface for a user in the presence system
- */
-export interface IUser {
-  /** The user's client ID */
-  id: number;
-  /** The user's awareness state */
-  state: IUserAwarenessState;
+  /** Timestamp of last activity */
+  lastActive?: number;
 }
 
 /**
  * Props for the UserPresence component
  */
-export interface IUserPresenceProps {
+interface IUserPresenceProps {
   /** The Yjs awareness instance */
   awareness: Awareness;
-  /** The translator instance */
+  /** Optional presence service for additional functionality */
+  presenceService?: IPresenceService;
+  /** Optional translator for i18n */
   translator?: ITranslator;
-  /** Maximum number of avatars to show before collapsing */
+  /** Optional maximum number of avatars to display before showing a count */
   maxAvatars?: number;
-  /** Whether to show user status indicators */
-  showStatus?: boolean;
-  /** Callback when a user avatar is clicked */
-  onUserClick?: (user: IUser) => void;
+  /** Optional flag to force collapsed view */
+  forceCollapsed?: boolean;
 }
 
 /**
- * Props for the UserAvatar component
+ * A React component that displays user presence information in a collaborative notebook.
+ * Shows avatars and indicators for users currently viewing or editing the notebook.
+ * 
+ * This component integrates with the Yjs awareness protocol to track and display real-time
+ * user information, including:
+ * - User avatars with status indicators
+ * - Current editing/viewing status
+ * - Cursor positions and selections
+ * - Last active timestamps
+ * 
+ * The component is responsive and adapts to different viewport sizes:
+ * - Mobile (<524px): Collapsed view with only current user avatar and count
+ * - Tablet (524-800px): Limited number of avatars with overflow indicator
+ * - Desktop (>800px): Full presence bar with all active users visible
+ * 
+ * Accessibility features include:
+ * - ARIA attributes for screen readers
+ * - Keyboard navigation support
+ * - High-contrast visual indicators beyond just color
+ * - Reduced motion support via CSS
+ * 
+ * @see Technical Specification Section 7.1.1.1 - Collaboration Services Architecture
+ * @see Technical Specification Section 7.1.1.2 - Collaboration-Specific UI Components
  */
-interface IUserAvatarProps {
-  /** The user object */
-  user: IUser;
-  /** The translator instance */
-  translator: ITranslator;
-  /** Whether to show the user's status */
-  showStatus?: boolean;
-  /** Callback when the avatar is clicked */
-  onClick?: (user: IUser) => void;
-  /** The z-index for stacking avatars */
-  zIndex?: number;
-}
-
-/**
- * A component that displays a user's avatar
- */
-const UserAvatar: React.FC<IUserAvatarProps> = ({
-  user,
-  translator,
-  showStatus = true,
-  onClick,
-  zIndex = 1
-}) => {
+export const UserPresence = (props: IUserPresenceProps): JSX.Element => {
+  const { 
+    awareness, 
+    presenceService,
+    translator = nullTranslator,
+    maxAvatars = 5,
+    forceCollapsed = false
+  } = props;
   const trans = translator.load('notebook');
-  const { state } = user;
-  const { name, color, avatar, status } = state;
   
-  // Generate initials from name
-  const initials = name
-    .split(' ')
-    .map(part => part[0])
-    .join('')
-    .substring(0, 2)
-    .toUpperCase();
+  // State to track all users' awareness information
+  const [users, setUsers] = useState<Map<number, IUserState>>(new Map());
+  // State to track if the component is in a collapsed state (for responsive design)
+  const [isCollapsed, setIsCollapsed] = useState(false);
 
-  // Status indicator classes
-  const statusClass = status ? `jp-UserPresence-status-${status}` : '';
-  
-  // Handle click event
-  const handleClick = useCallback(() => {
-    if (onClick) {
-      onClick(user);
-    }
-  }, [onClick, user]);
-
-  // Determine title text based on status
-  let titleText = name;
-  if (status === 'active' && state.currentCellId) {
-    titleText = trans.__('%1 (active in cell %2)', name, state.currentCellId);
-  } else if (status === 'idle') {
-    titleText = trans.__('%1 (idle)', name);
-  } else if (status === 'away') {
-    titleText = trans.__('%1 (away)', name);
-  }
-
-  return (
-    <div 
-      className={`jp-UserPresence-avatar ${statusClass}`}
-      style={{
-        backgroundColor: color,
-        zIndex,
-        backgroundImage: avatar ? `url(${avatar})` : undefined
-      }}
-      onClick={handleClick}
-      title={titleText}
-      role="button"
-      aria-label={titleText}
-      tabIndex={0}
-    >
-      {!avatar && initials}
-      {showStatus && status && (
-        <div 
-          className={`jp-UserPresence-statusIndicator jp-UserPresence-statusIndicator-${status}`}
-          aria-hidden="true"
-        />
-      )}
-    </div>
-  );
-};
-
-/**
- * A component that displays user presence information
- */
-export const UserPresence: React.FC<IUserPresenceProps> = ({
-  awareness,
-  translator = nullTranslator,
-  maxAvatars = 5,
-  showStatus = true,
-  onUserClick
-}) => {
-  const trans = translator.load('notebook');
-  const [users, setUsers] = useState<IUser[]>([]);
-  const [expanded, setExpanded] = useState(false);
-  const containerRef = useRef<HTMLDivElement>(null);
-  
   // Update users when awareness changes
-  useEffect(() => {
-    const updateUsers = () => {
-      const states = awareness.getStates();
-      const userList: IUser[] = [];
-      
-      // Convert awareness states to user objects
-      states.forEach((state: any, id: number) => {
-        if (state.user) {
-          userList.push({
-            id,
-            state: state.user as IUserAwarenessState
-          });
-        }
-      });
-      
-      // Sort users by name
-      userList.sort((a, b) => a.state.name.localeCompare(b.state.name));
-      
-      setUsers(userList);
-    };
-
-    // Initial update
-    updateUsers();
-
-    // Subscribe to awareness changes
-    awareness.on('change', updateUsers);
-    
-    return () => {
-      // Unsubscribe when component unmounts
-      awareness.off('change', updateUsers);
-    };
+  const handleAwarenessUpdate = useCallback(() => {
+    // Get all user states from awareness
+    const states = awareness.getStates();
+    setUsers(new Map(states));
   }, [awareness]);
 
-  // Toggle expanded state
-  const toggleExpanded = useCallback(() => {
-    setExpanded(!expanded);
-  }, [expanded]);
+  // Set up awareness change listener
+  useEffect(() => {
+    // Initial update
+    handleAwarenessUpdate();
+    
+    // Listen for awareness changes
+    awareness.on('change', handleAwarenessUpdate);
+    
+    // Clean up listener on unmount
+    return () => {
+      awareness.off('change', handleAwarenessUpdate);
+    };
+  }, [awareness, handleAwarenessUpdate]);
 
-  // Handle user click
-  const handleUserClick = useCallback((user: IUser) => {
-    if (onUserClick) {
-      onUserClick(user);
+  // Set up responsive behavior
+  useEffect(() => {
+    const handleResize = () => {
+      // Collapse on mobile viewports (<524px)
+      setIsCollapsed(window.innerWidth < 524 || forceCollapsed);
+    };
+    
+    // Initial check
+    handleResize();
+    
+    // Listen for window resize
+    window.addEventListener('resize', handleResize);
+    
+    // Clean up listener on unmount
+    return () => {
+      window.removeEventListener('resize', handleResize);
+    };
+  }, [forceCollapsed]);
+  
+  // Reference to the container element for focus management
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  // Get current user's client ID
+  const currentClientId = useMemo(() => awareness.doc.clientID, [awareness]);
+
+  // Filter out current user and sort users by status (active first)
+  const otherUsers = useMemo(() => {
+    const userArray = Array.from(users.entries())
+      .filter(([clientId]) => clientId !== currentClientId)
+      .map(([clientId, state]) => ({ clientId, state: state as IUserState }));
+    
+    // Sort by status: active/editing first, then idle/viewing
+    return userArray.sort((a, b) => {
+      const statusPriority = (status?: string) => {
+        switch (status) {
+          case 'editing': return 0;
+          case 'active': return 1;
+          case 'viewing': return 2;
+          case 'idle': return 3;
+          default: return 4;
+        }
+      };
+      
+      return statusPriority(a.state.status) - statusPriority(b.state.status);
+    });
+  }, [users, currentClientId]);
+
+  // Get current user's state
+  const currentUser = useMemo(() => {
+    const state = users.get(currentClientId) as IUserState | undefined;
+    return state ? { clientId: currentClientId, state } : undefined;
+  }, [users, currentClientId]);
+
+  // Handle click on a user avatar to focus on their cursor position
+  const handleAvatarClick = useCallback((clientId: number, state: IUserState) => {
+    if (presenceService && state.cursor) {
+      presenceService.focusOnUserCursor(clientId);
     }
-  }, [onUserClick]);
+  }, [presenceService]);
 
-  // Determine which users to display
-  const visibleUsers = expanded ? users : users.slice(0, maxAvatars);
-  const hiddenCount = users.length - maxAvatars;
-  const showMoreButton = !expanded && hiddenCount > 0;
+  // Render user avatar with appropriate status indicator
+  const renderUserAvatar = (clientId: number, state: IUserState) => {
+    const statusClass = `jp-UserPresence-status-${state.status || 'active'}`;
+    const avatarStyle = {
+      backgroundColor: state.color || '#ccc',
+    };
+    
+    // Get initials from name for avatar placeholder
+    const initials = state.name
+      ? state.name
+          .split(' ')
+          .map(part => part.charAt(0))
+          .slice(0, 2)
+          .join('')
+      : '?';
+    
+    // Determine if this user has cursor/selection information
+    const hasCursor = Boolean(state.cursor);
+    const hasSelection = Boolean(state.selection);
+    const lastActiveTime = state.lastActive ? new Date(state.lastActive).toLocaleTimeString() : '';
+    const tooltipText = `${state.name || 'Unknown user'} (${state.status || 'active'})
+${hasCursor ? 'Has cursor in document' : ''}
+${hasSelection ? 'Has active selection' : ''}
+${lastActiveTime ? `Last active: ${lastActiveTime}` : ''}`;
 
-  return (
-    <div 
-      className={`jp-UserPresence ${expanded ? 'jp-UserPresence-expanded' : ''}`}
-      ref={containerRef}
-      role="region"
-      aria-label={trans.__('User presence')}
-    >
-      <div className="jp-UserPresence-avatars">
-        {visibleUsers.map((user, index) => (
-          <UserAvatar
-            key={user.id}
-            user={user}
-            translator={translator}
-            showStatus={showStatus}
-            onClick={handleUserClick}
-            zIndex={users.length - index}
+    return (
+      <div 
+        key={clientId} 
+        className={`jp-UserPresence-avatar ${hasCursor ? 'jp-UserPresence-avatar-withCursor' : ''}`}
+        style={avatarStyle}
+        title={tooltipText}
+        aria-label={`${state.name || 'Unknown user'} is ${state.status || 'active'}`}
+        onClick={() => handleAvatarClick(clientId, state)}
+        tabIndex={0}
+        role="button"
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            handleAvatarClick(clientId, state);
+            e.preventDefault();
+          }
+        }}
+      >
+        {state.avatar ? (
+          <img 
+            src={state.avatar} 
+            alt={state.name || 'User avatar'} 
+            className="jp-UserPresence-avatarImg"
           />
-        ))}
-        
-        {showMoreButton && (
-          <div 
-            className="jp-UserPresence-more"
-            onClick={toggleExpanded}
-            role="button"
-            aria-label={trans.__('Show %1 more users', hiddenCount)}
-            title={trans.__('Show %1 more users', hiddenCount)}
-            tabIndex={0}
-          >
-            +{hiddenCount}
-          </div>
+        ) : (
+          <span className="jp-UserPresence-initials">{initials}</span>
         )}
+        <span className={`jp-UserPresence-statusIndicator ${statusClass}`} />
+      </div>
+    );
+  };
 
-        {expanded && (
+  // Render collapsed view (mobile)
+  if (isCollapsed) {
+    const userCount = otherUsers.length;
+    
+    return (
+      <div 
+        ref={containerRef}
+        className="jp-UserPresence jp-UserPresence-collapsed" 
+        role="region" 
+        aria-label={trans.__('Collaborators')}
+        aria-live="polite"
+      >
+        {currentUser && renderUserAvatar(currentUser.clientId, currentUser.state)}
+        
+        {userCount > 0 && (
           <div 
-            className="jp-UserPresence-collapse"
-            onClick={toggleExpanded}
+            className="jp-UserPresence-counter"
+            aria-label={trans.__('%1 other collaborators', userCount)}
             role="button"
-            aria-label={trans.__('Collapse user list')}
-            title={trans.__('Collapse user list')}
             tabIndex={0}
+            onClick={() => setIsCollapsed(false)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                setIsCollapsed(false);
+                e.preventDefault();
+              }
+            }}
           >
-            <span aria-hidden="true">−</span>
+            +{userCount}
           </div>
         )}
       </div>
+    );
+  }
 
-      <div className="jp-UserPresence-count" aria-live="polite">
-        {users.length > 0 ? (
-          <span>{trans.__('%1 users online', users.length)}</span>
-        ) : (
-          <span>{trans.__('No other users online')}</span>
-        )}
+  // Render expanded view (tablet/desktop)
+  return (
+    <div 
+      ref={containerRef}
+      className="jp-UserPresence" 
+      role="region" 
+      aria-label={trans.__('Collaborators')}
+      aria-live="polite"
+    >
+      <div className="jp-UserPresence-header">
+        <span className="jp-UserPresence-title">{trans.__('Collaborators')}</span>
+        <button 
+          className="jp-UserPresence-collapseButton" 
+          onClick={() => setIsCollapsed(true)}
+          aria-label={trans.__('Collapse collaborator list')}
+          title={trans.__('Collapse')}
+        >
+          <span className="jp-UserPresence-collapseIcon">⌃</span>
+        </button>
+      </div>
+      
+      {/* Current user */}
+      {currentUser && (
+        <div className="jp-UserPresence-self">
+          {renderUserAvatar(currentUser.clientId, currentUser.state)}
+          <span className="jp-UserPresence-name jp-UserPresence-selfName">
+            {trans.__('You')}
+          </span>
+        </div>
+      )}
+      
+      {/* Divider */}
+      {currentUser && otherUsers.length > 0 && (
+        <div className="jp-UserPresence-divider" />
+      )}
+      
+      {/* Other users */}
+      {otherUsers.length > 0 ? (
+        <div className="jp-UserPresence-others">
+          {/* Show limited number of avatars based on maxAvatars prop */}
+          {otherUsers.slice(0, maxAvatars).map(({ clientId, state }) => (
+            <div key={clientId} className="jp-UserPresence-user">
+              {renderUserAvatar(clientId, state)}
+              <span 
+                className="jp-UserPresence-name"
+                style={{ color: state.color }}
+              >
+                {state.name || trans.__('Unknown user')}
+              </span>
+            </div>
+          ))}
+          
+          {/* Show count for additional users beyond maxAvatars */}
+          {otherUsers.length > maxAvatars && (
+            <div className="jp-UserPresence-moreUsers">
+              <span className="jp-UserPresence-moreCount">
+                {trans.__('+ %1 more', otherUsers.length - maxAvatars)}
+              </span>
+            </div>
+          )}
+        </div>
+      ) : (
+        <div className="jp-UserPresence-empty">
+          {trans.__('No other collaborators')}
+        </div>
+      )}
+      
+      {/* Accessibility announcement for screen readers */}
+      <div 
+        className="jp-UserPresence-announcement" 
+        aria-live="polite" 
+        aria-atomic="true"
+        style={{ position: 'absolute', width: '1px', height: '1px', overflow: 'hidden' }}
+      >
+        {trans.__('%1 collaborators currently active', otherUsers.length + (currentUser ? 1 : 0))}
       </div>
     </div>
   );
 };
 
 /**
- * A namespace for UserPresence statics.
+ * A namespace for UserPresence widget.
  */
-export namespace UserPresence {
+export namespace UserPresenceWidget {
   /**
-   * Create a new UserPresence component
+   * Create a new UserPresenceWidget.
+   *
+   * @param awareness - The Yjs awareness instance
+   * @param presenceService - Optional presence service for additional functionality
+   * @param translator - The translator
+   * @param maxAvatars - Optional maximum number of avatars to display
+   * @param forceCollapsed - Optional flag to force collapsed view
    */
-  export function create(options: IUserPresenceProps): JSX.Element {
-    return <UserPresence {...options} />;
-  }
-
-  /**
-   * Create a ReactWidget containing the UserPresence component
-   * 
-   * @param options - The options for the UserPresence component
-   * @returns A ReactWidget containing the UserPresence component
-   */
-  export function createWidget(options: IUserPresenceProps): ReactWidget {
-    // Add the styles to the document
-    const styleElement = document.createElement('style');
-    styleElement.textContent = styles;
-    document.head.appendChild(styleElement);
-
-    // Create the widget
-    const widget = ReactWidget.create(<UserPresence {...options} />);
-    widget.addClass('jp-UserPresence-widget');
+  export const create = ({
+    awareness,
+    presenceService,
+    translator,
+    maxAvatars,
+    forceCollapsed
+  }: {
+    awareness: Awareness;
+    presenceService?: IPresenceService;
+    translator: ITranslator;
+    maxAvatars?: number;
+    forceCollapsed?: boolean;
+  }): ReactWidget => {
+    const widget = ReactWidget.create(
+      <UserPresence 
+        awareness={awareness} 
+        presenceService={presenceService}
+        translator={translator}
+        maxAvatars={maxAvatars}
+        forceCollapsed={forceCollapsed}
+      />
+    );
+    
+    widget.addClass('jp-UserPresenceWidget');
+    
     return widget;
-  }
-
-  /**
-   * Set the local user's awareness state
-   * 
-   * @param awareness - The Yjs awareness instance
-   * @param state - The user state to set
-   */
-  export function setLocalUserState(
-    awareness: Awareness,
-    state: Partial<IUserAwarenessState>
-  ): void {
-    const currentState = awareness.getLocalState()?.user || {};
-    awareness.setLocalStateField('user', {
-      ...currentState,
-      ...state
-    });
-  }
-
-  /**
-   * Get the local user's awareness state
-   * 
-   * @param awareness - The Yjs awareness instance
-   * @returns The local user's awareness state
-   */
-  export function getLocalUserState(
-    awareness: Awareness
-  ): IUserAwarenessState | undefined {
-    return awareness.getLocalState()?.user as IUserAwarenessState;
-  }
-
-  /**
-   * Get all users from the awareness instance
-   * 
-   * @param awareness - The Yjs awareness instance
-   * @returns Array of users
-   */
-  export function getAllUsers(awareness: Awareness): IUser[] {
-    const states = awareness.getStates();
-    const users: IUser[] = [];
-    
-    states.forEach((state: any, id: number) => {
-      if (state.user) {
-        users.push({
-          id,
-          state: state.user as IUserAwarenessState
-        });
-      }
-    });
-    
-    return users;
-  }
-
-  /**
-   * Generate a random color for a user
-   * 
-   * @returns A random color in hex format
-   */
-  export function generateUserColor(): string {
-    // Use the collaboration color palette defined in the design system
-    // These are pastel colors that work well with dark text
-    const colors = [
-      '#FFB6C1', // Light Pink
-      '#FFD700', // Gold
-      '#98FB98', // Pale Green
-      '#87CEFA', // Light Sky Blue
-      '#FFA07A', // Light Salmon
-      '#DDA0DD', // Plum
-      '#FFFACD', // Lemon Chiffon
-      '#AFEEEE', // Pale Turquoise
-      '#D8BFD8', // Thistle
-      '#B0E0E6'  // Powder Blue
-    ];
-    
-    return colors[Math.floor(Math.random() * colors.length)];
-  }
-
-  /**
-   * Initialize the local user's awareness state with default values
-   * 
-   * @param awareness - The Yjs awareness instance
-   * @param name - The user's name (defaults to 'Anonymous')
-   */
-  export function initializeLocalUser(
-    awareness: Awareness,
-    name: string = 'Anonymous'
-  ): void {
-    setLocalUserState(awareness, {
-      name,
-      color: generateUserColor(),
-      status: 'active'
-    });
-  }
-  
-  /**
-   * Update the cursor position for the local user
-   * 
-   * @param awareness - The Yjs awareness instance
-   * @param cellId - The ID of the cell where the cursor is located
-   * @param position - The position within the cell
-   */
-  export function updateCursorPosition(
-    awareness: Awareness,
-    cellId: string,
-    position: number
-  ): void {
-    setLocalUserState(awareness, {
-      cursor: {
-        cellId,
-        position
-      }
-    });
-  }
-  
-  /**
-   * Update the text selection for the local user
-   * 
-   * @param awareness - The Yjs awareness instance
-   * @param cellId - The ID of the cell where the selection is located
-   * @param start - The start position of the selection
-   * @param end - The end position of the selection
-   */
-  export function updateTextSelection(
-    awareness: Awareness,
-    cellId: string,
-    start: number,
-    end: number
-  ): void {
-    setLocalUserState(awareness, {
-      selection: {
-        cellId,
-        start,
-        end
-      }
-    });
-  }
-  
-  /**
-   * Update the current cell for the local user
-   * 
-   * @param awareness - The Yjs awareness instance
-   * @param cellId - The ID of the current cell
-   */
-  export function updateCurrentCell(
-    awareness: Awareness,
-    cellId: string
-  ): void {
-    setLocalUserState(awareness, {
-      currentCellId: cellId
-    });
-  }
-  
-  /**
-   * Start tracking user activity to automatically update status
-   * 
-   * @param awareness - The Yjs awareness instance
-   * @param idleTimeout - Time in milliseconds before user is considered idle (default: 60000 = 1 minute)
-   * @param awayTimeout - Time in milliseconds before user is considered away (default: 300000 = 5 minutes)
-   * @returns A function to stop tracking
-   */
-  export function startActivityTracking(
-    awareness: Awareness,
-    idleTimeout: number = 60000,
-    awayTimeout: number = 300000
-  ): () => void {
-    let idleTimer: number | null = null;
-    let awayTimer: number | null = null;
-    let lastActivity = Date.now();
-    
-    // Set initial status to active
-    setLocalUserState(awareness, { status: 'active' });
-    
-    // Function to handle user activity
-    const handleActivity = () => {
-      lastActivity = Date.now();
-      
-      // Clear existing timers
-      if (idleTimer !== null) {
-        window.clearTimeout(idleTimer);
-        idleTimer = null;
-      }
-      
-      if (awayTimer !== null) {
-        window.clearTimeout(awayTimer);
-        awayTimer = null;
-      }
-      
-      // Get current status
-      const currentStatus = getLocalUserState(awareness)?.status;
-      
-      // Only update if status is not already active
-      if (currentStatus !== 'active') {
-        setLocalUserState(awareness, { status: 'active' });
-      }
-      
-      // Set new timers
-      idleTimer = window.setTimeout(() => {
-        setLocalUserState(awareness, { status: 'idle' });
-      }, idleTimeout);
-      
-      awayTimer = window.setTimeout(() => {
-        setLocalUserState(awareness, { status: 'away' });
-      }, awayTimeout);
-    };
-    
-    // Set up event listeners for user activity
-    window.addEventListener('mousemove', handleActivity);
-    window.addEventListener('keydown', handleActivity);
-    window.addEventListener('click', handleActivity);
-    window.addEventListener('scroll', handleActivity);
-    window.addEventListener('visibilitychange', () => {
-      if (document.hidden) {
-        setLocalUserState(awareness, { status: 'away' });
-      } else {
-        handleActivity();
-      }
-    });
-    
-    // Initial activity trigger
-    handleActivity();
-    
-    // Return function to stop tracking
-    return () => {
-      window.removeEventListener('mousemove', handleActivity);
-      window.removeEventListener('keydown', handleActivity);
-      window.removeEventListener('click', handleActivity);
-      window.removeEventListener('scroll', handleActivity);
-      window.removeEventListener('visibilitychange', handleActivity);
-      
-      if (idleTimer !== null) {
-        window.clearTimeout(idleTimer);
-      }
-      
-      if (awayTimer !== null) {
-        window.clearTimeout(awayTimer);
-      }
-    };
-  }
+  };
 }
