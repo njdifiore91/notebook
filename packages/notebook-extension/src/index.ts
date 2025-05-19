@@ -4,9 +4,6 @@
 import {
   JupyterFrontEnd,
   JupyterFrontEndPlugin,
-  ILabShell,
-  ILayoutRestorer,
-  IRouter
 } from '@jupyterlab/application';
 
 import {
@@ -16,8 +13,7 @@ import {
   ICommandPalette,
   Dialog,
   showDialog,
-  WidgetTracker,
-  ReactWidget
+  ToolbarButton,
 } from '@jupyterlab/apputils';
 
 import { Cell, CodeCell } from '@jupyterlab/cells';
@@ -42,577 +38,16 @@ import { INotebookShell } from '@jupyter-notebook/application';
 
 import { Poll } from '@lumino/polling';
 
+import { Token } from '@lumino/coreutils';
+
 import { Widget } from '@lumino/widgets';
 
 import { TrustedComponent } from './trusted';
-
-// Import collaboration components
-import { CollaborationBar } from './components/collaborationBar';
-import { UserPresence } from './components/userPresence';
-import { CellLockIndicator } from './components/cellLockIndicator';
-import { HistoryViewer } from './components/historyViewer';
-import { PermissionsDialog } from './components/permissionsDialog';
-import { CommentSystem } from './components/commentSystem';
 
 // Import Yjs and related libraries
 import * as Y from 'yjs';
 import { WebsocketProvider } from 'y-websocket';
 import { awareness } from 'y-protocols/awareness';
-
-// Define token interfaces for collaboration services
-import { Token } from '@lumino/coreutils';
-
-/**
- * The token for the collaboration service.
- */
-export const ICollaborationService = new Token<ICollaborationService>(
-  'jupyter-notebook/collaboration:ICollaborationService'
-);
-
-/**
- * The interface for the collaboration service.
- */
-export interface ICollaborationService {
-  /**
-   * Whether collaboration is enabled.
-   */
-  readonly enabled: boolean;
-
-  /**
-   * Whether the document is currently connected to the collaboration server.
-   */
-  readonly connected: boolean;
-
-  /**
-   * The Yjs document provider.
-   */
-  readonly provider: WebsocketProvider | null;
-
-  /**
-   * The Yjs document.
-   */
-  readonly document: Y.Doc | null;
-
-  /**
-   * Initialize the collaboration service.
-   */
-  initialize(): void;
-
-  /**
-   * Toggle collaboration on/off.
-   */
-  toggleCollaboration(): Promise<boolean>;
-
-  /**
-   * Connect to the collaboration server.
-   */
-  connect(): Promise<boolean>;
-
-  /**
-   * Disconnect from the collaboration server.
-   */
-  disconnect(): Promise<void>;
-}
-
-/**
- * The token for the presence service.
- */
-export const IPresenceService = new Token<IPresenceService>(
-  'jupyter-notebook/collaboration:IPresenceService'
-);
-
-/**
- * The interface for the presence service.
- */
-export interface IPresenceService {
-  /**
-   * Whether presence features are enabled.
-   */
-  readonly enabled: boolean;
-
-  /**
-   * The list of active users.
-   */
-  readonly users: ReadonlyArray<ICollaborator>;
-
-  /**
-   * The current user's information.
-   */
-  readonly localUser: ICollaborator;
-
-  /**
-   * Update the current user's cursor position.
-   */
-  updateCursor(position: ICursorPosition): void;
-
-  /**
-   * Update the current user's selection range.
-   */
-  updateSelection(selection: ISelectionRange): void;
-
-  /**
-   * Update the current user's active cell.
-   */
-  updateActiveCell(cellId: string): void;
-}
-
-/**
- * The token for the lock service.
- */
-export const ILockService = new Token<ILockService>(
-  'jupyter-notebook/collaboration:ILockService'
-);
-
-/**
- * The interface for the lock service.
- */
-export interface ILockService {
-  /**
-   * Whether cell locking is enabled.
-   */
-  readonly enabled: boolean;
-
-  /**
-   * The list of currently locked cells.
-   */
-  readonly lockedCells: ReadonlyMap<string, ILock>;
-
-  /**
-   * Acquire a lock on a cell.
-   */
-  acquireLock(cellId: string): Promise<boolean>;
-
-  /**
-   * Release a lock on a cell.
-   */
-  releaseLock(cellId: string): Promise<boolean>;
-
-  /**
-   * Check if a cell is locked by the current user.
-   */
-  isLockedByMe(cellId: string): boolean;
-
-  /**
-   * Check if a cell is locked by another user.
-   */
-  isLockedByOther(cellId: string): boolean;
-
-  /**
-   * Get the lock information for a cell.
-   */
-  getLock(cellId: string): ILock | null;
-}
-
-/**
- * The token for the history service.
- */
-export const IHistoryService = new Token<IHistoryService>(
-  'jupyter-notebook/collaboration:IHistoryService'
-);
-
-/**
- * The interface for the history service.
- */
-export interface IHistoryService {
-  /**
-   * Whether version history is enabled.
-   */
-  readonly enabled: boolean;
-
-  /**
-   * The list of available versions.
-   */
-  readonly versions: ReadonlyArray<IVersion>;
-
-  /**
-   * Get the changes between two versions.
-   */
-  getDiff(fromVersion: string, toVersion: string): Promise<IDiff>;
-
-  /**
-   * Restore the document to a specific version.
-   */
-  restore(version: string): Promise<boolean>;
-
-  /**
-   * Create a new snapshot of the current document state.
-   */
-  createSnapshot(name?: string): Promise<IVersion>;
-}
-
-/**
- * The token for the permissions service.
- */
-export const IPermissionsService = new Token<IPermissionsService>(
-  'jupyter-notebook/collaboration:IPermissionsService'
-);
-
-/**
- * The interface for the permissions service.
- */
-export interface IPermissionsService {
-  /**
-   * Whether permissions are enabled.
-   */
-  readonly enabled: boolean;
-
-  /**
-   * The current user's role.
-   */
-  readonly currentRole: string;
-
-  /**
-   * The list of users with their roles.
-   */
-  readonly userRoles: ReadonlyMap<string, string>;
-
-  /**
-   * Check if the current user has a specific permission.
-   */
-  hasPermission(permission: string): boolean;
-
-  /**
-   * Set a user's role.
-   */
-  setUserRole(userId: string, role: string): Promise<boolean>;
-
-  /**
-   * Get the available roles.
-   */
-  getRoles(): ReadonlyArray<IRole>;
-}
-
-/**
- * The token for the comment service.
- */
-export const ICommentService = new Token<ICommentService>(
-  'jupyter-notebook/collaboration:ICommentService'
-);
-
-/**
- * The interface for the comment service.
- */
-export interface ICommentService {
-  /**
-   * Whether comments are enabled.
-   */
-  readonly enabled: boolean;
-
-  /**
-   * The list of comments for the current document.
-   */
-  readonly comments: ReadonlyArray<IComment>;
-
-  /**
-   * Add a comment to a cell.
-   */
-  addComment(cellId: string, text: string, range?: ISelectionRange): Promise<IComment>;
-
-  /**
-   * Reply to a comment.
-   */
-  replyToComment(commentId: string, text: string): Promise<IComment>;
-
-  /**
-   * Resolve a comment.
-   */
-  resolveComment(commentId: string): Promise<boolean>;
-
-  /**
-   * Delete a comment.
-   */
-  deleteComment(commentId: string): Promise<boolean>;
-
-  /**
-   * Get comments for a specific cell.
-   */
-  getCommentsForCell(cellId: string): ReadonlyArray<IComment>;
-}
-
-/**
- * Interface for a collaborator.
- */
-export interface ICollaborator {
-  /**
-   * The user's ID.
-   */
-  readonly id: string;
-
-  /**
-   * The user's name.
-   */
-  readonly name: string;
-
-  /**
-   * The user's color.
-   */
-  readonly color: string;
-
-  /**
-   * The user's avatar URL.
-   */
-  readonly avatarUrl?: string;
-
-  /**
-   * The user's cursor position.
-   */
-  readonly cursor?: ICursorPosition;
-
-  /**
-   * The user's selection range.
-   */
-  readonly selection?: ISelectionRange;
-
-  /**
-   * The ID of the user's active cell.
-   */
-  readonly activeCell?: string;
-
-  /**
-   * The user's last activity timestamp.
-   */
-  readonly lastActivity: number;
-}
-
-/**
- * Interface for a cursor position.
- */
-export interface ICursorPosition {
-  /**
-   * The cell ID.
-   */
-  readonly cellId: string;
-
-  /**
-   * The line number.
-   */
-  readonly line: number;
-
-  /**
-   * The column number.
-   */
-  readonly column: number;
-}
-
-/**
- * Interface for a selection range.
- */
-export interface ISelectionRange {
-  /**
-   * The cell ID.
-   */
-  readonly cellId: string;
-
-  /**
-   * The start line number.
-   */
-  readonly startLine: number;
-
-  /**
-   * The start column number.
-   */
-  readonly startColumn: number;
-
-  /**
-   * The end line number.
-   */
-  readonly endLine: number;
-
-  /**
-   * The end column number.
-   */
-  readonly endColumn: number;
-}
-
-/**
- * Interface for a cell lock.
- */
-export interface ILock {
-  /**
-   * The cell ID.
-   */
-  readonly cellId: string;
-
-  /**
-   * The user who holds the lock.
-   */
-  readonly userId: string;
-
-  /**
-   * The timestamp when the lock was acquired.
-   */
-  readonly timestamp: number;
-
-  /**
-   * The lock expiration time in milliseconds.
-   */
-  readonly expiresIn: number;
-}
-
-/**
- * Interface for a document version.
- */
-export interface IVersion {
-  /**
-   * The version ID.
-   */
-  readonly id: string;
-
-  /**
-   * The user who created the version.
-   */
-  readonly userId: string;
-
-  /**
-   * The timestamp when the version was created.
-   */
-  readonly timestamp: number;
-
-  /**
-   * The version name.
-   */
-  readonly name?: string;
-}
-
-/**
- * Interface for a diff between two versions.
- */
-export interface IDiff {
-  /**
-   * The from version ID.
-   */
-  readonly fromVersion: string;
-
-  /**
-   * The to version ID.
-   */
-  readonly toVersion: string;
-
-  /**
-   * The list of changes.
-   */
-  readonly changes: ReadonlyArray<IChange>;
-}
-
-/**
- * Interface for a change in a diff.
- */
-export interface IChange {
-  /**
-   * The type of change.
-   */
-  readonly type: 'add' | 'remove' | 'modify';
-
-  /**
-   * The cell ID.
-   */
-  readonly cellId: string;
-
-  /**
-   * The user who made the change.
-   */
-  readonly userId: string;
-
-  /**
-   * The timestamp when the change was made.
-   */
-  readonly timestamp: number;
-
-  /**
-   * The old content (for remove and modify).
-   */
-  readonly oldContent?: string;
-
-  /**
-   * The new content (for add and modify).
-   */
-  readonly newContent?: string;
-}
-
-/**
- * Interface for a role in the permissions system.
- */
-export interface IRole {
-  /**
-   * The role ID.
-   */
-  readonly id: string;
-
-  /**
-   * The role name.
-   */
-  readonly name: string;
-
-  /**
-   * The role description.
-   */
-  readonly description: string;
-
-  /**
-   * The role permissions.
-   */
-  readonly permissions: ReadonlyArray<string>;
-}
-
-/**
- * Interface for a comment.
- */
-export interface IComment {
-  /**
-   * The comment ID.
-   */
-  readonly id: string;
-
-  /**
-   * The cell ID.
-   */
-  readonly cellId: string;
-
-  /**
-   * The user who created the comment.
-   */
-  readonly userId: string;
-
-  /**
-   * The timestamp when the comment was created.
-   */
-  readonly timestamp: number;
-
-  /**
-   * The comment text.
-   */
-  readonly text: string;
-
-  /**
-   * The selection range (optional).
-   */
-  readonly range?: ISelectionRange;
-
-  /**
-   * The parent comment ID (for replies).
-   */
-  readonly parentId?: string;
-
-  /**
-   * Whether the comment is resolved.
-   */
-  readonly resolved: boolean;
-
-  /**
-   * The user who resolved the comment.
-   */
-  readonly resolvedBy?: string;
-
-  /**
-   * The timestamp when the comment was resolved.
-   */
-  readonly resolvedAt?: number;
-
-  /**
-   * The list of replies to this comment.
-   */
-  readonly replies: ReadonlyArray<IComment>;
-}
 
 /**
  * The class for kernel status errors.
@@ -645,6 +80,247 @@ const SCROLLED_OUTPUTS_CLASS = 'jp-mod-outputsScrolled';
 const FULL_WIDTH_NOTEBOOK_CLASS = 'jp-mod-fullwidth';
 
 /**
+ * The token for the collaboration service.
+ */
+export const ICollaborationService = new Token<ICollaborationService>(
+  '@jupyter-notebook/notebook-extension:ICollaborationService'
+);
+
+/**
+ * The token for the presence service.
+ */
+export const IPresenceService = new Token<IPresenceService>(
+  '@jupyter-notebook/notebook-extension:IPresenceService'
+);
+
+/**
+ * The token for the lock service.
+ */
+export const ILockService = new Token<ILockService>(
+  '@jupyter-notebook/notebook-extension:ILockService'
+);
+
+/**
+ * The token for the history service.
+ */
+export const IHistoryService = new Token<IHistoryService>(
+  '@jupyter-notebook/notebook-extension:IHistoryService'
+);
+
+/**
+ * The token for the permissions service.
+ */
+export const IPermissionsService = new Token<IPermissionsService>(
+  '@jupyter-notebook/notebook-extension:IPermissionsService'
+);
+
+/**
+ * The token for the comment service.
+ */
+export const ICommentService = new Token<ICommentService>(
+  '@jupyter-notebook/notebook-extension:ICommentService'
+);
+
+/**
+ * Interface for the collaboration service.
+ */
+export interface ICollaborationService {
+  /**
+   * Initialize collaboration for a notebook panel.
+   */
+  initialize(panel: NotebookPanel): void;
+
+  /**
+   * Get the Yjs document for a notebook panel.
+   */
+  getYjsDocument(panel: NotebookPanel): Y.Doc | null;
+
+  /**
+   * Get the WebSocket provider for a notebook panel.
+   */
+  getProvider(panel: NotebookPanel): WebsocketProvider | null;
+
+  /**
+   * Check if collaboration is enabled for a notebook panel.
+   */
+  isEnabled(panel: NotebookPanel): boolean;
+
+  /**
+   * Enable or disable collaboration for a notebook panel.
+   */
+  setEnabled(panel: NotebookPanel, enabled: boolean): void;
+
+  /**
+   * Signal emitted when collaboration status changes.
+   */
+  readonly statusChanged: ISignal<ICollaborationService, { panel: NotebookPanel, status: 'connected' | 'disconnected' | 'error' }>;
+}
+
+/**
+ * Interface for the presence service.
+ */
+export interface IPresenceService {
+  /**
+   * Initialize presence for a notebook panel.
+   */
+  initialize(panel: NotebookPanel): void;
+
+  /**
+   * Get the list of active users for a notebook panel.
+   */
+  getActiveUsers(panel: NotebookPanel): Array<{ id: string, name: string, color: string, avatar?: string }>;
+
+  /**
+   * Get the awareness instance for a notebook panel.
+   */
+  getAwareness(panel: NotebookPanel): any | null;
+
+  /**
+   * Signal emitted when user presence changes.
+   */
+  readonly presenceChanged: ISignal<IPresenceService, { panel: NotebookPanel, users: Array<{ id: string, name: string, color: string, avatar?: string }> }>;
+}
+
+/**
+ * Interface for the lock service.
+ */
+export interface ILockService {
+  /**
+   * Initialize locks for a notebook panel.
+   */
+  initialize(panel: NotebookPanel): void;
+
+  /**
+   * Lock a cell in a notebook panel.
+   */
+  lockCell(panel: NotebookPanel, cellId: string): Promise<boolean>;
+
+  /**
+   * Unlock a cell in a notebook panel.
+   */
+  unlockCell(panel: NotebookPanel, cellId: string): Promise<boolean>;
+
+  /**
+   * Check if a cell is locked in a notebook panel.
+   */
+  isCellLocked(panel: NotebookPanel, cellId: string): boolean;
+
+  /**
+   * Get the user who locked a cell in a notebook panel.
+   */
+  getCellLockOwner(panel: NotebookPanel, cellId: string): string | null;
+
+  /**
+   * Signal emitted when cell lock status changes.
+   */
+  readonly lockChanged: ISignal<ILockService, { panel: NotebookPanel, cellId: string, locked: boolean, owner: string | null }>;
+}
+
+/**
+ * Interface for the history service.
+ */
+export interface IHistoryService {
+  /**
+   * Initialize history for a notebook panel.
+   */
+  initialize(panel: NotebookPanel): void;
+
+  /**
+   * Get the history for a notebook panel.
+   */
+  getHistory(panel: NotebookPanel): Array<{ id: string, timestamp: number, author: string, changes: any }>;
+
+  /**
+   * Restore a notebook panel to a specific history point.
+   */
+  restoreToVersion(panel: NotebookPanel, versionId: string): Promise<boolean>;
+
+  /**
+   * Signal emitted when history changes.
+   */
+  readonly historyChanged: ISignal<IHistoryService, { panel: NotebookPanel, history: Array<{ id: string, timestamp: number, author: string, changes: any }> }>;
+}
+
+/**
+ * Interface for the permissions service.
+ */
+export interface IPermissionsService {
+  /**
+   * Initialize permissions for a notebook panel.
+   */
+  initialize(panel: NotebookPanel): void;
+
+  /**
+   * Get the permissions for a notebook panel.
+   */
+  getPermissions(panel: NotebookPanel): { [userId: string]: 'view' | 'comment' | 'edit' | 'admin' };
+
+  /**
+   * Set the permissions for a user in a notebook panel.
+   */
+  setUserPermission(
+    panel: NotebookPanel,
+    userId: string,
+    permission: 'view' | 'comment' | 'edit' | 'admin'
+  ): Promise<boolean>;
+
+  /**
+   * Check if the current user has a specific permission for a notebook panel.
+   */
+  hasPermission(panel: NotebookPanel, permission: 'view' | 'comment' | 'edit' | 'admin'): boolean;
+
+  /**
+   * Signal emitted when permissions change.
+   */
+  readonly permissionsChanged: ISignal<IPermissionsService, { panel: NotebookPanel, permissions: { [userId: string]: 'view' | 'comment' | 'edit' | 'admin' } }>;
+}
+
+/**
+ * Interface for the comment service.
+ */
+export interface ICommentService {
+  /**
+   * Initialize comments for a notebook panel.
+   */
+  initialize(panel: NotebookPanel): void;
+
+  /**
+   * Add a comment to a cell in a notebook panel.
+   */
+  addComment(panel: NotebookPanel, cellId: string, text: string, range?: { start: number, end: number }): Promise<string>;
+
+  /**
+   * Edit a comment in a notebook panel.
+   */
+  editComment(panel: NotebookPanel, commentId: string, text: string): Promise<boolean>;
+
+  /**
+   * Delete a comment from a notebook panel.
+   */
+  deleteComment(panel: NotebookPanel, commentId: string): Promise<boolean>;
+
+  /**
+   * Resolve a comment in a notebook panel.
+   */
+  resolveComment(panel: NotebookPanel, commentId: string): Promise<boolean>;
+
+  /**
+   * Get all comments for a notebook panel.
+   */
+  getComments(panel: NotebookPanel): Array<{ id: string, cellId: string, author: string, text: string, timestamp: number, resolved: boolean, range?: { start: number, end: number } }>;
+
+  /**
+   * Signal emitted when comments change.
+   */
+  readonly commentsChanged: ISignal<ICommentService, { panel: NotebookPanel, comments: Array<{ id: string, cellId: string, author: string, text: string, timestamp: number, resolved: boolean, range?: { start: number, end: number } }> }>;
+}
+
+/**
+ * Import the ISignal interface from @lumino/signaling.
+ */
+import { ISignal } from '@lumino/signaling';
+
+/**
  * The command IDs used by the notebook plugins.
  */
 namespace CommandIDs {
@@ -659,14 +335,14 @@ namespace CommandIDs {
   export const toggleFullWidth = 'notebook:toggle-full-width';
 
   /**
-   * A command to toggle collaboration features
+   * A command to toggle collaboration mode
    */
   export const toggleCollaboration = 'notebook:toggle-collaboration';
 
   /**
-   * A command to show the collaboration sidebar
+   * A command to show the collaboration history
    */
-  export const showCollaborationSidebar = 'notebook:show-collaboration-sidebar';
+  export const showCollaborationHistory = 'notebook:show-collaboration-history';
 
   /**
    * A command to show the permissions dialog
@@ -674,19 +350,19 @@ namespace CommandIDs {
   export const showPermissionsDialog = 'notebook:show-permissions-dialog';
 
   /**
-   * A command to show the history viewer
+   * A command to show the comments panel
    */
-  export const showHistoryViewer = 'notebook:show-history-viewer';
+  export const showCommentsPanel = 'notebook:show-comments-panel';
 
   /**
-   * A command to add a comment to the current cell
+   * A command to lock the current cell
    */
-  export const addComment = 'notebook:add-comment';
+  export const lockCurrentCell = 'notebook:lock-current-cell';
 
   /**
-   * A command to toggle cell locking
+   * A command to unlock the current cell
    */
-  export const toggleCellLock = 'notebook:toggle-cell-lock';
+  export const unlockCurrentCell = 'notebook:unlock-current-cell';
 }
 
 /**
@@ -1289,919 +965,1206 @@ const collaborationCore: JupyterFrontEndPlugin<ICollaborationService> = {
   id: '@jupyter-notebook/notebook-extension:collaboration-core',
   description: 'A plugin that provides the core collaboration service.',
   autoStart: true,
-  requires: [INotebookShell, ITranslator, INotebookTracker],
-  optional: [ICommandPalette, ISettingRegistry, IToolbarWidgetRegistry],
+  requires: [INotebookTracker, ITranslator],
+  optional: [ISettingRegistry, IToolbarWidgetRegistry, ICommandPalette, IMainMenu],
   provides: ICollaborationService,
   activate: (
     app: JupyterFrontEnd,
-    shell: INotebookShell,
-    translator: ITranslator,
     tracker: INotebookTracker,
-    palette: ICommandPalette | null,
+    translator: ITranslator,
     settingRegistry: ISettingRegistry | null,
-    toolbarRegistry: IToolbarWidgetRegistry | null
+    toolbarRegistry: IToolbarWidgetRegistry | null,
+    palette: ICommandPalette | null,
+    mainMenu: IMainMenu | null
   ): ICollaborationService => {
     const trans = translator.load('notebook');
     const { commands } = app;
-
-    // Create a class that implements the ICollaborationService interface
-    class CollaborationService implements ICollaborationService {
-      private _enabled = true;
-      private _connected = false;
-      private _provider: WebsocketProvider | null = null;
-      private _document: Y.Doc | null = null;
-
-      constructor() {
-        // Initialize the service
-      }
-
-      get enabled(): boolean {
-        return this._enabled;
-      }
-
-      get connected(): boolean {
-        return this._connected;
-      }
-
-      get provider(): WebsocketProvider | null {
-        return this._provider;
-      }
-
-      get document(): Y.Doc | null {
-        return this._document;
-      }
-
-      initialize(): void {
-        // Initialize the collaboration service
-        console.log('Initializing collaboration service');
-      }
-
-      async toggleCollaboration(): Promise<boolean> {
-        this._enabled = !this._enabled;
-        if (this._enabled) {
-          return this.connect();
-        } else {
-          await this.disconnect();
-          return false;
-        }
-      }
-
-      async connect(): Promise<boolean> {
-        // Connect to the collaboration server
-        console.log('Connecting to collaboration server');
-        this._connected = true;
-        return true;
-      }
-
-      async disconnect(): Promise<void> {
-        // Disconnect from the collaboration server
-        console.log('Disconnecting from collaboration server');
-        this._connected = false;
-      }
-    }
-
-    // Create an instance of the service
-    const service = new CollaborationService();
-
-    // Register commands
+    
+    // Create the collaboration service
+    const service = new CollaborationService(translator);
+    
+    // Add collaboration toggle command
     commands.addCommand(CommandIDs.toggleCollaboration, {
-      label: trans.__('Toggle Collaboration'),
-      execute: () => service.toggleCollaboration(),
-      isEnabled: () => tracker.currentWidget !== null,
-      isToggled: () => service.enabled && service.connected
-    });
-
-    commands.addCommand(CommandIDs.showCollaborationSidebar, {
-      label: trans.__('Show Collaboration Sidebar'),
+      label: trans.__('Enable Collaboration'),
       execute: () => {
-        const command = 'application:toggle-panel';
-        const args = {
-          side: 'right',
-          title: 'Collaboration',
-          id: 'collaboration-sidebar'
-        };
-        return commands.execute(command, args);
+        const panel = tracker.currentWidget;
+        if (!panel) {
+          return;
+        }
+        
+        const enabled = service.isEnabled(panel);
+        service.setEnabled(panel, !enabled);
+        
+        // Show a dialog when enabling collaboration
+        if (!enabled) {
+          showDialog({
+            title: trans.__('Collaboration Enabled'),
+            body: trans.__('Real-time collaboration is now enabled for this notebook. Other users with access can now edit simultaneously.'),
+            buttons: [Dialog.okButton({ label: trans.__('OK') })]
+          });
+        }
       },
-      isEnabled: () => tracker.currentWidget !== null && service.enabled
+      isEnabled: () => tracker.currentWidget !== null,
+      isToggled: () => {
+        const panel = tracker.currentWidget;
+        return panel ? service.isEnabled(panel) : false;
+      }
     });
-
-    // Add to command palette
+    
+    // Add collaboration toggle button to toolbar
+    if (toolbarRegistry) {
+      toolbarRegistry.addFactory('TopBar', 'collaboration', (toolbar) => {
+        const button = new ToolbarButton({
+          icon: 'ui-components:users',
+          onClick: () => {
+            commands.execute(CommandIDs.toggleCollaboration);
+          },
+          tooltip: trans.__('Toggle Collaboration')
+        });
+        
+        // Update button state when collaboration status changes
+        service.statusChanged.connect((_, args) => {
+          if (args.panel === tracker.currentWidget) {
+            button.addClass('jp-mod-active');
+          }
+        });
+        
+        return button;
+      });
+    }
+    
+    // Add collaboration toggle to command palette
     if (palette) {
       palette.addItem({
         command: CommandIDs.toggleCollaboration,
         category: 'Collaboration'
       });
-      palette.addItem({
-        command: CommandIDs.showCollaborationSidebar,
-        category: 'Collaboration'
+    }
+    
+    // Add collaboration menu to main menu
+    if (mainMenu) {
+      mainMenu.addMenu({
+        rank: 40,
+        id: 'collaboration',
+        label: trans.__('Collaboration')
+      });
+      
+      mainMenu.menus.find(menu => menu.id === 'collaboration')?.addItem({
+        command: CommandIDs.toggleCollaboration
       });
     }
-
-    // Add collaboration status to toolbar
-    if (toolbarRegistry) {
-      toolbarRegistry.addFactory('TopBar', 'collaboration', (toolbar) => {
-        const collaborationBarWidget = ReactWidget.create(
-          <CollaborationBar 
-            collaborationService={service}
-            translator={translator}
-          />
-        );
-        collaborationBarWidget.addClass('jp-NotebookCollaborationBar');
-        return collaborationBarWidget;
-      });
-    }
-
+    
     // Load settings
     if (settingRegistry) {
-      settingRegistry.load(collaborationCore.id)
+      const loadSettings = settingRegistry.load(collaborationCore.id);
+      loadSettings
         .then(settings => {
-          // Apply settings
-          const enabled = settings.get('enabled').composite as boolean;
-          if (service.enabled !== enabled) {
-            service.toggleCollaboration().catch(console.error);
-          }
-
-          // Listen for setting changes
+          // Update settings when they change
           settings.changed.connect(() => {
-            const newEnabled = settings.get('enabled').composite as boolean;
-            if (service.enabled !== newEnabled) {
-              service.toggleCollaboration().catch(console.error);
+            const autoEnable = settings.get('autoEnableCollaboration').composite as boolean;
+            if (autoEnable) {
+              // Auto-enable collaboration for new notebooks
+              tracker.widgetAdded.connect((_, panel) => {
+                service.setEnabled(panel, true);
+              });
             }
           });
         })
-        .catch(console.error);
+        .catch((reason: Error) => {
+          console.error(`Failed to load settings for ${collaborationCore.id}`, reason);
+        });
     }
-
-    // Initialize the service
-    service.initialize();
-
+    
     return service;
   }
 };
 
 /**
- * A plugin that provides the presence service for collaboration.
+ * Implementation of the CollaborationService.
  */
-const presencePlugin: JupyterFrontEndPlugin<IPresenceService> = {
-  id: '@jupyter-notebook/notebook-extension:collaboration-presence',
-  description: 'A plugin that provides the presence service for collaboration.',
+class CollaborationService implements ICollaborationService {
+  constructor(translator: ITranslator) {
+    this._translator = translator;
+    this._yjsDocs = new Map<string, Y.Doc>();
+    this._providers = new Map<string, WebsocketProvider>();
+    this._enabled = new Set<string>();
+    this._statusChanged = new Signal<ICollaborationService, { panel: NotebookPanel, status: 'connected' | 'disconnected' | 'error' }>(this);
+  }
+  
+  initialize(panel: NotebookPanel): void {
+    const id = panel.id;
+    
+    // Create Yjs document if it doesn't exist
+    if (!this._yjsDocs.has(id)) {
+      const doc = new Y.Doc();
+      this._yjsDocs.set(id, doc);
+      
+      // Create WebSocket provider
+      const baseUrl = PageConfig.getBaseUrl();
+      const wsUrl = URLExt.join(baseUrl, 'api/collaboration', panel.context.path);
+      const provider = new WebsocketProvider(wsUrl, id, doc);
+      this._providers.set(id, provider);
+      
+      // Handle connection status changes
+      provider.on('status', (event: { status: 'connecting' | 'connected' | 'disconnected' }) => {
+        if (event.status === 'connected') {
+          this._statusChanged.emit({ panel, status: 'connected' });
+        } else if (event.status === 'disconnected') {
+          this._statusChanged.emit({ panel, status: 'disconnected' });
+        }
+      });
+      
+      provider.on('connection-error', () => {
+        this._statusChanged.emit({ panel, status: 'error' });
+      });
+    }
+  }
+  
+  getYjsDocument(panel: NotebookPanel): Y.Doc | null {
+    return this._yjsDocs.get(panel.id) || null;
+  }
+  
+  getProvider(panel: NotebookPanel): WebsocketProvider | null {
+    return this._providers.get(panel.id) || null;
+  }
+  
+  isEnabled(panel: NotebookPanel): boolean {
+    return this._enabled.has(panel.id);
+  }
+  
+  setEnabled(panel: NotebookPanel, enabled: boolean): void {
+    const id = panel.id;
+    
+    if (enabled && !this._enabled.has(id)) {
+      // Initialize if not already initialized
+      this.initialize(panel);
+      
+      // Connect the provider
+      const provider = this._providers.get(id);
+      if (provider) {
+        provider.connect();
+      }
+      
+      this._enabled.add(id);
+    } else if (!enabled && this._enabled.has(id)) {
+      // Disconnect the provider
+      const provider = this._providers.get(id);
+      if (provider) {
+        provider.disconnect();
+      }
+      
+      this._enabled.delete(id);
+    }
+  }
+  
+  get statusChanged(): ISignal<ICollaborationService, { panel: NotebookPanel, status: 'connected' | 'disconnected' | 'error' }> {
+    return this._statusChanged;
+  }
+  
+  private _translator: ITranslator;
+  private _yjsDocs: Map<string, Y.Doc>;
+  private _providers: Map<string, WebsocketProvider>;
+  private _enabled: Set<string>;
+  private _statusChanged: Signal<ICollaborationService, { panel: NotebookPanel, status: 'connected' | 'disconnected' | 'error' }>;
+}
+
+/**
+ * A plugin that provides the presence service.
+ */
+const presenceService: JupyterFrontEndPlugin<IPresenceService> = {
+  id: '@jupyter-notebook/notebook-extension:presence-service',
+  description: 'A plugin that provides the presence service.',
   autoStart: true,
   requires: [ICollaborationService, INotebookTracker, ITranslator],
-  optional: [ISettingRegistry],
+  optional: [IToolbarWidgetRegistry],
   provides: IPresenceService,
   activate: (
     app: JupyterFrontEnd,
     collaborationService: ICollaborationService,
     tracker: INotebookTracker,
     translator: ITranslator,
-    settingRegistry: ISettingRegistry | null
+    toolbarRegistry: IToolbarWidgetRegistry | null
   ): IPresenceService => {
     const trans = translator.load('notebook');
-
-    // Create a class that implements the IPresenceService interface
-    class PresenceService implements IPresenceService {
-      private _enabled = true;
-      private _users: ICollaborator[] = [];
-      private _localUser: ICollaborator;
-
-      constructor() {
-        // Create a local user
-        this._localUser = {
-          id: 'local-user',
-          name: 'You',
-          color: '#3498db',
-          lastActivity: Date.now()
-        };
-
-        // Add the local user to the users list
-        this._users.push(this._localUser);
-      }
-
-      get enabled(): boolean {
-        return this._enabled && collaborationService.enabled && collaborationService.connected;
-      }
-
-      get users(): ReadonlyArray<ICollaborator> {
-        return this._users;
-      }
-
-      get localUser(): ICollaborator {
-        return this._localUser;
-      }
-
-      updateCursor(position: ICursorPosition): void {
-        // Update the local user's cursor position
-        console.log('Updating cursor position', position);
-      }
-
-      updateSelection(selection: ISelectionRange): void {
-        // Update the local user's selection range
-        console.log('Updating selection range', selection);
-      }
-
-      updateActiveCell(cellId: string): void {
-        // Update the local user's active cell
-        console.log('Updating active cell', cellId);
-      }
+    
+    // Create the presence service
+    const service = new PresenceService(collaborationService, translator);
+    
+    // Add presence indicator to toolbar
+    if (toolbarRegistry) {
+      toolbarRegistry.addFactory('TopBar', 'presence', (toolbar) => {
+        const node = document.createElement('div');
+        node.className = 'jp-NotebookPresence';
+        
+        const widget = new Widget({ node });
+        widget.id = DOMUtils.createDomID();
+        
+        // Update presence indicator when users change
+        service.presenceChanged.connect((_, args) => {
+          if (args.panel === tracker.currentWidget) {
+            const users = args.users;
+            node.innerHTML = '';
+            
+            if (users.length > 0) {
+              // Create avatar elements for up to 3 users
+              const maxVisible = Math.min(users.length, 3);
+              for (let i = 0; i < maxVisible; i++) {
+                const user = users[i];
+                const avatar = document.createElement('div');
+                avatar.className = 'jp-NotebookPresence-avatar';
+                avatar.style.backgroundColor = user.color;
+                avatar.title = user.name;
+                avatar.textContent = user.name.substring(0, 1).toUpperCase();
+                node.appendChild(avatar);
+              }
+              
+              // Add count if there are more users
+              if (users.length > 3) {
+                const count = document.createElement('div');
+                count.className = 'jp-NotebookPresence-count';
+                count.textContent = `+${users.length - 3}`;
+                count.title = trans.__('and %1 more users', users.length - 3);
+                node.appendChild(count);
+              }
+            }
+          }
+        });
+        
+        return widget;
+      });
     }
-
-    // Create an instance of the service
-    const service = new PresenceService();
-
-    // Load settings
-    if (settingRegistry) {
-      settingRegistry.load(presencePlugin.id)
-        .then(settings => {
-          // Apply settings
-          const enabled = settings.get('presence.enabled').composite as boolean;
-          service['_enabled'] = enabled;
-
-          // Listen for setting changes
-          settings.changed.connect(() => {
-            const newEnabled = settings.get('presence.enabled').composite as boolean;
-            service['_enabled'] = newEnabled;
-          });
-        })
-        .catch(console.error);
-    }
-
+    
     return service;
   }
 };
 
 /**
- * A plugin that provides the lock service for collaboration.
+ * Implementation of the PresenceService.
  */
-const lockPlugin: JupyterFrontEndPlugin<ILockService> = {
-  id: '@jupyter-notebook/notebook-extension:collaboration-locks',
-  description: 'A plugin that provides the lock service for collaboration.',
+class PresenceService implements IPresenceService {
+  constructor(collaborationService: ICollaborationService, translator: ITranslator) {
+    this._collaborationService = collaborationService;
+    this._translator = translator;
+    this._awareness = new Map<string, any>();
+    this._presenceChanged = new Signal<IPresenceService, { panel: NotebookPanel, users: Array<{ id: string, name: string, color: string, avatar?: string }> }>(this);
+  }
+  
+  initialize(panel: NotebookPanel): void {
+    const id = panel.id;
+    
+    // Get the provider from the collaboration service
+    const provider = this._collaborationService.getProvider(panel);
+    if (!provider) {
+      return;
+    }
+    
+    // Get the awareness instance from the provider
+    const awareness = provider.awareness;
+    this._awareness.set(id, awareness);
+    
+    // Set local user state
+    awareness.setLocalState({
+      user: {
+        id: PageConfig.getOption('userId') || `user-${Math.floor(Math.random() * 1000)}`,
+        name: PageConfig.getOption('userName') || 'Anonymous',
+        color: `hsl(${Math.floor(Math.random() * 360)}, 70%, 50%)`,
+      }
+    });
+    
+    // Listen for awareness changes
+    awareness.on('change', () => {
+      this._presenceChanged.emit({
+        panel,
+        users: this.getActiveUsers(panel)
+      });
+    });
+  }
+  
+  getActiveUsers(panel: NotebookPanel): Array<{ id: string, name: string, color: string, avatar?: string }> {
+    const awareness = this._awareness.get(panel.id);
+    if (!awareness) {
+      return [];
+    }
+    
+    const users: Array<{ id: string, name: string, color: string, avatar?: string }> = [];
+    awareness.getStates().forEach((state: any, clientId: number) => {
+      if (state.user) {
+        users.push({
+          id: state.user.id,
+          name: state.user.name,
+          color: state.user.color,
+          avatar: state.user.avatar
+        });
+      }
+    });
+    
+    return users;
+  }
+  
+  getAwareness(panel: NotebookPanel): any | null {
+    return this._awareness.get(panel.id) || null;
+  }
+  
+  get presenceChanged(): ISignal<IPresenceService, { panel: NotebookPanel, users: Array<{ id: string, name: string, color: string, avatar?: string }> }> {
+    return this._presenceChanged;
+  }
+  
+  private _collaborationService: ICollaborationService;
+  private _translator: ITranslator;
+  private _awareness: Map<string, any>;
+  private _presenceChanged: Signal<IPresenceService, { panel: NotebookPanel, users: Array<{ id: string, name: string, color: string, avatar?: string }> }>;
+}
+
+/**
+ * A plugin that provides the lock service.
+ */
+const lockService: JupyterFrontEndPlugin<ILockService> = {
+  id: '@jupyter-notebook/notebook-extension:lock-service',
+  description: 'A plugin that provides the lock service.',
   autoStart: true,
   requires: [ICollaborationService, INotebookTracker, ITranslator],
-  optional: [ISettingRegistry, ICommandPalette],
+  optional: [ICommandPalette, IMainMenu],
   provides: ILockService,
   activate: (
     app: JupyterFrontEnd,
     collaborationService: ICollaborationService,
     tracker: INotebookTracker,
     translator: ITranslator,
-    settingRegistry: ISettingRegistry | null,
-    palette: ICommandPalette | null
+    palette: ICommandPalette | null,
+    mainMenu: IMainMenu | null
   ): ILockService => {
     const trans = translator.load('notebook');
     const { commands } = app;
-
-    // Create a class that implements the ILockService interface
-    class LockService implements ILockService {
-      private _enabled = true;
-      private _lockedCells = new Map<string, ILock>();
-
-      constructor() {
-        // Initialize the service
-      }
-
-      get enabled(): boolean {
-        return this._enabled && collaborationService.enabled && collaborationService.connected;
-      }
-
-      get lockedCells(): ReadonlyMap<string, ILock> {
-        return this._lockedCells;
-      }
-
-      async acquireLock(cellId: string): Promise<boolean> {
-        // Acquire a lock on a cell
-        console.log('Acquiring lock on cell', cellId);
-        if (!this.enabled) {
-          return false;
-        }
-
-        // Check if the cell is already locked by another user
-        if (this.isLockedByOther(cellId)) {
-          return false;
-        }
-
-        // Create a lock
-        const lock: ILock = {
-          cellId,
-          userId: 'local-user',
-          timestamp: Date.now(),
-          expiresIn: 5 * 60 * 1000 // 5 minutes
-        };
-
-        // Add the lock to the map
-        this._lockedCells.set(cellId, lock);
-
-        return true;
-      }
-
-      async releaseLock(cellId: string): Promise<boolean> {
-        // Release a lock on a cell
-        console.log('Releasing lock on cell', cellId);
-        if (!this.enabled) {
-          return false;
-        }
-
-        // Check if the cell is locked by the current user
-        if (!this.isLockedByMe(cellId)) {
-          return false;
-        }
-
-        // Remove the lock from the map
-        this._lockedCells.delete(cellId);
-
-        return true;
-      }
-
-      isLockedByMe(cellId: string): boolean {
-        // Check if a cell is locked by the current user
-        const lock = this._lockedCells.get(cellId);
-        return !!lock && lock.userId === 'local-user';
-      }
-
-      isLockedByOther(cellId: string): boolean {
-        // Check if a cell is locked by another user
-        const lock = this._lockedCells.get(cellId);
-        return !!lock && lock.userId !== 'local-user';
-      }
-
-      getLock(cellId: string): ILock | null {
-        // Get the lock information for a cell
-        return this._lockedCells.get(cellId) || null;
-      }
-    }
-
-    // Create an instance of the service
-    const service = new LockService();
-
-    // Register commands
-    commands.addCommand(CommandIDs.toggleCellLock, {
-      label: trans.__('Toggle Cell Lock'),
+    
+    // Create the lock service
+    const service = new LockService(collaborationService, translator);
+    
+    // Add lock/unlock commands
+    commands.addCommand(CommandIDs.lockCurrentCell, {
+      label: trans.__('Lock Current Cell'),
       execute: async () => {
-        const current = tracker.currentWidget;
-        if (!current) {
+        const panel = tracker.currentWidget;
+        if (!panel) {
           return;
         }
-
-        const activeCell = current.content.activeCell;
+        
+        const activeCell = panel.content.activeCell;
         if (!activeCell) {
           return;
         }
-
-        const cellId = activeCell.model.id;
-
-        if (service.isLockedByMe(cellId)) {
-          return service.releaseLock(cellId);
-        } else {
-          return service.acquireLock(cellId);
-        }
+        
+        await service.lockCell(panel, activeCell.model.id);
       },
-      isEnabled: () => tracker.currentWidget !== null && 
-                     tracker.currentWidget.content.activeCell !== null && 
-                     service.enabled,
-      isToggled: () => {
-        const current = tracker.currentWidget;
-        if (!current) {
+      isEnabled: () => {
+        const panel = tracker.currentWidget;
+        if (!panel || !collaborationService.isEnabled(panel)) {
           return false;
         }
-
-        const activeCell = current.content.activeCell;
+        
+        const activeCell = panel.content.activeCell;
         if (!activeCell) {
           return false;
         }
-
-        return service.isLockedByMe(activeCell.model.id);
+        
+        return !service.isCellLocked(panel, activeCell.model.id);
       }
     });
-
-    // Add to command palette
+    
+    commands.addCommand(CommandIDs.unlockCurrentCell, {
+      label: trans.__('Unlock Current Cell'),
+      execute: async () => {
+        const panel = tracker.currentWidget;
+        if (!panel) {
+          return;
+        }
+        
+        const activeCell = panel.content.activeCell;
+        if (!activeCell) {
+          return;
+        }
+        
+        await service.unlockCell(panel, activeCell.model.id);
+      },
+      isEnabled: () => {
+        const panel = tracker.currentWidget;
+        if (!panel || !collaborationService.isEnabled(panel)) {
+          return false;
+        }
+        
+        const activeCell = panel.content.activeCell;
+        if (!activeCell) {
+          return false;
+        }
+        
+        const owner = service.getCellLockOwner(panel, activeCell.model.id);
+        // Can only unlock if you're the owner
+        return owner === PageConfig.getOption('userId');
+      }
+    });
+    
+    // Add commands to palette
     if (palette) {
       palette.addItem({
-        command: CommandIDs.toggleCellLock,
+        command: CommandIDs.lockCurrentCell,
+        category: 'Collaboration'
+      });
+      
+      palette.addItem({
+        command: CommandIDs.unlockCurrentCell,
         category: 'Collaboration'
       });
     }
-
-    // Load settings
-    if (settingRegistry) {
-      settingRegistry.load(lockPlugin.id)
-        .then(settings => {
-          // Apply settings
-          const enabled = settings.get('locks.enabled').composite as boolean;
-          service['_enabled'] = enabled;
-
-          // Listen for setting changes
-          settings.changed.connect(() => {
-            const newEnabled = settings.get('locks.enabled').composite as boolean;
-            service['_enabled'] = newEnabled;
-          });
-        })
-        .catch(console.error);
+    
+    // Add commands to collaboration menu
+    if (mainMenu) {
+      const menu = mainMenu.menus.find(menu => menu.id === 'collaboration');
+      if (menu) {
+        menu.addItem({ type: 'separator' });
+        menu.addItem({ command: CommandIDs.lockCurrentCell });
+        menu.addItem({ command: CommandIDs.unlockCurrentCell });
+      }
     }
-
+    
     return service;
   }
 };
 
 /**
- * A plugin that provides the history service for collaboration.
+ * Implementation of the LockService.
  */
-const historyPlugin: JupyterFrontEndPlugin<IHistoryService> = {
-  id: '@jupyter-notebook/notebook-extension:collaboration-history',
-  description: 'A plugin that provides the history service for collaboration.',
+class LockService implements ILockService {
+  constructor(collaborationService: ICollaborationService, translator: ITranslator) {
+    this._collaborationService = collaborationService;
+    this._translator = translator;
+    this._locks = new Map<string, Map<string, string>>();
+    this._lockChanged = new Signal<ILockService, { panel: NotebookPanel, cellId: string, locked: boolean, owner: string | null }>(this);
+  }
+  
+  initialize(panel: NotebookPanel): void {
+    const id = panel.id;
+    
+    // Get the Yjs document from the collaboration service
+    const doc = this._collaborationService.getYjsDocument(panel);
+    if (!doc) {
+      return;
+    }
+    
+    // Create a shared map for locks if it doesn't exist
+    if (!doc.getMap('locks')) {
+      doc.getMap('locks');
+    }
+    
+    // Initialize locks map for this panel
+    if (!this._locks.has(id)) {
+      this._locks.set(id, new Map<string, string>());
+    }
+    
+    // Listen for changes to the locks map
+    doc.getMap('locks').observe(event => {
+      const locks = this._locks.get(id)!;
+      
+      // Update local locks map
+      event.changes.keys.forEach((change, key) => {
+        if (change.action === 'add' || change.action === 'update') {
+          const owner = doc.getMap('locks').get(key);
+          locks.set(key, owner);
+          this._lockChanged.emit({
+            panel,
+            cellId: key,
+            locked: true,
+            owner
+          });
+        } else if (change.action === 'delete') {
+          locks.delete(key);
+          this._lockChanged.emit({
+            panel,
+            cellId: key,
+            locked: false,
+            owner: null
+          });
+        }
+      });
+    });
+  }
+  
+  async lockCell(panel: NotebookPanel, cellId: string): Promise<boolean> {
+    const doc = this._collaborationService.getYjsDocument(panel);
+    if (!doc) {
+      return false;
+    }
+    
+    // Check if cell is already locked
+    const locksMap = doc.getMap('locks');
+    if (locksMap.has(cellId)) {
+      return false;
+    }
+    
+    // Lock the cell with current user ID
+    const userId = PageConfig.getOption('userId') || `user-${Math.floor(Math.random() * 1000)}`;
+    locksMap.set(cellId, userId);
+    
+    return true;
+  }
+  
+  async unlockCell(panel: NotebookPanel, cellId: string): Promise<boolean> {
+    const doc = this._collaborationService.getYjsDocument(panel);
+    if (!doc) {
+      return false;
+    }
+    
+    // Check if cell is locked by current user
+    const locksMap = doc.getMap('locks');
+    const owner = locksMap.get(cellId);
+    const userId = PageConfig.getOption('userId') || `user-${Math.floor(Math.random() * 1000)}`;
+    
+    if (owner !== userId) {
+      return false;
+    }
+    
+    // Unlock the cell
+    locksMap.delete(cellId);
+    
+    return true;
+  }
+  
+  isCellLocked(panel: NotebookPanel, cellId: string): boolean {
+    const locks = this._locks.get(panel.id);
+    if (!locks) {
+      return false;
+    }
+    
+    return locks.has(cellId);
+  }
+  
+  getCellLockOwner(panel: NotebookPanel, cellId: string): string | null {
+    const locks = this._locks.get(panel.id);
+    if (!locks) {
+      return null;
+    }
+    
+    return locks.get(cellId) || null;
+  }
+  
+  get lockChanged(): ISignal<ILockService, { panel: NotebookPanel, cellId: string, locked: boolean, owner: string | null }> {
+    return this._lockChanged;
+  }
+  
+  private _collaborationService: ICollaborationService;
+  private _translator: ITranslator;
+  private _locks: Map<string, Map<string, string>>;
+  private _lockChanged: Signal<ILockService, { panel: NotebookPanel, cellId: string, locked: boolean, owner: string | null }>;
+}
+
+/**
+ * A plugin that provides the history service.
+ */
+const historyService: JupyterFrontEndPlugin<IHistoryService> = {
+  id: '@jupyter-notebook/notebook-extension:history-service',
+  description: 'A plugin that provides the history service.',
   autoStart: true,
   requires: [ICollaborationService, INotebookTracker, ITranslator],
-  optional: [ISettingRegistry, ICommandPalette],
+  optional: [ICommandPalette, IMainMenu],
   provides: IHistoryService,
   activate: (
     app: JupyterFrontEnd,
     collaborationService: ICollaborationService,
     tracker: INotebookTracker,
     translator: ITranslator,
-    settingRegistry: ISettingRegistry | null,
-    palette: ICommandPalette | null
+    palette: ICommandPalette | null,
+    mainMenu: IMainMenu | null
   ): IHistoryService => {
     const trans = translator.load('notebook');
     const { commands } = app;
-
-    // Create a class that implements the IHistoryService interface
-    class HistoryService implements IHistoryService {
-      private _enabled = true;
-      private _versions: IVersion[] = [];
-
-      constructor() {
-        // Initialize with a single version
-        this._versions.push({
-          id: 'initial',
-          userId: 'system',
-          timestamp: Date.now(),
-          name: 'Initial Version'
-        });
-      }
-
-      get enabled(): boolean {
-        return this._enabled && collaborationService.enabled && collaborationService.connected;
-      }
-
-      get versions(): ReadonlyArray<IVersion> {
-        return this._versions;
-      }
-
-      async getDiff(fromVersion: string, toVersion: string): Promise<IDiff> {
-        // Get the changes between two versions
-        console.log('Getting diff between versions', fromVersion, toVersion);
-
-        // Return an empty diff for now
-        return {
-          fromVersion,
-          toVersion,
-          changes: []
-        };
-      }
-
-      async restore(version: string): Promise<boolean> {
-        // Restore the document to a specific version
-        console.log('Restoring to version', version);
-        return true;
-      }
-
-      async createSnapshot(name?: string): Promise<IVersion> {
-        // Create a new snapshot of the current document state
-        console.log('Creating snapshot', name);
-
-        const version: IVersion = {
-          id: `snapshot-${Date.now()}`,
-          userId: 'local-user',
-          timestamp: Date.now(),
-          name: name || `Snapshot ${this._versions.length}`
-        };
-
-        this._versions.push(version);
-
-        return version;
-      }
-    }
-
-    // Create an instance of the service
-    const service = new HistoryService();
-
-    // Register commands
-    commands.addCommand(CommandIDs.showHistoryViewer, {
-      label: trans.__('Show Version History'),
+    
+    // Create the history service
+    const service = new HistoryService(collaborationService, translator);
+    
+    // Add history command
+    commands.addCommand(CommandIDs.showCollaborationHistory, {
+      label: trans.__('Show Collaboration History'),
       execute: () => {
-        // Show the history viewer dialog
-        const historyViewerWidget = ReactWidget.create(
-          <HistoryViewer 
-            historyService={service}
-            translator={translator}
-          />
-        );
-
-        return showDialog({
-          title: trans.__('Version History'),
-          body: historyViewerWidget,
-          buttons: [Dialog.okButton({ label: trans.__('Close') })]
+        const panel = tracker.currentWidget;
+        if (!panel) {
+          return;
+        }
+        
+        // Show history viewer dialog
+        const history = service.getHistory(panel);
+        showDialog({
+          title: trans.__('Collaboration History'),
+          body: trans.__('This feature will show the full history of changes to this notebook.'),
+          buttons: [Dialog.okButton({ label: trans.__('OK') })]
         });
       },
-      isEnabled: () => tracker.currentWidget !== null && service.enabled
+      isEnabled: () => {
+        const panel = tracker.currentWidget;
+        return panel !== null && collaborationService.isEnabled(panel);
+      }
     });
-
-    // Add to command palette
+    
+    // Add command to palette
     if (palette) {
       palette.addItem({
-        command: CommandIDs.showHistoryViewer,
+        command: CommandIDs.showCollaborationHistory,
         category: 'Collaboration'
       });
     }
-
-    // Load settings
-    if (settingRegistry) {
-      settingRegistry.load(historyPlugin.id)
-        .then(settings => {
-          // Apply settings
-          const enabled = settings.get('enabled').composite as boolean;
-          service['_enabled'] = enabled;
-
-          // Listen for setting changes
-          settings.changed.connect(() => {
-            const newEnabled = settings.get('enabled').composite as boolean;
-            service['_enabled'] = newEnabled;
-          });
-        })
-        .catch(console.error);
+    
+    // Add command to collaboration menu
+    if (mainMenu) {
+      const menu = mainMenu.menus.find(menu => menu.id === 'collaboration');
+      if (menu) {
+        menu.addItem({ type: 'separator' });
+        menu.addItem({ command: CommandIDs.showCollaborationHistory });
+      }
     }
-
+    
     return service;
   }
 };
 
 /**
- * A plugin that provides the permissions service for collaboration.
+ * Implementation of the HistoryService.
  */
-const permissionsPlugin: JupyterFrontEndPlugin<IPermissionsService> = {
-  id: '@jupyter-notebook/notebook-extension:collaboration-permissions',
-  description: 'A plugin that provides the permissions service for collaboration.',
+class HistoryService implements IHistoryService {
+  constructor(collaborationService: ICollaborationService, translator: ITranslator) {
+    this._collaborationService = collaborationService;
+    this._translator = translator;
+    this._history = new Map<string, Array<{ id: string, timestamp: number, author: string, changes: any }>>(); 
+    this._historyChanged = new Signal<IHistoryService, { panel: NotebookPanel, history: Array<{ id: string, timestamp: number, author: string, changes: any }> }>(this);
+  }
+  
+  initialize(panel: NotebookPanel): void {
+    const id = panel.id;
+    
+    // Get the Yjs document from the collaboration service
+    const doc = this._collaborationService.getYjsDocument(panel);
+    if (!doc) {
+      return;
+    }
+    
+    // Initialize history for this panel
+    if (!this._history.has(id)) {
+      this._history.set(id, []);
+    }
+    
+    // Listen for document updates to track history
+    doc.on('update', (update: Uint8Array, origin: any) => {
+      // Skip updates that originated from this client
+      if (origin === 'local') {
+        return;
+      }
+      
+      // Add update to history
+      const history = this._history.get(id)!;
+      const entry = {
+        id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+        timestamp: Date.now(),
+        author: origin?.user?.name || 'Unknown',
+        changes: update
+      };
+      
+      history.push(entry);
+      
+      // Emit history changed event
+      this._historyChanged.emit({
+        panel,
+        history: this.getHistory(panel)
+      });
+    });
+  }
+  
+  getHistory(panel: NotebookPanel): Array<{ id: string, timestamp: number, author: string, changes: any }> {
+    return this._history.get(panel.id) || [];
+  }
+  
+  async restoreToVersion(panel: NotebookPanel, versionId: string): Promise<boolean> {
+    // This is a placeholder implementation
+    // In a real implementation, we would apply the Yjs updates to restore to a specific version
+    return false;
+  }
+  
+  get historyChanged(): ISignal<IHistoryService, { panel: NotebookPanel, history: Array<{ id: string, timestamp: number, author: string, changes: any }> }> {
+    return this._historyChanged;
+  }
+  
+  private _collaborationService: ICollaborationService;
+  private _translator: ITranslator;
+  private _history: Map<string, Array<{ id: string, timestamp: number, author: string, changes: any }>>;
+  private _historyChanged: Signal<IHistoryService, { panel: NotebookPanel, history: Array<{ id: string, timestamp: number, author: string, changes: any }> }>;
+}
+
+/**
+ * A plugin that provides the permissions service.
+ */
+const permissionsService: JupyterFrontEndPlugin<IPermissionsService> = {
+  id: '@jupyter-notebook/notebook-extension:permissions-service',
+  description: 'A plugin that provides the permissions service.',
   autoStart: true,
   requires: [ICollaborationService, INotebookTracker, ITranslator],
-  optional: [ISettingRegistry, ICommandPalette],
+  optional: [ICommandPalette, IMainMenu],
   provides: IPermissionsService,
   activate: (
     app: JupyterFrontEnd,
     collaborationService: ICollaborationService,
     tracker: INotebookTracker,
     translator: ITranslator,
-    settingRegistry: ISettingRegistry | null,
-    palette: ICommandPalette | null
+    palette: ICommandPalette | null,
+    mainMenu: IMainMenu | null
   ): IPermissionsService => {
     const trans = translator.load('notebook');
     const { commands } = app;
-
-    // Create a class that implements the IPermissionsService interface
-    class PermissionsService implements IPermissionsService {
-      private _enabled = true;
-      private _currentRole = 'admin';
-      private _userRoles = new Map<string, string>();
-      private _roles: IRole[] = [
-        {
-          id: 'viewer',
-          name: 'Viewer',
-          description: 'Can view the notebook but not edit',
-          permissions: ['view']
-        },
-        {
-          id: 'editor',
-          name: 'Editor',
-          description: 'Can edit and execute cells',
-          permissions: ['view', 'edit', 'execute']
-        },
-        {
-          id: 'admin',
-          name: 'Admin',
-          description: 'Can manage users and permissions',
-          permissions: ['view', 'edit', 'execute', 'manage']
-        }
-      ];
-
-      constructor() {
-        // Initialize with the local user as admin
-        this._userRoles.set('local-user', 'admin');
-      }
-
-      get enabled(): boolean {
-        return this._enabled && collaborationService.enabled && collaborationService.connected;
-      }
-
-      get currentRole(): string {
-        return this._currentRole;
-      }
-
-      get userRoles(): ReadonlyMap<string, string> {
-        return this._userRoles;
-      }
-
-      hasPermission(permission: string): boolean {
-        // Check if the current user has a specific permission
-        const role = this._roles.find(r => r.id === this._currentRole);
-        return role ? role.permissions.includes(permission) : false;
-      }
-
-      async setUserRole(userId: string, role: string): Promise<boolean> {
-        // Set a user's role
-        console.log('Setting user role', userId, role);
-
-        // Check if the role exists
-        if (!this._roles.some(r => r.id === role)) {
-          return false;
-        }
-
-        // Set the role
-        this._userRoles.set(userId, role);
-
-        return true;
-      }
-
-      getRoles(): ReadonlyArray<IRole> {
-        return this._roles;
-      }
-    }
-
-    // Create an instance of the service
-    const service = new PermissionsService();
-
-    // Register commands
+    
+    // Create the permissions service
+    const service = new PermissionsService(collaborationService, translator);
+    
+    // Add permissions command
     commands.addCommand(CommandIDs.showPermissionsDialog, {
-      label: trans.__('Manage Permissions'),
+      label: trans.__('Manage Collaboration Permissions'),
       execute: () => {
-        // Show the permissions dialog
-        const permissionsDialogWidget = ReactWidget.create(
-          <PermissionsDialog 
-            permissionsService={service}
-            translator={translator}
-          />
-        );
-
-        return showDialog({
-          title: trans.__('Manage Permissions'),
-          body: permissionsDialogWidget,
-          buttons: [Dialog.okButton({ label: trans.__('Close') })]
+        const panel = tracker.currentWidget;
+        if (!panel) {
+          return;
+        }
+        
+        // Show permissions dialog
+        const permissions = service.getPermissions(panel);
+        showDialog({
+          title: trans.__('Collaboration Permissions'),
+          body: trans.__('This feature will allow you to manage who can view, comment on, or edit this notebook.'),
+          buttons: [Dialog.okButton({ label: trans.__('OK') })]
         });
       },
-      isEnabled: () => tracker.currentWidget !== null && 
-                     service.enabled && 
-                     service.hasPermission('manage')
+      isEnabled: () => {
+        const panel = tracker.currentWidget;
+        if (!panel || !collaborationService.isEnabled(panel)) {
+          return false;
+        }
+        
+        // Only users with admin permission can manage permissions
+        return service.hasPermission(panel, 'admin');
+      }
     });
-
-    // Add to command palette
+    
+    // Add command to palette
     if (palette) {
       palette.addItem({
         command: CommandIDs.showPermissionsDialog,
         category: 'Collaboration'
       });
     }
-
-    // Load settings
-    if (settingRegistry) {
-      settingRegistry.load(permissionsPlugin.id)
-        .then(settings => {
-          // Apply settings
-          const enabled = settings.get('enabled').composite as boolean;
-          service['_enabled'] = enabled;
-
-          // Listen for setting changes
-          settings.changed.connect(() => {
-            const newEnabled = settings.get('enabled').composite as boolean;
-            service['_enabled'] = newEnabled;
-          });
-        })
-        .catch(console.error);
+    
+    // Add command to collaboration menu
+    if (mainMenu) {
+      const menu = mainMenu.menus.find(menu => menu.id === 'collaboration');
+      if (menu) {
+        menu.addItem({ type: 'separator' });
+        menu.addItem({ command: CommandIDs.showPermissionsDialog });
+      }
     }
-
+    
     return service;
   }
 };
 
 /**
- * A plugin that provides the comment service for collaboration.
+ * Implementation of the PermissionsService.
  */
-const commentPlugin: JupyterFrontEndPlugin<ICommentService> = {
-  id: '@jupyter-notebook/notebook-extension:collaboration-comments',
-  description: 'A plugin that provides the comment service for collaboration.',
+class PermissionsService implements IPermissionsService {
+  constructor(collaborationService: ICollaborationService, translator: ITranslator) {
+    this._collaborationService = collaborationService;
+    this._translator = translator;
+    this._permissions = new Map<string, { [userId: string]: 'view' | 'comment' | 'edit' | 'admin' }>(); 
+    this._permissionsChanged = new Signal<IPermissionsService, { panel: NotebookPanel, permissions: { [userId: string]: 'view' | 'comment' | 'edit' | 'admin' } }>(this);
+  }
+  
+  initialize(panel: NotebookPanel): void {
+    const id = panel.id;
+    
+    // Get the Yjs document from the collaboration service
+    const doc = this._collaborationService.getYjsDocument(panel);
+    if (!doc) {
+      return;
+    }
+    
+    // Create a shared map for permissions if it doesn't exist
+    if (!doc.getMap('permissions')) {
+      doc.getMap('permissions');
+    }
+    
+    // Initialize permissions for this panel
+    if (!this._permissions.has(id)) {
+      this._permissions.set(id, {});
+      
+      // Set current user as admin by default
+      const userId = PageConfig.getOption('userId') || `user-${Math.floor(Math.random() * 1000)}`;
+      this._permissions.get(id)![userId] = 'admin';
+      doc.getMap('permissions').set(userId, 'admin');
+    }
+    
+    // Listen for changes to the permissions map
+    doc.getMap('permissions').observe(event => {
+      const permissions = this._permissions.get(id)!;
+      
+      // Update local permissions map
+      event.changes.keys.forEach((change, key) => {
+        if (change.action === 'add' || change.action === 'update') {
+          const permission = doc.getMap('permissions').get(key) as 'view' | 'comment' | 'edit' | 'admin';
+          permissions[key] = permission;
+        } else if (change.action === 'delete') {
+          delete permissions[key];
+        }
+      });
+      
+      // Emit permissions changed event
+      this._permissionsChanged.emit({
+        panel,
+        permissions: { ...permissions }
+      });
+    });
+  }
+  
+  getPermissions(panel: NotebookPanel): { [userId: string]: 'view' | 'comment' | 'edit' | 'admin' } {
+    return { ...this._permissions.get(panel.id) } || {};
+  }
+  
+  async setUserPermission(
+    panel: NotebookPanel,
+    userId: string,
+    permission: 'view' | 'comment' | 'edit' | 'admin'
+  ): Promise<boolean> {
+    const doc = this._collaborationService.getYjsDocument(panel);
+    if (!doc) {
+      return false;
+    }
+    
+    // Check if current user has admin permission
+    const currentUserId = PageConfig.getOption('userId') || `user-${Math.floor(Math.random() * 1000)}`;
+    const permissions = this._permissions.get(panel.id) || {};
+    
+    if (permissions[currentUserId] !== 'admin') {
+      return false;
+    }
+    
+    // Set permission for user
+    doc.getMap('permissions').set(userId, permission);
+    
+    return true;
+  }
+  
+  hasPermission(panel: NotebookPanel, permission: 'view' | 'comment' | 'edit' | 'admin'): boolean {
+    const userId = PageConfig.getOption('userId') || `user-${Math.floor(Math.random() * 1000)}`;
+    const permissions = this._permissions.get(panel.id) || {};
+    const userPermission = permissions[userId] || 'view';
+    
+    // Check if user has the required permission or higher
+    switch (permission) {
+      case 'view':
+        return true; // Everyone has view permission
+      case 'comment':
+        return userPermission === 'comment' || userPermission === 'edit' || userPermission === 'admin';
+      case 'edit':
+        return userPermission === 'edit' || userPermission === 'admin';
+      case 'admin':
+        return userPermission === 'admin';
+      default:
+        return false;
+    }
+  }
+  
+  get permissionsChanged(): ISignal<IPermissionsService, { panel: NotebookPanel, permissions: { [userId: string]: 'view' | 'comment' | 'edit' | 'admin' } }> {
+    return this._permissionsChanged;
+  }
+  
+  private _collaborationService: ICollaborationService;
+  private _translator: ITranslator;
+  private _permissions: Map<string, { [userId: string]: 'view' | 'comment' | 'edit' | 'admin' }>;
+  private _permissionsChanged: Signal<IPermissionsService, { panel: NotebookPanel, permissions: { [userId: string]: 'view' | 'comment' | 'edit' | 'admin' } }>;
+}
+
+/**
+ * A plugin that provides the comment service.
+ */
+const commentService: JupyterFrontEndPlugin<ICommentService> = {
+  id: '@jupyter-notebook/notebook-extension:comment-service',
+  description: 'A plugin that provides the comment service.',
   autoStart: true,
   requires: [ICollaborationService, INotebookTracker, ITranslator],
-  optional: [ISettingRegistry, ICommandPalette],
+  optional: [ICommandPalette, IMainMenu],
   provides: ICommentService,
   activate: (
     app: JupyterFrontEnd,
     collaborationService: ICollaborationService,
     tracker: INotebookTracker,
     translator: ITranslator,
-    settingRegistry: ISettingRegistry | null,
-    palette: ICommandPalette | null
+    palette: ICommandPalette | null,
+    mainMenu: IMainMenu | null
   ): ICommentService => {
     const trans = translator.load('notebook');
     const { commands } = app;
-
-    // Create a class that implements the ICommentService interface
-    class CommentService implements ICommentService {
-      private _enabled = true;
-      private _comments: IComment[] = [];
-
-      constructor() {
-        // Initialize the service
-      }
-
-      get enabled(): boolean {
-        return this._enabled && collaborationService.enabled && collaborationService.connected;
-      }
-
-      get comments(): ReadonlyArray<IComment> {
-        return this._comments;
-      }
-
-      async addComment(cellId: string, text: string, range?: ISelectionRange): Promise<IComment> {
-        // Add a comment to a cell
-        console.log('Adding comment to cell', cellId, text, range);
-
-        const comment: IComment = {
-          id: `comment-${Date.now()}`,
-          cellId,
-          userId: 'local-user',
-          timestamp: Date.now(),
-          text,
-          range,
-          resolved: false,
-          replies: []
-        };
-
-        this._comments.push(comment);
-
-        return comment;
-      }
-
-      async replyToComment(commentId: string, text: string): Promise<IComment> {
-        // Reply to a comment
-        console.log('Replying to comment', commentId, text);
-
-        // Find the parent comment
-        const parentComment = this._comments.find(c => c.id === commentId);
-        if (!parentComment) {
-          throw new Error(`Comment with ID ${commentId} not found`);
-        }
-
-        const reply: IComment = {
-          id: `comment-${Date.now()}`,
-          cellId: parentComment.cellId,
-          userId: 'local-user',
-          timestamp: Date.now(),
-          text,
-          parentId: commentId,
-          resolved: false,
-          replies: []
-        };
-
-        // Add the reply to the parent comment's replies
-        (parentComment.replies as IComment[]).push(reply);
-
-        return reply;
-      }
-
-      async resolveComment(commentId: string): Promise<boolean> {
-        // Resolve a comment
-        console.log('Resolving comment', commentId);
-
-        // Find the comment
-        const comment = this._findComment(commentId);
-        if (!comment) {
-          return false;
-        }
-
-        // Mark the comment as resolved
-        (comment as any).resolved = true;
-        (comment as any).resolvedBy = 'local-user';
-        (comment as any).resolvedAt = Date.now();
-
-        return true;
-      }
-
-      async deleteComment(commentId: string): Promise<boolean> {
-        // Delete a comment
-        console.log('Deleting comment', commentId);
-
-        // Find the comment
-        const comment = this._findComment(commentId);
-        if (!comment) {
-          return false;
-        }
-
-        // If it's a top-level comment, remove it from the comments array
-        if (!comment.parentId) {
-          const index = this._comments.findIndex(c => c.id === commentId);
-          if (index !== -1) {
-            this._comments.splice(index, 1);
-          }
-        } else {
-          // If it's a reply, remove it from the parent's replies
-          const parentComment = this._findComment(comment.parentId);
-          if (parentComment) {
-            const index = (parentComment.replies as IComment[]).findIndex(c => c.id === commentId);
-            if (index !== -1) {
-              (parentComment.replies as IComment[]).splice(index, 1);
-            }
-          }
-        }
-
-        return true;
-      }
-
-      getCommentsForCell(cellId: string): ReadonlyArray<IComment> {
-        // Get comments for a specific cell
-        return this._comments.filter(c => c.cellId === cellId && !c.parentId);
-      }
-
-      private _findComment(commentId: string): IComment | undefined {
-        // Find a comment by ID (including replies)
-        const topLevelComment = this._comments.find(c => c.id === commentId);
-        if (topLevelComment) {
-          return topLevelComment;
-        }
-
-        // Search in replies
-        for (const comment of this._comments) {
-          const reply = comment.replies.find(r => r.id === commentId);
-          if (reply) {
-            return reply;
-          }
-        }
-
-        return undefined;
-      }
-    }
-
-    // Create an instance of the service
-    const service = new CommentService();
-
-    // Register commands
-    commands.addCommand(CommandIDs.addComment, {
-      label: trans.__('Add Comment'),
-      execute: async () => {
-        const current = tracker.currentWidget;
-        if (!current) {
+    
+    // Create the comment service
+    const service = new CommentService(collaborationService, translator);
+    
+    // Add comments command
+    commands.addCommand(CommandIDs.showCommentsPanel, {
+      label: trans.__('Show Comments Panel'),
+      execute: () => {
+        const panel = tracker.currentWidget;
+        if (!panel) {
           return;
         }
-
-        const activeCell = current.content.activeCell;
-        if (!activeCell) {
-          return;
-        }
-
-        const cellId = activeCell.model.id;
-
-        // Show a dialog to get the comment text
-        const result = await showDialog({
-          title: trans.__('Add Comment'),
-          body: new Widget({ node: document.createElement('textarea') }),
-          buttons: [Dialog.cancelButton(), Dialog.okButton({ label: trans.__('Add') })]
+        
+        // Show comments panel
+        showDialog({
+          title: trans.__('Notebook Comments'),
+          body: trans.__('This feature will show a panel with all comments on this notebook.'),
+          buttons: [Dialog.okButton({ label: trans.__('OK') })]
         });
-
-        if (result.button.accept) {
-          const textarea = result.value.node as HTMLTextAreaElement;
-          const text = textarea.value.trim();
-          if (text) {
-            return service.addComment(cellId, text);
-          }
-        }
       },
-      isEnabled: () => tracker.currentWidget !== null && 
-                     tracker.currentWidget.content.activeCell !== null && 
-                     service.enabled
+      isEnabled: () => {
+        const panel = tracker.currentWidget;
+        return panel !== null && collaborationService.isEnabled(panel);
+      }
     });
-
-    // Add to command palette
+    
+    // Add command to palette
     if (palette) {
       palette.addItem({
-        command: CommandIDs.addComment,
+        command: CommandIDs.showCommentsPanel,
         category: 'Collaboration'
       });
     }
-
-    // Load settings
-    if (settingRegistry) {
-      settingRegistry.load(commentPlugin.id)
-        .then(settings => {
-          // Apply settings
-          const enabled = settings.get('enabled').composite as boolean;
-          service['_enabled'] = enabled;
-
-          // Listen for setting changes
-          settings.changed.connect(() => {
-            const newEnabled = settings.get('enabled').composite as boolean;
-            service['_enabled'] = newEnabled;
-          });
-        })
-        .catch(console.error);
+    
+    // Add command to collaboration menu
+    if (mainMenu) {
+      const menu = mainMenu.menus.find(menu => menu.id === 'collaboration');
+      if (menu) {
+        menu.addItem({ type: 'separator' });
+        menu.addItem({ command: CommandIDs.showCommentsPanel });
+      }
     }
-
+    
     return service;
   }
 };
+
+/**
+ * Implementation of the CommentService.
+ */
+class CommentService implements ICommentService {
+  constructor(collaborationService: ICollaborationService, translator: ITranslator) {
+    this._collaborationService = collaborationService;
+    this._translator = translator;
+    this._comments = new Map<string, Array<{ id: string, cellId: string, author: string, text: string, timestamp: number, resolved: boolean, range?: { start: number, end: number } }>>(); 
+    this._commentsChanged = new Signal<ICommentService, { panel: NotebookPanel, comments: Array<{ id: string, cellId: string, author: string, text: string, timestamp: number, resolved: boolean, range?: { start: number, end: number } }> }>(this);
+  }
+  
+  initialize(panel: NotebookPanel): void {
+    const id = panel.id;
+    
+    // Get the Yjs document from the collaboration service
+    const doc = this._collaborationService.getYjsDocument(panel);
+    if (!doc) {
+      return;
+    }
+    
+    // Create a shared array for comments if it doesn't exist
+    if (!doc.getArray('comments')) {
+      doc.getArray('comments');
+    }
+    
+    // Initialize comments for this panel
+    if (!this._comments.has(id)) {
+      this._comments.set(id, []);
+    }
+    
+    // Listen for changes to the comments array
+    doc.getArray('comments').observe(event => {
+      // Rebuild the comments array from the Yjs array
+      const comments = this._comments.get(id)!;
+      comments.length = 0;
+      
+      doc.getArray('comments').forEach((item: any) => {
+        comments.push({
+          id: item.id,
+          cellId: item.cellId,
+          author: item.author,
+          text: item.text,
+          timestamp: item.timestamp,
+          resolved: item.resolved,
+          range: item.range
+        });
+      });
+      
+      // Emit comments changed event
+      this._commentsChanged.emit({
+        panel,
+        comments: [...comments]
+      });
+    });
+  }
+  
+  async addComment(panel: NotebookPanel, cellId: string, text: string, range?: { start: number, end: number }): Promise<string> {
+    const doc = this._collaborationService.getYjsDocument(panel);
+    if (!doc) {
+      return '';
+    }
+    
+    // Check if user has comment permission
+    const permissionsService = app.serviceManager.services.get(IPermissionsService) as IPermissionsService;
+    if (permissionsService && !permissionsService.hasPermission(panel, 'comment')) {
+      throw new Error('You do not have permission to add comments');
+    }
+    
+    // Create comment object
+    const id = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    const userId = PageConfig.getOption('userId') || `user-${Math.floor(Math.random() * 1000)}`;
+    const userName = PageConfig.getOption('userName') || 'Anonymous';
+    
+    const comment = {
+      id,
+      cellId,
+      author: userName,
+      authorId: userId,
+      text,
+      timestamp: Date.now(),
+      resolved: false,
+      range
+    };
+    
+    // Add comment to the shared array
+    doc.getArray('comments').push([comment]);
+    
+    return id;
+  }
+  
+  async editComment(panel: NotebookPanel, commentId: string, text: string): Promise<boolean> {
+    const doc = this._collaborationService.getYjsDocument(panel);
+    if (!doc) {
+      return false;
+    }
+    
+    // Find the comment in the shared array
+    const commentsArray = doc.getArray('comments');
+    let index = -1;
+    
+    commentsArray.forEach((item: any, idx: number) => {
+      if (item.id === commentId) {
+        index = idx;
+      }
+    });
+    
+    if (index === -1) {
+      return false;
+    }
+    
+    // Check if user is the author of the comment
+    const comment = commentsArray.get(index);
+    const userId = PageConfig.getOption('userId') || `user-${Math.floor(Math.random() * 1000)}`;
+    
+    if (comment.authorId !== userId) {
+      // Check if user has admin permission
+      const permissionsService = app.serviceManager.services.get(IPermissionsService) as IPermissionsService;
+      if (!permissionsService || !permissionsService.hasPermission(panel, 'admin')) {
+        return false;
+      }
+    }
+    
+    // Update the comment
+    const updatedComment = { ...comment, text };
+    commentsArray.delete(index, 1);
+    commentsArray.insert(index, [updatedComment]);
+    
+    return true;
+  }
+  
+  async deleteComment(panel: NotebookPanel, commentId: string): Promise<boolean> {
+    const doc = this._collaborationService.getYjsDocument(panel);
+    if (!doc) {
+      return false;
+    }
+    
+    // Find the comment in the shared array
+    const commentsArray = doc.getArray('comments');
+    let index = -1;
+    
+    commentsArray.forEach((item: any, idx: number) => {
+      if (item.id === commentId) {
+        index = idx;
+      }
+    });
+    
+    if (index === -1) {
+      return false;
+    }
+    
+    // Check if user is the author of the comment
+    const comment = commentsArray.get(index);
+    const userId = PageConfig.getOption('userId') || `user-${Math.floor(Math.random() * 1000)}`;
+    
+    if (comment.authorId !== userId) {
+      // Check if user has admin permission
+      const permissionsService = app.serviceManager.services.get(IPermissionsService) as IPermissionsService;
+      if (!permissionsService || !permissionsService.hasPermission(panel, 'admin')) {
+        return false;
+      }
+    }
+    
+    // Delete the comment
+    commentsArray.delete(index, 1);
+    
+    return true;
+  }
+  
+  async resolveComment(panel: NotebookPanel, commentId: string): Promise<boolean> {
+    const doc = this._collaborationService.getYjsDocument(panel);
+    if (!doc) {
+      return false;
+    }
+    
+    // Find the comment in the shared array
+    const commentsArray = doc.getArray('comments');
+    let index = -1;
+    
+    commentsArray.forEach((item: any, idx: number) => {
+      if (item.id === commentId) {
+        index = idx;
+      }
+    });
+    
+    if (index === -1) {
+      return false;
+    }
+    
+    // Check if user has edit permission
+    const permissionsService = app.serviceManager.services.get(IPermissionsService) as IPermissionsService;
+    if (!permissionsService || !permissionsService.hasPermission(panel, 'edit')) {
+      return false;
+    }
+    
+    // Update the comment to mark it as resolved
+    const comment = commentsArray.get(index);
+    const updatedComment = { ...comment, resolved: true };
+    commentsArray.delete(index, 1);
+    commentsArray.insert(index, [updatedComment]);
+    
+    return true;
+  }
+  
+  getComments(panel: NotebookPanel): Array<{ id: string, cellId: string, author: string, text: string, timestamp: number, resolved: boolean, range?: { start: number, end: number } }> {
+    return [...this._comments.get(panel.id) || []];
+  }
+  
+  get commentsChanged(): ISignal<ICommentService, { panel: NotebookPanel, comments: Array<{ id: string, cellId: string, author: string, text: string, timestamp: number, resolved: boolean, range?: { start: number, end: number } }> }> {
+    return this._commentsChanged;
+  }
+  
+  private _collaborationService: ICollaborationService;
+  private _translator: ITranslator;
+  private _comments: Map<string, Array<{ id: string, cellId: string, author: string, text: string, timestamp: number, resolved: boolean, range?: { start: number, end: number } }>>;
+  private _commentsChanged: Signal<ICommentService, { panel: NotebookPanel, comments: Array<{ id: string, cellId: string, author: string, text: string, timestamp: number, resolved: boolean, range?: { start: number, end: number } }> }>;
+}
 
 /**
  * Export the plugins as default.
@@ -2220,11 +2183,11 @@ const plugins: JupyterFrontEndPlugin<any>[] = [
   trusted,
   // Add collaboration plugins
   collaborationCore,
-  presencePlugin,
-  lockPlugin,
-  historyPlugin,
-  permissionsPlugin,
-  commentPlugin
+  presenceService,
+  lockService,
+  historyService,
+  permissionsService,
+  commentService
 ];
 
 export default plugins;
