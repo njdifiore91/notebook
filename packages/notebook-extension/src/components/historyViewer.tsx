@@ -5,433 +5,391 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { ReactWidget } from '@jupyterlab/apputils';
 import { ITranslator, nullTranslator } from '@jupyterlab/translation';
 import { NotebookPanel } from '@jupyterlab/notebook';
-import { Notebook } from '@jupyterlab/notebook';
-import { IHistoryService, VersionInfo, DiffType } from '../tokens';
+import { IHistoryService, IHistoryVersion, IVersionDiff } from '../services/history';
 
 /**
- * Interface for the HistoryViewer props
+ * CSS classes for the History Viewer component.
+ */
+const HISTORY_VIEWER_CLASS = 'jp-HistoryViewer';
+const HISTORY_VIEWER_HEADER_CLASS = 'jp-HistoryViewer-header';
+const HISTORY_VIEWER_BODY_CLASS = 'jp-HistoryViewer-body';
+const HISTORY_VIEWER_TIMELINE_CLASS = 'jp-HistoryViewer-timeline';
+const HISTORY_VIEWER_TIMELINE_ITEM_CLASS = 'jp-HistoryViewer-timelineItem';
+const HISTORY_VIEWER_TIMELINE_ITEM_SELECTED_CLASS = 'jp-HistoryViewer-timelineItem-selected';
+const HISTORY_VIEWER_DIFF_CLASS = 'jp-HistoryViewer-diff';
+const HISTORY_VIEWER_DIFF_HEADER_CLASS = 'jp-HistoryViewer-diffHeader';
+const HISTORY_VIEWER_DIFF_CONTENT_CLASS = 'jp-HistoryViewer-diffContent';
+const HISTORY_VIEWER_DIFF_ADDITION_CLASS = 'jp-HistoryViewer-diffAddition';
+const HISTORY_VIEWER_DIFF_DELETION_CLASS = 'jp-HistoryViewer-diffDeletion';
+const HISTORY_VIEWER_CONTROLS_CLASS = 'jp-HistoryViewer-controls';
+const HISTORY_VIEWER_BUTTON_CLASS = 'jp-HistoryViewer-button';
+const HISTORY_VIEWER_RESTORE_BUTTON_CLASS = 'jp-HistoryViewer-restoreButton';
+const HISTORY_VIEWER_CLOSE_BUTTON_CLASS = 'jp-HistoryViewer-closeButton';
+
+/**
+ * Interface for the History Viewer component props.
  */
 interface IHistoryViewerProps {
   /**
-   * The notebook panel containing the notebook
+   * The notebook panel containing the notebook to show history for.
    */
   notebookPanel: NotebookPanel;
 
   /**
-   * The history service
+   * The history service for accessing version history.
    */
   historyService: IHistoryService;
 
   /**
-   * The translator
+   * The translator for internationalization.
    */
   translator?: ITranslator;
-}
-
-/**
- * Interface for the version comparison state
- */
-interface IComparisonState {
-  /**
-   * The older version to compare
-   */
-  oldVersion: VersionInfo | null;
 
   /**
-   * The newer version to compare
+   * Callback to close the history viewer.
    */
-  newVersion: VersionInfo | null;
-
-  /**
-   * The type of diff visualization to use
-   */
-  diffType: DiffType;
+  onClose: () => void;
 }
 
 /**
  * A React component for viewing and navigating notebook version history.
  */
 export function HistoryViewer(props: IHistoryViewerProps): JSX.Element {
-  const { notebookPanel, historyService, translator = nullTranslator } = props;
+  const { notebookPanel, historyService, onClose } = props;
+  const translator = props.translator || nullTranslator;
   const trans = translator.load('notebook');
-  
-  // State for the list of versions
-  const [versions, setVersions] = useState<VersionInfo[]>([]);
-  const [loading, setLoading] = useState<boolean>(true);
+
+  // State for the component
+  const [versions, setVersions] = useState<IHistoryVersion[]>([]);
+  const [selectedVersion, setSelectedVersion] = useState<IHistoryVersion | null>(null);
+  const [comparisonVersion, setComparisonVersion] = useState<IHistoryVersion | null>(null);
+  const [diff, setDiff] = useState<IVersionDiff | null>(null);
+  const [isLoading, setIsLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
-  
-  // State for the comparison view
-  const [comparison, setComparison] = useState<IComparisonState>({
-    oldVersion: null,
-    newVersion: null,
-    diffType: 'unified'
-  });
-  
-  // State for the restore confirmation
-  const [showRestoreConfirm, setShowRestoreConfirm] = useState<boolean>(false);
-  const [versionToRestore, setVersionToRestore] = useState<VersionInfo | null>(null);
-  
+  const [diffVisualization, setDiffVisualization] = useState<'inline' | 'side-by-side' | 'unified'>('inline');
+
   // Refs for keyboard navigation
   const timelineRef = useRef<HTMLDivElement>(null);
-  const diffViewRef = useRef<HTMLDivElement>(null);
-  
+
   /**
-   * Load the version history when the component mounts
+   * Load the version history when the component mounts.
    */
   useEffect(() => {
-    const loadVersions = async () => {
+    const loadHistory = async () => {
       try {
-        setLoading(true);
-        const history = await historyService.getVersionHistory(notebookPanel.context.path);
-        setVersions(history);
+        setIsLoading(true);
         setError(null);
         
-        // Set the current version as the new version for comparison by default
+        // Get the document ID from the notebook panel
+        const documentId = notebookPanel.context.path;
+        
+        // Load the version history from the history service
+        const history = await historyService.getVersionHistory(documentId);
+        setVersions(history);
+        
+        // Select the most recent version by default
         if (history.length > 0) {
-          setComparison({
-            oldVersion: history.length > 1 ? history[1] : null,
-            newVersion: history[0],
-            diffType: 'unified'
-          });
+          setSelectedVersion(history[0]);
+          // Set comparison version to the previous version if available
+          if (history.length > 1) {
+            setComparisonVersion(history[1]);
+          }
         }
       } catch (err) {
         console.error('Failed to load version history:', err);
         setError(trans.__('Failed to load version history. Please try again.'));
       } finally {
-        setLoading(false);
+        setIsLoading(false);
       }
     };
     
-    loadVersions();
-    
-    // Subscribe to version changes
-    const onVersionAdded = () => {
-      loadVersions();
-    };
-    
-    historyService.versionAdded.connect(onVersionAdded);
-    
-    return () => {
-      historyService.versionAdded.disconnect(onVersionAdded);
-    };
-  }, [historyService, notebookPanel.context.path, trans]);
-  
+    loadHistory();
+  }, [notebookPanel, historyService, trans]);
+
   /**
-   * Handle selecting a version for comparison
+   * Update the diff when selected or comparison versions change.
    */
-  const handleSelectVersion = useCallback((version: VersionInfo, isOld: boolean) => {
-    setComparison(prev => {
-      // If selecting the old version
-      if (isOld) {
-        // Don't allow selecting a version newer than the current new version
-        if (prev.newVersion && version.timestamp >= prev.newVersion.timestamp) {
-          return prev;
+  useEffect(() => {
+    const updateDiff = async () => {
+      if (selectedVersion && comparisonVersion) {
+        try {
+          setIsLoading(true);
+          const documentId = notebookPanel.context.path;
+          const versionDiff = await historyService.getVersionDiff(
+            documentId,
+            selectedVersion.id,
+            comparisonVersion.id,
+            diffVisualization
+          );
+          setDiff(versionDiff);
+        } catch (err) {
+          console.error('Failed to load version diff:', err);
+          setError(trans.__('Failed to load version comparison. Please try again.'));
+        } finally {
+          setIsLoading(false);
         }
-        return { ...prev, oldVersion: version };
-      } 
-      // If selecting the new version
-      else {
-        // Don't allow selecting a version older than the current old version
-        if (prev.oldVersion && version.timestamp <= prev.oldVersion.timestamp) {
-          return prev;
-        }
-        return { ...prev, newVersion: version };
+      } else {
+        setDiff(null);
       }
-    });
-  }, []);
-  
+    };
+    
+    updateDiff();
+  }, [selectedVersion, comparisonVersion, diffVisualization, notebookPanel, historyService, trans]);
+
   /**
-   * Handle changing the diff visualization type
+   * Handle selecting a version from the timeline.
    */
-  const handleChangeDiffType = useCallback((type: DiffType) => {
-    setComparison(prev => ({ ...prev, diffType: type }));
-  }, []);
-  
+  const handleSelectVersion = useCallback((version: IHistoryVersion) => {
+    if (version.id === selectedVersion?.id) {
+      return;
+    }
+    
+    // If selecting a version that was the comparison version,
+    // swap the selected and comparison versions
+    if (version.id === comparisonVersion?.id) {
+      setComparisonVersion(selectedVersion);
+      setSelectedVersion(version);
+      return;
+    }
+    
+    // Otherwise, set the selected version and update the comparison version
+    setSelectedVersion(version);
+    
+    // If the selected version is newer than the current comparison version,
+    // or if there is no comparison version, set the comparison version to the next older version
+    const versionIndex = versions.findIndex(v => v.id === version.id);
+    if (versionIndex < versions.length - 1) {
+      setComparisonVersion(versions[versionIndex + 1]);
+    } else {
+      // If this is the oldest version, compare with the next newer version
+      if (versionIndex > 0) {
+        setComparisonVersion(versions[versionIndex - 1]);
+      } else {
+        setComparisonVersion(null);
+      }
+    }
+  }, [selectedVersion, comparisonVersion, versions]);
+
   /**
-   * Handle restoring to a previous version
+   * Handle restoring to a selected version.
    */
   const handleRestore = useCallback(async () => {
-    if (!versionToRestore) {
+    if (!selectedVersion) {
       return;
     }
     
     try {
-      await historyService.restoreVersion(notebookPanel.context.path, versionToRestore.id);
-      setShowRestoreConfirm(false);
-      setVersionToRestore(null);
+      setIsLoading(true);
+      const documentId = notebookPanel.context.path;
+      await historyService.restoreVersion(documentId, selectedVersion.id);
+      // Reload the notebook content
+      await notebookPanel.context.save();
+      await notebookPanel.context.revert();
+      onClose();
     } catch (err) {
       console.error('Failed to restore version:', err);
       setError(trans.__('Failed to restore version. Please try again.'));
+    } finally {
+      setIsLoading(false);
     }
-  }, [historyService, notebookPanel.context.path, versionToRestore, trans]);
-  
+  }, [selectedVersion, notebookPanel, historyService, onClose, trans]);
+
   /**
-   * Handle keyboard navigation
+   * Handle keyboard navigation in the timeline.
    */
-  const handleKeyDown = useCallback((event: React.KeyboardEvent) => {
-    // Handle keyboard navigation in the timeline
-    if (timelineRef.current === document.activeElement || 
-        timelineRef.current?.contains(document.activeElement)) {
-      if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
-        event.preventDefault();
-        const focusableElements = timelineRef.current.querySelectorAll<HTMLElement>(
-          'button:not([disabled]), [tabindex]:not([tabindex="-1"])'
-        );
-        const currentIndex = Array.from(focusableElements).findIndex(
-          el => el === document.activeElement
-        );
-        
-        let nextIndex;
-        if (event.key === 'ArrowUp') {
-          nextIndex = currentIndex > 0 ? currentIndex - 1 : focusableElements.length - 1;
-        } else {
-          nextIndex = currentIndex < focusableElements.length - 1 ? currentIndex + 1 : 0;
-        }
-        
-        focusableElements[nextIndex]?.focus();
-      }
+  const handleTimelineKeyDown = useCallback((event: React.KeyboardEvent) => {
+    if (!selectedVersion || versions.length === 0) {
+      return;
     }
-  }, []);
-  
+    
+    const currentIndex = versions.findIndex(v => v.id === selectedVersion.id);
+    let newIndex = currentIndex;
+    
+    switch (event.key) {
+      case 'ArrowUp':
+      case 'ArrowLeft':
+        newIndex = Math.max(0, currentIndex - 1);
+        event.preventDefault();
+        break;
+      case 'ArrowDown':
+      case 'ArrowRight':
+        newIndex = Math.min(versions.length - 1, currentIndex + 1);
+        event.preventDefault();
+        break;
+      case 'Home':
+        newIndex = 0;
+        event.preventDefault();
+        break;
+      case 'End':
+        newIndex = versions.length - 1;
+        event.preventDefault();
+        break;
+      default:
+        return;
+    }
+    
+    if (newIndex !== currentIndex) {
+      handleSelectVersion(versions[newIndex]);
+      // Scroll the selected item into view
+      const timelineItems = timelineRef.current?.querySelectorAll(`.${HISTORY_VIEWER_TIMELINE_ITEM_CLASS}`);
+      timelineItems?.[newIndex]?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+  }, [selectedVersion, versions, handleSelectVersion]);
+
   /**
-   * Render the version timeline
+   * Format a timestamp for display.
+   */
+  const formatTimestamp = (timestamp: string): string => {
+    const date = new Date(timestamp);
+    return date.toLocaleString();
+  };
+
+  /**
+   * Render the timeline of versions.
    */
   const renderTimeline = () => {
-    if (loading) {
-      return <div className="jp-HistoryViewer-loading">{trans.__('Loading history...')}</div>;
-    }
-    
-    if (error) {
-      return <div className="jp-HistoryViewer-error">{error}</div>;
-    }
-    
     if (versions.length === 0) {
       return (
-        <div className="jp-HistoryViewer-empty">
-          {trans.__('No version history available.')}
+        <div className={HISTORY_VIEWER_TIMELINE_CLASS}>
+          <p>{trans.__('No version history available.')}</p>
         </div>
       );
     }
     
     return (
       <div 
-        className="jp-HistoryViewer-timeline" 
+        className={HISTORY_VIEWER_TIMELINE_CLASS} 
         ref={timelineRef}
         tabIndex={0}
-        onKeyDown={handleKeyDown}
         role="listbox"
         aria-label={trans.__('Version history timeline')}
+        onKeyDown={handleTimelineKeyDown}
       >
-        {versions.map((version, index) => {
-          const isSelected = 
-            comparison.oldVersion?.id === version.id || 
-            comparison.newVersion?.id === version.id;
-          
-          const isOldVersion = comparison.oldVersion?.id === version.id;
-          const isNewVersion = comparison.newVersion?.id === version.id;
-          
-          const date = new Date(version.timestamp);
-          const formattedDate = date.toLocaleDateString();
-          const formattedTime = date.toLocaleTimeString();
-          
-          return (
-            <div 
-              key={version.id}
-              className={`jp-HistoryViewer-version ${isSelected ? 'jp-mod-selected' : ''}`}
-              role="option"
-              aria-selected={isSelected}
-            >
-              <div className="jp-HistoryViewer-version-header">
-                <div className="jp-HistoryViewer-version-title">
-                  {index === 0 ? trans.__('Current Version') : trans.__('Version %1', index)}
-                </div>
-                <div className="jp-HistoryViewer-version-date">
-                  {formattedDate} {formattedTime}
-                </div>
-              </div>
-              
-              <div className="jp-HistoryViewer-version-info">
-                <div className="jp-HistoryViewer-version-author">
-                  {version.author ? version.author : trans.__('Unknown')}
-                </div>
-                {version.message && (
-                  <div className="jp-HistoryViewer-version-message">
-                    {version.message}
-                  </div>
-                )}
-              </div>
-              
-              <div className="jp-HistoryViewer-version-actions">
-                <button
-                  className={`jp-HistoryViewer-version-select-old ${isOldVersion ? 'jp-mod-selected' : ''}`}
-                  onClick={() => handleSelectVersion(version, true)}
-                  disabled={comparison.newVersion && version.timestamp >= comparison.newVersion.timestamp}
-                  aria-label={trans.__('Select as older version for comparison')}
-                  title={trans.__('Select as older version for comparison')}
-                >
-                  {trans.__('Older')}
-                </button>
-                
-                <button
-                  className={`jp-HistoryViewer-version-select-new ${isNewVersion ? 'jp-mod-selected' : ''}`}
-                  onClick={() => handleSelectVersion(version, false)}
-                  disabled={comparison.oldVersion && version.timestamp <= comparison.oldVersion.timestamp}
-                  aria-label={trans.__('Select as newer version for comparison')}
-                  title={trans.__('Select as newer version for comparison')}
-                >
-                  {trans.__('Newer')}
-                </button>
-                
-                <button
-                  className="jp-HistoryViewer-version-restore"
-                  onClick={() => {
-                    setVersionToRestore(version);
-                    setShowRestoreConfirm(true);
-                  }}
-                  aria-label={trans.__('Restore to this version')}
-                  title={trans.__('Restore to this version')}
-                >
-                  {trans.__('Restore')}
-                </button>
-              </div>
+        {versions.map(version => (
+          <div
+            key={version.id}
+            className={`${HISTORY_VIEWER_TIMELINE_ITEM_CLASS} ${
+              version.id === selectedVersion?.id ? HISTORY_VIEWER_TIMELINE_ITEM_SELECTED_CLASS : ''
+            }`}
+            onClick={() => handleSelectVersion(version)}
+            role="option"
+            aria-selected={version.id === selectedVersion?.id}
+            tabIndex={version.id === selectedVersion?.id ? 0 : -1}
+          >
+            <div className="jp-HistoryViewer-timelineItemHeader">
+              <span className="jp-HistoryViewer-timelineItemTimestamp">
+                {formatTimestamp(version.timestamp)}
+              </span>
+              <span className="jp-HistoryViewer-timelineItemAuthor">
+                {version.author}
+              </span>
             </div>
-          );
-        })}
+            <div className="jp-HistoryViewer-timelineItemDescription">
+              {version.description || trans.__('No description')}
+            </div>
+          </div>
+        ))}
       </div>
     );
   };
-  
+
   /**
-   * Render the diff view
+   * Render the diff visualization.
    */
-  const renderDiffView = () => {
-    const { oldVersion, newVersion, diffType } = comparison;
-    
-    if (!oldVersion || !newVersion) {
+  const renderDiff = () => {
+    if (!diff) {
       return (
-        <div className="jp-HistoryViewer-diff-empty">
-          {trans.__('Select two versions to compare')}
+        <div className={HISTORY_VIEWER_DIFF_CLASS}>
+          <p>{trans.__('Select two versions to compare.')}</p>
         </div>
       );
     }
     
     return (
-      <div 
-        className="jp-HistoryViewer-diff" 
-        ref={diffViewRef}
-      >
-        <div className="jp-HistoryViewer-diff-header">
-          <div className="jp-HistoryViewer-diff-title">
-            {trans.__('Comparing versions')}
-          </div>
-          
-          <div className="jp-HistoryViewer-diff-controls">
-            <select
-              className="jp-HistoryViewer-diff-type"
-              value={diffType}
-              onChange={(e) => handleChangeDiffType(e.target.value as DiffType)}
-              aria-label={trans.__('Diff visualization type')}
+      <div className={HISTORY_VIEWER_DIFF_CLASS}>
+        <div className={HISTORY_VIEWER_DIFF_HEADER_CLASS}>
+          <h3>
+            {trans.__('Comparing versions: %1 and %2', 
+              formatTimestamp(selectedVersion?.timestamp || ''), 
+              formatTimestamp(comparisonVersion?.timestamp || '')
+            )}
+          </h3>
+          <div className="jp-HistoryViewer-diffControls">
+            <select 
+              value={diffVisualization} 
+              onChange={(e) => setDiffVisualization(e.target.value as any)}
+              aria-label={trans.__('Diff visualization mode')}
             >
-              <option value="unified">{trans.__('Unified')}</option>
-              <option value="side-by-side">{trans.__('Side by Side')}</option>
               <option value="inline">{trans.__('Inline')}</option>
+              <option value="side-by-side">{trans.__('Side by Side')}</option>
+              <option value="unified">{trans.__('Unified')}</option>
             </select>
           </div>
         </div>
-        
-        <div className="jp-HistoryViewer-diff-content">
-          {/* This would be populated with the actual diff content from the history service */}
-          {historyService.renderDiff(
-            oldVersion, 
-            newVersion, 
-            diffType
-          )}
+        <div className={HISTORY_VIEWER_DIFF_CONTENT_CLASS}>
+          {diff.cells.map((cellDiff, index) => (
+            <div key={index} className="jp-HistoryViewer-diffCell">
+              <div className="jp-HistoryViewer-diffCellHeader">
+                <span>{trans.__('Cell %1', index + 1)}</span>
+                <span className="jp-HistoryViewer-diffCellType">{cellDiff.cellType}</span>
+              </div>
+              <div className="jp-HistoryViewer-diffCellContent">
+                {cellDiff.changes.map((change, changeIndex) => (
+                  <pre 
+                    key={changeIndex} 
+                    className={`jp-HistoryViewer-diffLine ${
+                      change.type === 'addition' ? HISTORY_VIEWER_DIFF_ADDITION_CLASS : 
+                      change.type === 'deletion' ? HISTORY_VIEWER_DIFF_DELETION_CLASS : ''
+                    }`}
+                  >
+                    <code>{change.content}</code>
+                  </pre>
+                ))}
+              </div>
+            </div>
+          ))}
         </div>
       </div>
     );
   };
-  
-  /**
-   * Render the restore confirmation dialog
-   */
-  const renderRestoreConfirm = () => {
-    if (!showRestoreConfirm || !versionToRestore) {
-      return null;
-    }
-    
-    const date = new Date(versionToRestore.timestamp);
-    const formattedDate = date.toLocaleDateString();
-    const formattedTime = date.toLocaleTimeString();
-    
-    return (
-      <div className="jp-HistoryViewer-restore-confirm-overlay">
-        <div className="jp-HistoryViewer-restore-confirm">
-          <div className="jp-HistoryViewer-restore-confirm-header">
-            {trans.__('Restore Version')}
-          </div>
-          
-          <div className="jp-HistoryViewer-restore-confirm-content">
-            <p>
-              {trans.__('Are you sure you want to restore the notebook to the version from %1 at %2?', 
-                formattedDate, 
-                formattedTime
-              )}
-            </p>
-            <p className="jp-HistoryViewer-restore-confirm-warning">
-              {trans.__('This will overwrite the current version of the notebook. This action cannot be undone.')}
-            </p>
-          </div>
-          
-          <div className="jp-HistoryViewer-restore-confirm-actions">
-            <button
-              className="jp-HistoryViewer-restore-confirm-cancel"
-              onClick={() => {
-                setShowRestoreConfirm(false);
-                setVersionToRestore(null);
-              }}
-            >
-              {trans.__('Cancel')}
-            </button>
-            
-            <button
-              className="jp-HistoryViewer-restore-confirm-ok"
-              onClick={handleRestore}
-            >
-              {trans.__('Restore')}
-            </button>
-          </div>
-        </div>
-      </div>
-    );
-  };
-  
+
   return (
-    <div className="jp-HistoryViewer">
-      <div className="jp-HistoryViewer-header">
-        <h2 className="jp-HistoryViewer-title">
-          {trans.__('Version History')}
-        </h2>
+    <div className={HISTORY_VIEWER_CLASS} role="dialog" aria-modal="true" aria-labelledby="history-viewer-title">
+      <div className={HISTORY_VIEWER_HEADER_CLASS}>
+        <h2 id="history-viewer-title">{trans.__('Version History')}</h2>
+        <button 
+          className={HISTORY_VIEWER_CLOSE_BUTTON_CLASS}
+          onClick={onClose}
+          aria-label={trans.__('Close')}
+        >
+          <span className="jp-HistoryViewer-closeButtonIcon" aria-hidden="true">×</span>
+        </button>
       </div>
       
-      <div className="jp-HistoryViewer-content">
-        <div className="jp-HistoryViewer-split">
-          <div className="jp-HistoryViewer-timeline-container">
-            <h3 className="jp-HistoryViewer-section-title">
-              {trans.__('Timeline')}
-            </h3>
-            {renderTimeline()}
-          </div>
-          
-          <div className="jp-HistoryViewer-diff-container">
-            <h3 className="jp-HistoryViewer-section-title">
-              {trans.__('Changes')}
-            </h3>
-            {renderDiffView()}
-          </div>
+      {error && <div className="jp-HistoryViewer-error">{error}</div>}
+      
+      {isLoading ? (
+        <div className="jp-HistoryViewer-loading">
+          <div className="jp-Spinner"></div>
+          <p>{trans.__('Loading...')}</p>
         </div>
-      </div>
+      ) : (
+        <div className={HISTORY_VIEWER_BODY_CLASS}>
+          {renderTimeline()}
+          {renderDiff()}
+        </div>
+      )}
       
-      {renderRestoreConfirm()}
+      <div className={HISTORY_VIEWER_CONTROLS_CLASS}>
+        <button 
+          className={`${HISTORY_VIEWER_BUTTON_CLASS} ${HISTORY_VIEWER_RESTORE_BUTTON_CLASS}`}
+          onClick={handleRestore}
+          disabled={!selectedVersion || isLoading}
+          aria-label={trans.__('Restore to selected version')}
+        >
+          {trans.__('Restore This Version')}
+        </button>
+      </div>
     </div>
   );
 }
@@ -447,15 +405,17 @@ export namespace HistoryViewer {
     notebookPanel: NotebookPanel;
     historyService: IHistoryService;
     translator?: ITranslator;
+    onClose: () => void;
   }): ReactWidget {
-    const { notebookPanel, historyService, translator } = options;
-    
-    return ReactWidget.create(
-      <HistoryViewer 
-        notebookPanel={notebookPanel}
-        historyService={historyService}
-        translator={translator}
+    const widget = ReactWidget.create(
+      <HistoryViewer
+        notebookPanel={options.notebookPanel}
+        historyService={options.historyService}
+        translator={options.translator}
+        onClose={options.onClose}
       />
     );
+    widget.addClass('jp-HistoryViewer-widget');
+    return widget;
   }
 }
