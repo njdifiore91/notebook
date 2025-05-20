@@ -1,1864 +1,1724 @@
 """Persistence layer for collaborative documents in Jupyter Notebook.
 
-This module implements the storage and retrieval mechanisms for collaborative editing data,
-including CRDT document updates, user awareness information, cell locks, comments, and
-document history. It provides both in-memory and persistent storage options.
+This module implements the storage and retrieval of collaborative editing state,
+including CRDT document updates, user awareness information, cell locks, comments,
+and document history. It provides both in-memory storage for development and
+persistent file-based storage for production deployments.
 """
 
 import asyncio
+import base64
+import datetime
 import json
 import logging
 import os
+import shutil
+import tempfile
 import time
-import zlib
-from datetime import datetime, timedelta
-from enum import Enum
+import uuid
+from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple, Union, BinaryIO
-from functools import lru_cache
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 
-import tornado.web
+# Import pycrdt for Yjs CRDT functionality
+try:
+    import pycrdt
+    from pycrdt import Doc, TransactionEvent
+    HAS_PYCRDT = True
+except ImportError:
+    HAS_PYCRDT = False
+
+# Import pycrdt-websocket for WebSocket protocol handling
+try:
+    import pycrdt_websocket
+    from pycrdt_websocket.protocol import (
+        encode_state_as_update,
+        encode_state_vector,
+        decode_state_vector,
+        decode_update,
+    )
+    HAS_PYCRDT_WEBSOCKET = True
+except ImportError:
+    HAS_PYCRDT_WEBSOCKET = False
+
 from jupyter_server.utils import ensure_async
-from tornado.ioloop import IOLoop
+from traitlets.config import Configurable
+from traitlets import Bool, Dict as TDict, Float, Integer, Unicode, default
 
-# Configure logger
-logger = logging.getLogger(__name__)
-
-
-class StorageBackend(Enum):
-    """Enumeration of available storage backends."""
-
-    MEMORY = "memory"  # In-memory storage (for development/testing)
-    FILE = "file"  # File-based storage (default for production)
+# Set up logging
+logger = logging.getLogger('notebook.collab.store')
 
 
-class CollaborationFileTypes(Enum):
-    """Enumeration of collaboration file types."""
-
-    UPDATES = "yjsupdates"  # Yjs document updates
-    AWARENESS = "awareness.json"  # User awareness information
-    LOCKS = "locks.json"  # Cell lock state
-    COMMENTS = "comments.json"  # Comments and review threads
-    PERMISSIONS = "permissions.json"  # Access control configuration
-    HISTORY = "history"  # Directory for history snapshots
-
-
-class CollaborationStore:
-    """Base class for collaboration document storage.
+class CollaborationStore(ABC):
+    """Abstract base class for collaboration data storage.
     
     This class defines the interface for storing and retrieving collaboration data,
     including CRDT document updates, user awareness information, cell locks,
     comments, and document history.
-    
-    The store supports both in-memory storage for development and persistent storage
-    for production deployments. It implements a hybrid persistence strategy with
-    real-time updates, periodic state snapshots, and session lifecycle events.
     """
     
-    def __init__(self, config: Dict[str, Any] = None):
-        """Initialize the collaboration store.
-        
-        Args:
-            config: Configuration options for the store
-        """
-        self.config = config or {}
-        self.buffer_flush_period = self.config.get("buffer_flush_period", 2.0)  # seconds
-        self.buffer_size_limit = self.config.get("buffer_size_limit", 1048576)  # 1MB
-        self.compression_level = self.config.get("compression_level", 6)  # ZLIB compression level
-        self.use_binary_format = self.config.get("use_binary_format", True)
-        self.snapshot_interval = self.config.get("snapshot_interval", 100)  # operations
-        self.snapshot_time_interval = self.config.get("snapshot_time_interval", 300)  # seconds
-        
-        # Initialize buffers and counters
-        self._update_buffers: Dict[str, List[bytes]] = {}
-        self._update_counters: Dict[str, int] = {}
-        self._last_snapshot_time: Dict[str, float] = {}
-        self._flush_tasks: Dict[str, asyncio.Task] = {}
-        
+    @abstractmethod
     async def initialize(self) -> None:
-        """Initialize the store and ensure required directories exist."""
+        """Initialize the store.
+        
+        This method should be called before using the store to ensure
+        that any necessary setup is performed.
+        """
         pass
-        
+    
+    @abstractmethod
     async def shutdown(self) -> None:
-        """Perform cleanup operations before shutdown."""
-        # Flush all pending updates
-        for doc_id in list(self._update_buffers.keys()):
-            await self.flush_updates(doc_id)
-            
-        # Cancel all pending flush tasks
-        for task in self._flush_tasks.values():
-            if not task.done():
-                task.cancel()
-                
-        try:
-            await asyncio.gather(*self._flush_tasks.values(), return_exceptions=True)
-        except asyncio.CancelledError:
-            pass
+        """Shut down the store.
+        
+        This method should be called when the store is no longer needed
+        to ensure that any resources are properly released.
+        """
+        pass
     
-    async def document_exists(self, doc_id: str) -> bool:
-        """Check if a collaborative document exists.
+    @abstractmethod
+    async def save_document(self, notebook_id: str, update: bytes) -> None:
+        """Save a CRDT document update.
         
         Args:
-            doc_id: Document identifier
-            
-        Returns:
-            True if the document exists, False otherwise
+            notebook_id: The notebook ID
+            update: The CRDT update as bytes
         """
-        raise NotImplementedError()
+        pass
     
-    async def create_document(self, doc_id: str, initial_data: Optional[Dict[str, Any]] = None) -> None:
-        """Create a new collaborative document.
+    @abstractmethod
+    async def load_document(self, notebook_id: str) -> Optional[bytes]:
+        """Load the latest CRDT document state.
         
         Args:
-            doc_id: Document identifier
-            initial_data: Initial document data (optional)
-        """
-        raise NotImplementedError()
-    
-    async def delete_document(self, doc_id: str) -> None:
-        """Delete a collaborative document and all associated data.
-        
-        Args:
-            doc_id: Document identifier
-        """
-        raise NotImplementedError()
-    
-    async def list_documents(self) -> List[str]:
-        """List all collaborative documents.
-        
-        Returns:
-            List of document identifiers
-        """
-        raise NotImplementedError()
-    
-    async def append_updates(self, doc_id: str, updates: bytes) -> None:
-        """Append CRDT updates to the document update log.
-        
-        This method buffers updates in memory and periodically flushes them to
-        persistent storage for efficiency.
-        
-        Args:
-            doc_id: Document identifier
-            updates: Binary Yjs update data
-        """
-        # Initialize buffer if needed
-        if doc_id not in self._update_buffers:
-            self._update_buffers[doc_id] = []
-            self._update_counters[doc_id] = 0
-            self._last_snapshot_time[doc_id] = time.time()
-        
-        # Add update to buffer
-        self._update_buffers[doc_id].append(updates)
-        self._update_counters[doc_id] += 1
-        
-        # Schedule flush if not already scheduled
-        if doc_id not in self._flush_tasks or self._flush_tasks[doc_id].done():
-            self._flush_tasks[doc_id] = asyncio.create_task(
-                self._schedule_flush(doc_id)
-            )
-        
-        # Immediate flush if buffer exceeds size limit
-        buffer_size = sum(len(update) for update in self._update_buffers[doc_id])
-        if buffer_size >= self.buffer_size_limit:
-            await self.flush_updates(doc_id)
-    
-    async def _schedule_flush(self, doc_id: str) -> None:
-        """Schedule a delayed flush of updates for a document.
-        
-        Args:
-            doc_id: Document identifier
-        """
-        try:
-            await asyncio.sleep(self.buffer_flush_period)
-            await self.flush_updates(doc_id)
-        except asyncio.CancelledError:
-            # If cancelled, still try to flush
-            await self.flush_updates(doc_id)
-            raise
-    
-    async def flush_updates(self, doc_id: str) -> None:
-        """Flush buffered updates to persistent storage.
-        
-        Args:
-            doc_id: Document identifier
-        """
-        if doc_id not in self._update_buffers or not self._update_buffers[doc_id]:
-            return
-        
-        updates = self._update_buffers[doc_id]
-        self._update_buffers[doc_id] = []
-        
-        # Check if we need to create a snapshot
-        create_snapshot = False
-        if self._update_counters[doc_id] >= self.snapshot_interval:
-            create_snapshot = True
-            self._update_counters[doc_id] = 0
-        
-        current_time = time.time()
-        if current_time - self._last_snapshot_time[doc_id] >= self.snapshot_time_interval:
-            create_snapshot = True
-            self._last_snapshot_time[doc_id] = current_time
-        
-        # Perform the actual storage operation (implemented by subclasses)
-        await self._store_updates(doc_id, updates, create_snapshot)
-    
-    async def _store_updates(self, doc_id: str, updates: List[bytes], create_snapshot: bool) -> None:
-        """Store updates in the persistent storage.
-        
-        Args:
-            doc_id: Document identifier
-            updates: List of binary Yjs update data
-            create_snapshot: Whether to create a snapshot
-        """
-        raise NotImplementedError()
-    
-    async def get_updates(self, doc_id: str, from_version: Optional[int] = None) -> List[bytes]:
-        """Get CRDT updates for a document.
-        
-        Args:
-            doc_id: Document identifier
-            from_version: Optional version to start from (None for all updates)
+            notebook_id: The notebook ID
             
         Returns:
-            List of binary Yjs update data
+            Optional[bytes]: The CRDT document state as bytes, or None if not found
         """
-        raise NotImplementedError()
+        pass
     
-    async def get_awareness(self, doc_id: str) -> Dict[str, Any]:
-        """Get awareness state for a document.
+    @abstractmethod
+    async def save_awareness(self, notebook_id: str, awareness: Dict[str, Any]) -> None:
+        """Save user awareness information.
         
         Args:
-            doc_id: Document identifier
+            notebook_id: The notebook ID
+            awareness: The awareness information as a dictionary
+        """
+        pass
+    
+    @abstractmethod
+    async def load_awareness(self, notebook_id: str) -> Optional[Dict[str, Any]]:
+        """Load user awareness information.
+        
+        Args:
+            notebook_id: The notebook ID
             
         Returns:
-            Dictionary containing awareness state
+            Optional[Dict[str, Any]]: The awareness information, or None if not found
         """
-        raise NotImplementedError()
+        pass
     
-    async def update_awareness(self, doc_id: str, awareness: Dict[str, Any]) -> None:
-        """Update awareness state for a document.
+    @abstractmethod
+    async def save_cell_locks(self, notebook_id: str, locks: Dict[str, str]) -> None:
+        """Save cell lock state.
         
         Args:
-            doc_id: Document identifier
-            awareness: Dictionary containing awareness state
+            notebook_id: The notebook ID
+            locks: Dictionary mapping cell IDs to user IDs
         """
-        raise NotImplementedError()
+        pass
     
-    async def get_locks(self, doc_id: str) -> Dict[str, Any]:
-        """Get lock state for a document.
+    @abstractmethod
+    async def load_cell_locks(self, notebook_id: str) -> Optional[Dict[str, str]]:
+        """Load cell lock state.
         
         Args:
-            doc_id: Document identifier
+            notebook_id: The notebook ID
             
         Returns:
-            Dictionary containing lock state
+            Optional[Dict[str, str]]: Dictionary mapping cell IDs to user IDs, or None if not found
         """
-        raise NotImplementedError()
+        pass
     
-    async def update_locks(self, doc_id: str, locks: Dict[str, Any]) -> None:
-        """Update lock state for a document.
+    @abstractmethod
+    async def save_comment(self, notebook_id: str, comment: Dict[str, Any]) -> None:
+        """Save a comment.
         
         Args:
-            doc_id: Document identifier
-            locks: Dictionary containing lock state
+            notebook_id: The notebook ID
+            comment: The comment data as a dictionary
         """
-        raise NotImplementedError()
+        pass
     
-    async def get_comments(self, doc_id: str) -> Dict[str, Any]:
-        """Get comments for a document.
+    @abstractmethod
+    async def update_comment(self, notebook_id: str, comment_id: str, comment: Dict[str, Any]) -> None:
+        """Update an existing comment.
         
         Args:
-            doc_id: Document identifier
+            notebook_id: The notebook ID
+            comment_id: The comment ID
+            comment: The updated comment data
+        """
+        pass
+    
+    @abstractmethod
+    async def delete_comment(self, notebook_id: str, comment_id: str) -> None:
+        """Delete a comment.
+        
+        Args:
+            notebook_id: The notebook ID
+            comment_id: The comment ID
+        """
+        pass
+    
+    @abstractmethod
+    async def load_comments(self, notebook_id: str) -> List[Dict[str, Any]]:
+        """Load all comments for a notebook.
+        
+        Args:
+            notebook_id: The notebook ID
             
         Returns:
-            Dictionary containing comments
+            List[Dict[str, Any]]: List of comment dictionaries
         """
-        raise NotImplementedError()
+        pass
     
-    async def update_comments(self, doc_id: str, comments: Dict[str, Any]) -> None:
-        """Update comments for a document.
+    @abstractmethod
+    async def save_document_snapshot(self, notebook_id: str, snapshot: bytes, metadata: Dict[str, Any]) -> str:
+        """Save a document snapshot for version history.
         
         Args:
-            doc_id: Document identifier
-            comments: Dictionary containing comments
-        """
-        raise NotImplementedError()
-    
-    async def get_permissions(self, doc_id: str) -> Dict[str, Any]:
-        """Get permissions for a document.
-        
-        Args:
-            doc_id: Document identifier
+            notebook_id: The notebook ID
+            snapshot: The document snapshot as bytes
+            metadata: Snapshot metadata (timestamp, author, etc.)
             
         Returns:
-            Dictionary containing permissions
+            str: The snapshot ID
         """
-        raise NotImplementedError()
+        pass
     
-    async def update_permissions(self, doc_id: str, permissions: Dict[str, Any]) -> None:
-        """Update permissions for a document.
+    @abstractmethod
+    async def load_document_snapshot(self, notebook_id: str, snapshot_id: str) -> Tuple[Optional[bytes], Optional[Dict[str, Any]]]:
+        """Load a document snapshot.
         
         Args:
-            doc_id: Document identifier
-            permissions: Dictionary containing permissions
-        """
-        raise NotImplementedError()
-    
-    async def create_snapshot(self, doc_id: str, state: bytes) -> None:
-        """Create a snapshot of the document state.
-        
-        Args:
-            doc_id: Document identifier
-            state: Binary Yjs document state
-        """
-        raise NotImplementedError()
-    
-    async def get_snapshot(self, doc_id: str, version: Optional[int] = None) -> Optional[bytes]:
-        """Get a snapshot of the document state.
-        
-        Args:
-            doc_id: Document identifier
-            version: Optional version to retrieve (None for latest)
+            notebook_id: The notebook ID
+            snapshot_id: The snapshot ID
             
         Returns:
-            Binary Yjs document state or None if not found
+            Tuple[Optional[bytes], Optional[Dict[str, Any]]]: The snapshot and its metadata, or (None, None) if not found
         """
-        raise NotImplementedError()
+        pass
     
-    async def get_document_metadata(self, doc_id: str) -> Dict[str, Any]:
-        """Get metadata for a document.
+    @abstractmethod
+    async def list_document_snapshots(self, notebook_id: str) -> List[Dict[str, Any]]:
+        """List all snapshots for a notebook.
         
         Args:
-            doc_id: Document identifier
+            notebook_id: The notebook ID
             
         Returns:
-            Dictionary containing document metadata
+            List[Dict[str, Any]]: List of snapshot metadata
         """
-        raise NotImplementedError()
+        pass
+    
+    @abstractmethod
+    async def delete_document_snapshot(self, notebook_id: str, snapshot_id: str) -> None:
+        """Delete a document snapshot.
+        
+        Args:
+            notebook_id: The notebook ID
+            snapshot_id: The snapshot ID
+        """
+        pass
+    
+    @abstractmethod
+    async def save_permissions(self, notebook_id: str, permissions: Dict[str, Any]) -> None:
+        """Save permission settings for a notebook.
+        
+        Args:
+            notebook_id: The notebook ID
+            permissions: The permission settings
+        """
+        pass
+    
+    @abstractmethod
+    async def load_permissions(self, notebook_id: str) -> Optional[Dict[str, Any]]:
+        """Load permission settings for a notebook.
+        
+        Args:
+            notebook_id: The notebook ID
+            
+        Returns:
+            Optional[Dict[str, Any]]: The permission settings, or None if not found
+        """
+        pass
+    
+    @abstractmethod
+    async def cleanup_notebook(self, notebook_id: str) -> None:
+        """Clean up all collaboration data for a notebook.
+        
+        This method should be called when a notebook is deleted to ensure
+        that all associated collaboration data is also removed.
+        
+        Args:
+            notebook_id: The notebook ID
+        """
+        pass
+    
+    @abstractmethod
+    async def list_notebooks(self) -> List[str]:
+        """List all notebooks with collaboration data.
+        
+        Returns:
+            List[str]: List of notebook IDs
+        """
+        pass
 
 
 class MemoryCollaborationStore(CollaborationStore):
     """In-memory implementation of the collaboration store.
     
-    This implementation stores all data in memory and is suitable for development
-    and testing environments. Data is lost when the server is restarted.
+    This implementation stores all data in memory and is suitable for
+    development and testing. Data is lost when the server is restarted.
     """
     
-    def __init__(self, config: Dict[str, Any] = None):
-        """Initialize the in-memory collaboration store.
+    def __init__(self):
+        """Initialize the in-memory store."""
+        # Document updates (notebook_id -> list of updates)
+        self._documents: Dict[str, List[bytes]] = {}
         
-        Args:
-            config: Configuration options for the store
-        """
-        super().__init__(config)
+        # Document state (notebook_id -> latest state)
+        self._document_states: Dict[str, bytes] = {}
         
-        # Initialize in-memory storage
-        self._documents: Set[str] = set()
-        self._updates: Dict[str, List[bytes]] = {}
+        # Awareness information (notebook_id -> awareness data)
         self._awareness: Dict[str, Dict[str, Any]] = {}
-        self._locks: Dict[str, Dict[str, Any]] = {}
-        self._comments: Dict[str, Dict[str, Any]] = {}
+        
+        # Cell locks (notebook_id -> {cell_id -> user_id})
+        self._cell_locks: Dict[str, Dict[str, str]] = {}
+        
+        # Comments (notebook_id -> list of comments)
+        self._comments: Dict[str, List[Dict[str, Any]]] = {}
+        
+        # Document snapshots (notebook_id -> {snapshot_id -> (snapshot, metadata)})
+        self._snapshots: Dict[str, Dict[str, Tuple[bytes, Dict[str, Any]]]] = {}
+        
+        # Permissions (notebook_id -> permissions)
         self._permissions: Dict[str, Dict[str, Any]] = {}
-        self._snapshots: Dict[str, List[Tuple[int, bytes]]] = {}
-        self._metadata: Dict[str, Dict[str, Any]] = {}
     
     async def initialize(self) -> None:
-        """Initialize the store."""
-        # Nothing to do for in-memory store
+        """Initialize the store.
+        
+        For the in-memory store, this is a no-op.
+        """
         pass
     
-    async def document_exists(self, doc_id: str) -> bool:
-        """Check if a collaborative document exists.
+    async def shutdown(self) -> None:
+        """Shut down the store.
+        
+        For the in-memory store, this is a no-op.
+        """
+        pass
+    
+    async def save_document(self, notebook_id: str, update: bytes) -> None:
+        """Save a CRDT document update.
         
         Args:
-            doc_id: Document identifier
+            notebook_id: The notebook ID
+            update: The CRDT update as bytes
+        """
+        if notebook_id not in self._documents:
+            self._documents[notebook_id] = []
+        
+        # Append the update to the list
+        self._documents[notebook_id].append(update)
+        
+        # If we have a document state, apply the update
+        if notebook_id in self._document_states and HAS_PYCRDT:
+            try:
+                # Create a temporary document
+                doc = Doc()
+                
+                # Apply the current state
+                doc.apply_update(self._document_states[notebook_id])
+                
+                # Apply the new update
+                doc.apply_update(update)
+                
+                # Store the new state
+                self._document_states[notebook_id] = encode_state_as_update(doc)
+            except Exception as e:
+                logger.error(f"Error applying update to document state: {e}")
+        else:
+            # Just store the update as the current state
+            self._document_states[notebook_id] = update
+    
+    async def load_document(self, notebook_id: str) -> Optional[bytes]:
+        """Load the latest CRDT document state.
+        
+        Args:
+            notebook_id: The notebook ID
             
         Returns:
-            True if the document exists, False otherwise
+            Optional[bytes]: The CRDT document state as bytes, or None if not found
         """
-        return doc_id in self._documents
+        return self._document_states.get(notebook_id)
     
-    async def create_document(self, doc_id: str, initial_data: Optional[Dict[str, Any]] = None) -> None:
-        """Create a new collaborative document.
+    async def save_awareness(self, notebook_id: str, awareness: Dict[str, Any]) -> None:
+        """Save user awareness information.
         
         Args:
-            doc_id: Document identifier
-            initial_data: Initial document data (optional)
+            notebook_id: The notebook ID
+            awareness: The awareness information as a dictionary
         """
-        if await self.document_exists(doc_id):
-            raise ValueError(f"Document {doc_id} already exists")
-        
-        self._documents.add(doc_id)
-        self._updates[doc_id] = []
-        self._awareness[doc_id] = {}
-        self._locks[doc_id] = {}
-        self._comments[doc_id] = {}
-        self._permissions[doc_id] = {}
-        self._snapshots[doc_id] = []
-        
-        # Initialize metadata
-        self._metadata[doc_id] = {
-            "created_at": datetime.now().isoformat(),
-            "updated_at": datetime.now().isoformat(),
-            "version": 0,
-            "snapshot_count": 0,
-        }
-        
-        # Apply initial data if provided
-        if initial_data:
-            if "awareness" in initial_data:
-                self._awareness[doc_id] = initial_data["awareness"]
-            if "locks" in initial_data:
-                self._locks[doc_id] = initial_data["locks"]
-            if "comments" in initial_data:
-                self._comments[doc_id] = initial_data["comments"]
-            if "permissions" in initial_data:
-                self._permissions[doc_id] = initial_data["permissions"]
+        self._awareness[notebook_id] = awareness
     
-    async def delete_document(self, doc_id: str) -> None:
-        """Delete a collaborative document and all associated data.
+    async def load_awareness(self, notebook_id: str) -> Optional[Dict[str, Any]]:
+        """Load user awareness information.
         
         Args:
-            doc_id: Document identifier
-        """
-        if not await self.document_exists(doc_id):
-            raise ValueError(f"Document {doc_id} does not exist")
-        
-        self._documents.remove(doc_id)
-        del self._updates[doc_id]
-        del self._awareness[doc_id]
-        del self._locks[doc_id]
-        del self._comments[doc_id]
-        del self._permissions[doc_id]
-        del self._snapshots[doc_id]
-        del self._metadata[doc_id]
-        
-        # Clean up any pending flush tasks
-        if doc_id in self._flush_tasks and not self._flush_tasks[doc_id].done():
-            self._flush_tasks[doc_id].cancel()
-            del self._flush_tasks[doc_id]
-        
-        # Clean up buffers
-        if doc_id in self._update_buffers:
-            del self._update_buffers[doc_id]
-        if doc_id in self._update_counters:
-            del self._update_counters[doc_id]
-        if doc_id in self._last_snapshot_time:
-            del self._last_snapshot_time[doc_id]
-    
-    async def list_documents(self) -> List[str]:
-        """List all collaborative documents.
-        
-        Returns:
-            List of document identifiers
-        """
-        return list(self._documents)
-    
-    async def _store_updates(self, doc_id: str, updates: List[bytes], create_snapshot: bool) -> None:
-        """Store updates in memory.
-        
-        Args:
-            doc_id: Document identifier
-            updates: List of binary Yjs update data
-            create_snapshot: Whether to create a snapshot
-        """
-        if not await self.document_exists(doc_id):
-            raise ValueError(f"Document {doc_id} does not exist")
-        
-        # Append updates to the document
-        self._updates[doc_id].extend(updates)
-        
-        # Update metadata
-        self._metadata[doc_id]["updated_at"] = datetime.now().isoformat()
-        self._metadata[doc_id]["version"] += len(updates)
-        
-        # Create snapshot if requested (in a real implementation, this would
-        # require the actual document state to be provided)
-        if create_snapshot and doc_id in self._snapshots:
-            # In a real implementation, we would create a snapshot here
-            # For now, we just update the metadata
-            self._metadata[doc_id]["snapshot_count"] += 1
-    
-    async def get_updates(self, doc_id: str, from_version: Optional[int] = None) -> List[bytes]:
-        """Get CRDT updates for a document.
-        
-        Args:
-            doc_id: Document identifier
-            from_version: Optional version to start from (None for all updates)
+            notebook_id: The notebook ID
             
         Returns:
-            List of binary Yjs update data
+            Optional[Dict[str, Any]]: The awareness information, or None if not found
         """
-        if not await self.document_exists(doc_id):
-            raise ValueError(f"Document {doc_id} does not exist")
-        
-        if from_version is None:
-            return self._updates[doc_id].copy()
-        
-        # Ensure from_version is valid
-        if from_version < 0 or from_version >= len(self._updates[doc_id]):
-            raise ValueError(f"Invalid version {from_version}")
-        
-        return self._updates[doc_id][from_version:].copy()
+        return self._awareness.get(notebook_id)
     
-    async def get_awareness(self, doc_id: str) -> Dict[str, Any]:
-        """Get awareness state for a document.
+    async def save_cell_locks(self, notebook_id: str, locks: Dict[str, str]) -> None:
+        """Save cell lock state.
         
         Args:
-            doc_id: Document identifier
+            notebook_id: The notebook ID
+            locks: Dictionary mapping cell IDs to user IDs
+        """
+        self._cell_locks[notebook_id] = locks
+    
+    async def load_cell_locks(self, notebook_id: str) -> Optional[Dict[str, str]]:
+        """Load cell lock state.
+        
+        Args:
+            notebook_id: The notebook ID
             
         Returns:
-            Dictionary containing awareness state
+            Optional[Dict[str, str]]: Dictionary mapping cell IDs to user IDs, or None if not found
         """
-        if not await self.document_exists(doc_id):
-            raise ValueError(f"Document {doc_id} does not exist")
-        
-        return self._awareness[doc_id].copy()
+        return self._cell_locks.get(notebook_id)
     
-    async def update_awareness(self, doc_id: str, awareness: Dict[str, Any]) -> None:
-        """Update awareness state for a document.
+    async def save_comment(self, notebook_id: str, comment: Dict[str, Any]) -> None:
+        """Save a comment.
         
         Args:
-            doc_id: Document identifier
-            awareness: Dictionary containing awareness state
+            notebook_id: The notebook ID
+            comment: The comment data as a dictionary
         """
-        if not await self.document_exists(doc_id):
-            raise ValueError(f"Document {doc_id} does not exist")
+        if notebook_id not in self._comments:
+            self._comments[notebook_id] = []
         
-        self._awareness[doc_id] = awareness.copy()
-        self._metadata[doc_id]["updated_at"] = datetime.now().isoformat()
+        # Ensure the comment has an ID
+        if 'id' not in comment:
+            comment['id'] = str(uuid.uuid4())
+        
+        # Add timestamp if not present
+        if 'timestamp' not in comment:
+            comment['timestamp'] = time.time()
+        
+        self._comments[notebook_id].append(comment)
     
-    async def get_locks(self, doc_id: str) -> Dict[str, Any]:
-        """Get lock state for a document.
+    async def update_comment(self, notebook_id: str, comment_id: str, comment: Dict[str, Any]) -> None:
+        """Update an existing comment.
         
         Args:
-            doc_id: Document identifier
+            notebook_id: The notebook ID
+            comment_id: The comment ID
+            comment: The updated comment data
+        """
+        if notebook_id not in self._comments:
+            return
+        
+        # Find the comment by ID
+        for i, existing_comment in enumerate(self._comments[notebook_id]):
+            if existing_comment.get('id') == comment_id:
+                # Update the comment
+                comment['id'] = comment_id  # Ensure ID is preserved
+                comment['updatedAt'] = time.time()  # Add update timestamp
+                self._comments[notebook_id][i] = comment
+                break
+    
+    async def delete_comment(self, notebook_id: str, comment_id: str) -> None:
+        """Delete a comment.
+        
+        Args:
+            notebook_id: The notebook ID
+            comment_id: The comment ID
+        """
+        if notebook_id not in self._comments:
+            return
+        
+        # Filter out the comment with the given ID
+        self._comments[notebook_id] = [
+            comment for comment in self._comments[notebook_id]
+            if comment.get('id') != comment_id
+        ]
+    
+    async def load_comments(self, notebook_id: str) -> List[Dict[str, Any]]:
+        """Load all comments for a notebook.
+        
+        Args:
+            notebook_id: The notebook ID
             
         Returns:
-            Dictionary containing lock state
+            List[Dict[str, Any]]: List of comment dictionaries
         """
-        if not await self.document_exists(doc_id):
-            raise ValueError(f"Document {doc_id} does not exist")
-        
-        return self._locks[doc_id].copy()
+        return self._comments.get(notebook_id, [])
     
-    async def update_locks(self, doc_id: str, locks: Dict[str, Any]) -> None:
-        """Update lock state for a document.
+    async def save_document_snapshot(self, notebook_id: str, snapshot: bytes, metadata: Dict[str, Any]) -> str:
+        """Save a document snapshot for version history.
         
         Args:
-            doc_id: Document identifier
-            locks: Dictionary containing lock state
-        """
-        if not await self.document_exists(doc_id):
-            raise ValueError(f"Document {doc_id} does not exist")
-        
-        self._locks[doc_id] = locks.copy()
-        self._metadata[doc_id]["updated_at"] = datetime.now().isoformat()
-    
-    async def get_comments(self, doc_id: str) -> Dict[str, Any]:
-        """Get comments for a document.
-        
-        Args:
-            doc_id: Document identifier
+            notebook_id: The notebook ID
+            snapshot: The document snapshot as bytes
+            metadata: Snapshot metadata (timestamp, author, etc.)
             
         Returns:
-            Dictionary containing comments
+            str: The snapshot ID
         """
-        if not await self.document_exists(doc_id):
-            raise ValueError(f"Document {doc_id} does not exist")
+        if notebook_id not in self._snapshots:
+            self._snapshots[notebook_id] = {}
         
-        return self._comments[doc_id].copy()
+        # Generate a snapshot ID if not provided
+        snapshot_id = metadata.get('id', str(uuid.uuid4()))
+        
+        # Add timestamp if not present
+        if 'timestamp' not in metadata:
+            metadata['timestamp'] = time.time()
+        
+        # Store the snapshot and metadata
+        self._snapshots[notebook_id][snapshot_id] = (snapshot, metadata)
+        
+        return snapshot_id
     
-    async def update_comments(self, doc_id: str, comments: Dict[str, Any]) -> None:
-        """Update comments for a document.
+    async def load_document_snapshot(self, notebook_id: str, snapshot_id: str) -> Tuple[Optional[bytes], Optional[Dict[str, Any]]]:
+        """Load a document snapshot.
         
         Args:
-            doc_id: Document identifier
-            comments: Dictionary containing comments
-        """
-        if not await self.document_exists(doc_id):
-            raise ValueError(f"Document {doc_id} does not exist")
-        
-        self._comments[doc_id] = comments.copy()
-        self._metadata[doc_id]["updated_at"] = datetime.now().isoformat()
-    
-    async def get_permissions(self, doc_id: str) -> Dict[str, Any]:
-        """Get permissions for a document.
-        
-        Args:
-            doc_id: Document identifier
+            notebook_id: The notebook ID
+            snapshot_id: The snapshot ID
             
         Returns:
-            Dictionary containing permissions
+            Tuple[Optional[bytes], Optional[Dict[str, Any]]]: The snapshot and its metadata, or (None, None) if not found
         """
-        if not await self.document_exists(doc_id):
-            raise ValueError(f"Document {doc_id} does not exist")
+        if notebook_id not in self._snapshots or snapshot_id not in self._snapshots[notebook_id]:
+            return None, None
         
-        return self._permissions[doc_id].copy()
+        return self._snapshots[notebook_id][snapshot_id]
     
-    async def update_permissions(self, doc_id: str, permissions: Dict[str, Any]) -> None:
-        """Update permissions for a document.
+    async def list_document_snapshots(self, notebook_id: str) -> List[Dict[str, Any]]:
+        """List all snapshots for a notebook.
         
         Args:
-            doc_id: Document identifier
-            permissions: Dictionary containing permissions
+            notebook_id: The notebook ID
+            
+        Returns:
+            List[Dict[str, Any]]: List of snapshot metadata
         """
-        if not await self.document_exists(doc_id):
-            raise ValueError(f"Document {doc_id} does not exist")
+        if notebook_id not in self._snapshots:
+            return []
         
-        self._permissions[doc_id] = permissions.copy()
-        self._metadata[doc_id]["updated_at"] = datetime.now().isoformat()
+        # Return a list of metadata dictionaries with snapshot IDs
+        return [
+            {**metadata, 'id': snapshot_id}
+            for snapshot_id, (_, metadata) in self._snapshots[notebook_id].items()
+        ]
     
-    async def create_snapshot(self, doc_id: str, state: bytes) -> None:
+    async def delete_document_snapshot(self, notebook_id: str, snapshot_id: str) -> None:
+        """Delete a document snapshot.
+        
+        Args:
+            notebook_id: The notebook ID
+            snapshot_id: The snapshot ID
+        """
+        if notebook_id in self._snapshots and snapshot_id in self._snapshots[notebook_id]:
+            del self._snapshots[notebook_id][snapshot_id]
+    
+    async def save_permissions(self, notebook_id: str, permissions: Dict[str, Any]) -> None:
+        """Save permission settings for a notebook.
+        
+        Args:
+            notebook_id: The notebook ID
+            permissions: The permission settings
+        """
+        self._permissions[notebook_id] = permissions
+    
+    async def load_permissions(self, notebook_id: str) -> Optional[Dict[str, Any]]:
+        """Load permission settings for a notebook.
+        
+        Args:
+            notebook_id: The notebook ID
+            
+        Returns:
+            Optional[Dict[str, Any]]: The permission settings, or None if not found
+        """
+        return self._permissions.get(notebook_id)
+    
+    async def cleanup_notebook(self, notebook_id: str) -> None:
+        """Clean up all collaboration data for a notebook.
+        
+        Args:
+            notebook_id: The notebook ID
+        """
+        # Remove all data for this notebook
+        self._documents.pop(notebook_id, None)
+        self._document_states.pop(notebook_id, None)
+        self._awareness.pop(notebook_id, None)
+        self._cell_locks.pop(notebook_id, None)
+        self._comments.pop(notebook_id, None)
+        self._snapshots.pop(notebook_id, None)
+        self._permissions.pop(notebook_id, None)
+    
+    async def list_notebooks(self) -> List[str]:
+        """List all notebooks with collaboration data.
+        
+        Returns:
+            List[str]: List of notebook IDs
+        """
+        # Collect all notebook IDs from all data stores
+        notebook_ids = set()
+        notebook_ids.update(self._documents.keys())
+        notebook_ids.update(self._document_states.keys())
+        notebook_ids.update(self._awareness.keys())
+        notebook_ids.update(self._cell_locks.keys())
+        notebook_ids.update(self._comments.keys())
+        notebook_ids.update(self._snapshots.keys())
+        notebook_ids.update(self._permissions.keys())
+        
+        return list(notebook_ids)
+
+
+class FileCollaborationStore(CollaborationStore, Configurable):
+    """File-based implementation of the collaboration store.
+    
+    This implementation stores data in files on disk and is suitable for
+    production deployments. Data is persisted between server restarts.
+    """
+    
+    # Configuration options
+    collab_dir = Unicode(
+        default_value=None,
+        allow_none=True,
+        help="Directory for storing collaboration data. If None, a default directory will be used."
+    ).tag(config=True)
+    
+    buffer_flush_period = Float(
+        default_value=2.0,
+        help="Time in seconds between periodic buffer flushes"
+    ).tag(config=True)
+    
+    buffer_size_limit = Integer(
+        default_value=1048576,  # 1MB
+        help="Maximum buffer size in bytes before forced flush"
+    ).tag(config=True)
+    
+    use_binary_format = Bool(
+        default_value=True,
+        help="Whether to use binary format for CRDT updates"
+    ).tag(config=True)
+    
+    snapshot_interval = Integer(
+        default_value=100,
+        help="Number of updates between automatic snapshots"
+    ).tag(config=True)
+    
+    snapshot_cache_size = Integer(
+        default_value=100,
+        help="Maximum number of snapshots to keep in memory cache"
+    ).tag(config=True)
+    
+    retention_days = Integer(
+        default_value=90,
+        help="Number of days to retain collaboration history"
+    ).tag(config=True)
+    
+    def __init__(self, **kwargs):
+        """Initialize the file-based store."""
+        super().__init__(**kwargs)
+        
+        # Set up the collaboration directory
+        if self.collab_dir is None:
+            # Use default directory in Jupyter data dir
+            from jupyter_core.paths import jupyter_data_dir
+            self.collab_dir = os.path.join(jupyter_data_dir(), 'collab')
+        
+        # Create the directory if it doesn't exist
+        os.makedirs(self.collab_dir, exist_ok=True)
+        
+        # Create subdirectories
+        self._updates_dir = os.path.join(self.collab_dir, 'updates')
+        self._snapshots_dir = os.path.join(self.collab_dir, 'snapshots')
+        self._awareness_dir = os.path.join(self.collab_dir, 'awareness')
+        self._locks_dir = os.path.join(self.collab_dir, 'locks')
+        self._comments_dir = os.path.join(self.collab_dir, 'comments')
+        self._permissions_dir = os.path.join(self.collab_dir, 'permissions')
+        
+        for directory in [self._updates_dir, self._snapshots_dir, self._awareness_dir,
+                         self._locks_dir, self._comments_dir, self._permissions_dir]:
+            os.makedirs(directory, exist_ok=True)
+        
+        # In-memory buffers for updates
+        self._update_buffers: Dict[str, List[bytes]] = {}
+        self._buffer_sizes: Dict[str, int] = {}
+        
+        # Snapshot cache
+        self._snapshot_cache: Dict[str, Dict[str, Tuple[bytes, Dict[str, Any]]]] = {}
+        
+        # Update counters for snapshot creation
+        self._update_counters: Dict[str, int] = {}
+        
+        # Locks for file operations
+        self._file_locks: Dict[str, asyncio.Lock] = {}
+        
+        # Thread pool for file I/O operations
+        self._executor = ThreadPoolExecutor(max_workers=4)
+        
+        # Periodic flush task
+        self._flush_task = None
+    
+    async def initialize(self) -> None:
+        """Initialize the store.
+        
+        This method sets up the periodic flush task and performs any
+        necessary initialization.
+        """
+        # Start the periodic flush task
+        if self._flush_task is None or self._flush_task.done():
+            self._flush_task = asyncio.create_task(self._periodic_flush())
+    
+    async def shutdown(self) -> None:
+        """Shut down the store.
+        
+        This method performs cleanup tasks such as flushing buffers and
+        shutting down the thread pool executor.
+        """
+        # Cancel the periodic flush task
+        if self._flush_task and not self._flush_task.done():
+            self._flush_task.cancel()
+            try:
+                await self._flush_task
+            except asyncio.CancelledError:
+                pass
+        
+        # Flush all buffers
+        await self._flush_all_buffers()
+        
+        # Shut down the thread pool executor
+        self._executor.shutdown(wait=True)
+    
+    async def _periodic_flush(self) -> None:
+        """Periodically flush update buffers to disk."""
+        try:
+            while True:
+                await asyncio.sleep(self.buffer_flush_period)
+                await self._flush_all_buffers()
+        except asyncio.CancelledError:
+            # Final flush before cancellation
+            await self._flush_all_buffers()
+            raise
+        except Exception as e:
+            logger.error(f"Error in periodic flush task: {e}")
+            # Only restart if this is still the active task
+            if self._flush_task and self._flush_task.done():
+                self._flush_task = asyncio.create_task(self._periodic_flush())
+    
+    async def _flush_all_buffers(self) -> None:
+        """Flush all update buffers to disk."""
+        for notebook_id in list(self._update_buffers.keys()):
+            await self._flush_buffer(notebook_id)
+    
+    async def _flush_buffer(self, notebook_id: str) -> None:
+        """Flush the update buffer for a notebook to disk.
+        
+        Args:
+            notebook_id: The notebook ID
+        """
+        if notebook_id not in self._update_buffers or not self._update_buffers[notebook_id]:
+            return
+        
+        # Get the lock for this notebook
+        lock = self._get_file_lock(f"updates_{notebook_id}")
+        async with lock:
+            try:
+                # Get the updates to flush
+                updates = self._update_buffers[notebook_id]
+                self._update_buffers[notebook_id] = []
+                self._buffer_sizes[notebook_id] = 0
+                
+                # Write the updates to the file
+                updates_file = os.path.join(self._updates_dir, f"{notebook_id}.yjsupdates")
+                
+                # Use a thread for file I/O
+                await asyncio.get_event_loop().run_in_executor(
+                    self._executor,
+                    partial(self._append_updates_to_file, updates_file, updates)
+                )
+                
+                # Check if we need to create a snapshot
+                self._update_counters[notebook_id] = self._update_counters.get(notebook_id, 0) + len(updates)
+                if self._update_counters[notebook_id] >= self.snapshot_interval:
+                    # Reset the counter
+                    self._update_counters[notebook_id] = 0
+                    
+                    # Create a snapshot in the background
+                    asyncio.create_task(self._create_snapshot(notebook_id))
+            except Exception as e:
+                logger.error(f"Error flushing update buffer for {notebook_id}: {e}")
+                # Put the updates back in the buffer
+                if notebook_id not in self._update_buffers:
+                    self._update_buffers[notebook_id] = []
+                self._update_buffers[notebook_id].extend(updates)
+                self._buffer_sizes[notebook_id] = sum(len(update) for update in self._update_buffers[notebook_id])
+    
+    def _append_updates_to_file(self, file_path: str, updates: List[bytes]) -> None:
+        """Append updates to a file.
+        
+        Args:
+            file_path: The file path
+            updates: The updates to append
+        """
+        # Create the directory if it doesn't exist
+        os.makedirs(os.path.dirname(file_path), exist_ok=True)
+        
+        # Append the updates to the file
+        with open(file_path, 'ab') as f:
+            for update in updates:
+                # Write the update length as a 4-byte integer
+                f.write(len(update).to_bytes(4, byteorder='big'))
+                # Write the update
+                f.write(update)
+    
+    async def _create_snapshot(self, notebook_id: str) -> None:
         """Create a snapshot of the document state.
         
         Args:
-            doc_id: Document identifier
-            state: Binary Yjs document state
+            notebook_id: The notebook ID
         """
-        if not await self.document_exists(doc_id):
-            raise ValueError(f"Document {doc_id} does not exist")
-        
-        version = self._metadata[doc_id]["version"]
-        self._snapshots[doc_id].append((version, state))
-        self._metadata[doc_id]["snapshot_count"] += 1
+        try:
+            # Load the document state
+            state = await self.load_document(notebook_id)
+            if not state:
+                return
+            
+            # Create metadata for the snapshot
+            metadata = {
+                'timestamp': time.time(),
+                'automatic': True,
+                'updateCount': self._update_counters.get(notebook_id, 0)
+            }
+            
+            # Save the snapshot
+            await self.save_document_snapshot(notebook_id, state, metadata)
+        except Exception as e:
+            logger.error(f"Error creating snapshot for {notebook_id}: {e}")
     
-    async def get_snapshot(self, doc_id: str, version: Optional[int] = None) -> Optional[bytes]:
-        """Get a snapshot of the document state.
+    def _get_file_lock(self, key: str) -> asyncio.Lock:
+        """Get a lock for file operations.
         
         Args:
-            doc_id: Document identifier
-            version: Optional version to retrieve (None for latest)
+            key: The lock key
             
         Returns:
-            Binary Yjs document state or None if not found
+            asyncio.Lock: The lock
         """
-        if not await self.document_exists(doc_id):
-            raise ValueError(f"Document {doc_id} does not exist")
+        if key not in self._file_locks:
+            self._file_locks[key] = asyncio.Lock()
+        return self._file_locks[key]
+    
+    async def save_document(self, notebook_id: str, update: bytes) -> None:
+        """Save a CRDT document update.
         
-        if not self._snapshots[doc_id]:
+        Args:
+            notebook_id: The notebook ID
+            update: The CRDT update as bytes
+        """
+        # Add the update to the buffer
+        if notebook_id not in self._update_buffers:
+            self._update_buffers[notebook_id] = []
+            self._buffer_sizes[notebook_id] = 0
+        
+        self._update_buffers[notebook_id].append(update)
+        self._buffer_sizes[notebook_id] += len(update)
+        
+        # Flush if the buffer is too large
+        if self._buffer_sizes[notebook_id] >= self.buffer_size_limit:
+            await self._flush_buffer(notebook_id)
+    
+    async def load_document(self, notebook_id: str) -> Optional[bytes]:
+        """Load the latest CRDT document state.
+        
+        Args:
+            notebook_id: The notebook ID
+            
+        Returns:
+            Optional[bytes]: The CRDT document state as bytes, or None if not found
+        """
+        # Check if we have any updates in the buffer
+        if notebook_id in self._update_buffers and self._update_buffers[notebook_id]:
+            # Flush the buffer to ensure we have the latest state on disk
+            await self._flush_buffer(notebook_id)
+        
+        # Try to load the latest snapshot first
+        snapshots = await self.list_document_snapshots(notebook_id)
+        if snapshots:
+            # Sort by timestamp (newest first)
+            snapshots.sort(key=lambda s: s.get('timestamp', 0), reverse=True)
+            snapshot_id = snapshots[0]['id']
+            snapshot, _ = await self.load_document_snapshot(notebook_id, snapshot_id)
+            if snapshot:
+                return snapshot
+        
+        # If no snapshot is available, reconstruct from updates
+        updates_file = os.path.join(self._updates_dir, f"{notebook_id}.yjsupdates")
+        if not os.path.exists(updates_file):
             return None
         
-        if version is None:
-            # Return the latest snapshot
-            return self._snapshots[doc_id][-1][1]
+        # Use a thread for file I/O
+        updates = await asyncio.get_event_loop().run_in_executor(
+            self._executor,
+            partial(self._read_updates_from_file, updates_file)
+        )
         
-        # Find the closest snapshot that is less than or equal to the requested version
-        for i in range(len(self._snapshots[doc_id]) - 1, -1, -1):
-            snapshot_version, snapshot_data = self._snapshots[doc_id][i]
-            if snapshot_version <= version:
-                return snapshot_data
+        if not updates:
+            return None
         
-        return None
-    
-    async def get_document_metadata(self, doc_id: str) -> Dict[str, Any]:
-        """Get metadata for a document.
-        
-        Args:
-            doc_id: Document identifier
-            
-        Returns:
-            Dictionary containing document metadata
-        """
-        if not await self.document_exists(doc_id):
-            raise ValueError(f"Document {doc_id} does not exist")
-        
-        return self._metadata[doc_id].copy()
-
-
-class FileCollaborationStore(CollaborationStore):
-    """File-based implementation of the collaboration store.
-    
-    This implementation stores data in files and is suitable for production
-    environments. Data is persisted across server restarts.
-    """
-    
-    def __init__(self, config: Dict[str, Any] = None):
-        """Initialize the file-based collaboration store.
-        
-        Args:
-            config: Configuration options for the store
-        """
-        super().__init__(config)
-        
-        # Get base directory from config or use default
-        self.base_dir = Path(self.config.get("base_dir", os.path.join(os.path.expanduser("~"), ".jupyter", "collab")))
-        
-        # Cache for recently accessed data
-        self.cache_size = self.config.get("cache_size", 100)  # Number of items to cache
-        self.snapshot_cache_size_mb = self.config.get("snapshot_cache_size_mb", 100)  # MB
-        
-        # Initialize caches
-        self._awareness_cache = lru_cache(maxsize=self.cache_size)(self._load_awareness_uncached)
-        self._locks_cache = lru_cache(maxsize=self.cache_size)(self._load_locks_uncached)
-        self._comments_cache = lru_cache(maxsize=self.cache_size)(self._load_comments_uncached)
-        self._permissions_cache = lru_cache(maxsize=self.cache_size)(self._load_permissions_uncached)
-        
-        # File locks for concurrent access
-        self._file_locks: Dict[str, asyncio.Lock] = {}
-    
-    async def initialize(self) -> None:
-        """Initialize the store and ensure required directories exist."""
-        # Create base directory if it doesn't exist
-        os.makedirs(self.base_dir, exist_ok=True)
-        
-        # Create history directory if it doesn't exist
-        os.makedirs(self.base_dir / CollaborationFileTypes.HISTORY.value, exist_ok=True)
-    
-    def _get_document_dir(self, doc_id: str) -> Path:
-        """Get the directory for a document.
-        
-        Args:
-            doc_id: Document identifier
-            
-        Returns:
-            Path to the document directory
-        """
-        return self.base_dir / doc_id
-    
-    def _get_updates_path(self, doc_id: str) -> Path:
-        """Get the path to the updates file for a document.
-        
-        Args:
-            doc_id: Document identifier
-            
-        Returns:
-            Path to the updates file
-        """
-        return self._get_document_dir(doc_id) / CollaborationFileTypes.UPDATES.value
-    
-    def _get_awareness_path(self, doc_id: str) -> Path:
-        """Get the path to the awareness file for a document.
-        
-        Args:
-            doc_id: Document identifier
-            
-        Returns:
-            Path to the awareness file
-        """
-        return self._get_document_dir(doc_id) / CollaborationFileTypes.AWARENESS.value
-    
-    def _get_locks_path(self, doc_id: str) -> Path:
-        """Get the path to the locks file for a document.
-        
-        Args:
-            doc_id: Document identifier
-            
-        Returns:
-            Path to the locks file
-        """
-        return self._get_document_dir(doc_id) / CollaborationFileTypes.LOCKS.value
-    
-    def _get_comments_path(self, doc_id: str) -> Path:
-        """Get the path to the comments file for a document.
-        
-        Args:
-            doc_id: Document identifier
-            
-        Returns:
-            Path to the comments file
-        """
-        return self._get_document_dir(doc_id) / CollaborationFileTypes.COMMENTS.value
-    
-    def _get_permissions_path(self, doc_id: str) -> Path:
-        """Get the path to the permissions file for a document.
-        
-        Args:
-            doc_id: Document identifier
-            
-        Returns:
-            Path to the permissions file
-        """
-        return self._get_document_dir(doc_id) / CollaborationFileTypes.PERMISSIONS.value
-    
-    def _get_history_dir(self, doc_id: str) -> Path:
-        """Get the directory for document history.
-        
-        Args:
-            doc_id: Document identifier
-            
-        Returns:
-            Path to the history directory
-        """
-        return self.base_dir / CollaborationFileTypes.HISTORY.value / doc_id
-    
-    def _get_metadata_path(self, doc_id: str) -> Path:
-        """Get the path to the metadata file for a document.
-        
-        Args:
-            doc_id: Document identifier
-            
-        Returns:
-            Path to the metadata file
-        """
-        return self._get_document_dir(doc_id) / "metadata.json"
-    
-    def _get_snapshot_path(self, doc_id: str, version: int) -> Path:
-        """Get the path to a snapshot file for a document.
-        
-        Args:
-            doc_id: Document identifier
-            version: Snapshot version
-            
-        Returns:
-            Path to the snapshot file
-        """
-        return self._get_history_dir(doc_id) / f"snapshot_{version}.bin"
-    
-    async def _get_file_lock(self, path: str) -> asyncio.Lock:
-        """Get a lock for a file path.
-        
-        Args:
-            path: File path
-            
-        Returns:
-            Lock for the file
-        """
-        if path not in self._file_locks:
-            self._file_locks[path] = asyncio.Lock()
-        return self._file_locks[path]
-    
-    async def document_exists(self, doc_id: str) -> bool:
-        """Check if a collaborative document exists.
-        
-        Args:
-            doc_id: Document identifier
-            
-        Returns:
-            True if the document exists, False otherwise
-        """
-        return self._get_document_dir(doc_id).exists()
-    
-    async def create_document(self, doc_id: str, initial_data: Optional[Dict[str, Any]] = None) -> None:
-        """Create a new collaborative document.
-        
-        Args:
-            doc_id: Document identifier
-            initial_data: Initial document data (optional)
-        """
-        if await self.document_exists(doc_id):
-            raise ValueError(f"Document {doc_id} already exists")
-        
-        # Create document directory
-        doc_dir = self._get_document_dir(doc_id)
-        os.makedirs(doc_dir, exist_ok=True)
-        
-        # Create history directory
-        history_dir = self._get_history_dir(doc_id)
-        os.makedirs(history_dir, exist_ok=True)
-        
-        # Initialize metadata
-        metadata = {
-            "created_at": datetime.now().isoformat(),
-            "updated_at": datetime.now().isoformat(),
-            "version": 0,
-            "snapshot_count": 0,
-        }
-        
-        # Write metadata file
-        async with self._get_file_lock(str(self._get_metadata_path(doc_id))):
-            with open(self._get_metadata_path(doc_id), "w") as f:
-                json.dump(metadata, f)
-        
-        # Initialize empty files
-        open(self._get_updates_path(doc_id), "wb").close()
-        
-        # Apply initial data if provided
-        if initial_data:
-            if "awareness" in initial_data:
-                await self.update_awareness(doc_id, initial_data["awareness"])
-            if "locks" in initial_data:
-                await self.update_locks(doc_id, initial_data["locks"])
-            if "comments" in initial_data:
-                await self.update_comments(doc_id, initial_data["comments"])
-            if "permissions" in initial_data:
-                await self.update_permissions(doc_id, initial_data["permissions"])
-    
-    async def delete_document(self, doc_id: str) -> None:
-        """Delete a collaborative document and all associated data.
-        
-        Args:
-            doc_id: Document identifier
-        """
-        if not await self.document_exists(doc_id):
-            raise ValueError(f"Document {doc_id} does not exist")
-        
-        # Get all file paths
-        doc_dir = self._get_document_dir(doc_id)
-        history_dir = self._get_history_dir(doc_id)
-        
-        # Acquire locks for all files
-        locks = []
-        for path in [self._get_updates_path(doc_id), self._get_awareness_path(doc_id),
-                    self._get_locks_path(doc_id), self._get_comments_path(doc_id),
-                    self._get_permissions_path(doc_id), self._get_metadata_path(doc_id)]:
-            locks.append(self._get_file_lock(str(path)))
-        
-        # Acquire all locks to ensure no concurrent access
-        for lock in locks:
-            await lock.acquire()
-        
-        try:
-            # Delete all files and directories
-            import shutil
-            if history_dir.exists():
-                shutil.rmtree(history_dir)
-            if doc_dir.exists():
-                shutil.rmtree(doc_dir)
-            
-            # Clean up any pending flush tasks
-            if doc_id in self._flush_tasks and not self._flush_tasks[doc_id].done():
-                self._flush_tasks[doc_id].cancel()
-                del self._flush_tasks[doc_id]
-            
-            # Clean up buffers
-            if doc_id in self._update_buffers:
-                del self._update_buffers[doc_id]
-            if doc_id in self._update_counters:
-                del self._update_counters[doc_id]
-            if doc_id in self._last_snapshot_time:
-                del self._last_snapshot_time[doc_id]
-            
-            # Clear caches
-            self._awareness_cache.cache_clear()
-            self._locks_cache.cache_clear()
-            self._comments_cache.cache_clear()
-            self._permissions_cache.cache_clear()
-        finally:
-            # Release all locks
-            for lock in locks:
-                lock.release()
-    
-    async def list_documents(self) -> List[str]:
-        """List all collaborative documents.
-        
-        Returns:
-            List of document identifiers
-        """
-        # List all directories in the base directory that have a metadata.json file
-        documents = []
-        for item in os.listdir(self.base_dir):
-            if os.path.isdir(os.path.join(self.base_dir, item)):
-                if os.path.exists(os.path.join(self.base_dir, item, "metadata.json")):
-                    documents.append(item)
-        return documents
-    
-    async def _store_updates(self, doc_id: str, updates: List[bytes], create_snapshot: bool) -> None:
-        """Store updates in the file system.
-        
-        Args:
-            doc_id: Document identifier
-            updates: List of binary Yjs update data
-            create_snapshot: Whether to create a snapshot
-        """
-        if not await self.document_exists(doc_id):
-            raise ValueError(f"Document {doc_id} does not exist")
-        
-        # Get file paths
-        updates_path = self._get_updates_path(doc_id)
-        metadata_path = self._get_metadata_path(doc_id)
-        
-        # Acquire locks
-        updates_lock = await self._get_file_lock(str(updates_path))
-        metadata_lock = await self._get_file_lock(str(metadata_path))
-        
-        # Process updates
-        async with updates_lock:
-            # Append updates to the file
-            with open(updates_path, "ab") as f:
+        # Reconstruct the document state
+        if HAS_PYCRDT:
+            try:
+                doc = Doc()
                 for update in updates:
-                    # Write length prefix and update data
-                    length = len(update)
-                    f.write(length.to_bytes(4, byteorder="big"))
-                    f.write(update)
-        
-        # Update metadata
-        async with metadata_lock:
-            metadata = await self.get_document_metadata(doc_id)
-            metadata["updated_at"] = datetime.now().isoformat()
-            metadata["version"] += len(updates)
-            
-            # Write metadata file (using atomic write pattern)
-            temp_path = metadata_path.with_suffix(".tmp")
-            with open(temp_path, "w") as f:
-                json.dump(metadata, f)
-            os.replace(temp_path, metadata_path)
-        
-        # Create snapshot if requested
-        if create_snapshot:
-            # In a real implementation, we would need the actual document state
-            # For now, we just update the metadata to indicate a snapshot was created
-            async with metadata_lock:
-                metadata = await self.get_document_metadata(doc_id)
-                metadata["snapshot_count"] += 1
-                
-                # Write metadata file (using atomic write pattern)
-                temp_path = metadata_path.with_suffix(".tmp")
-                with open(temp_path, "w") as f:
-                    json.dump(metadata, f)
-                os.replace(temp_path, metadata_path)
+                    doc.apply_update(update)
+                return encode_state_as_update(doc)
+            except Exception as e:
+                logger.error(f"Error reconstructing document state: {e}")
+                # Return the last update as a fallback
+                return updates[-1]
+        else:
+            # If pycrdt is not available, just return the last update
+            return updates[-1]
     
-    async def get_updates(self, doc_id: str, from_version: Optional[int] = None) -> List[bytes]:
-        """Get CRDT updates for a document.
+    def _read_updates_from_file(self, file_path: str) -> List[bytes]:
+        """Read updates from a file.
         
         Args:
-            doc_id: Document identifier
-            from_version: Optional version to start from (None for all updates)
+            file_path: The file path
             
         Returns:
-            List of binary Yjs update data
+            List[bytes]: The updates
         """
-        if not await self.document_exists(doc_id):
-            raise ValueError(f"Document {doc_id} does not exist")
+        if not os.path.exists(file_path):
+            return []
         
-        updates_path = self._get_updates_path(doc_id)
-        
-        # Acquire lock
-        async with await self._get_file_lock(str(updates_path)):
-            # Check if file exists
-            if not updates_path.exists():
-                return []
-            
-            # Read updates from file
-            updates = []
-            current_version = 0
-            
-            with open(updates_path, "rb") as f:
+        updates = []
+        try:
+            with open(file_path, 'rb') as f:
                 while True:
-                    # Read length prefix
+                    # Read the update length (4 bytes)
                     length_bytes = f.read(4)
                     if not length_bytes or len(length_bytes) < 4:
                         break
                     
-                    # Parse length
-                    length = int.from_bytes(length_bytes, byteorder="big")
+                    # Convert to integer
+                    length = int.from_bytes(length_bytes, byteorder='big')
                     
-                    # Read update data
-                    update_data = f.read(length)
-                    if not update_data or len(update_data) < length:
+                    # Read the update
+                    update = f.read(length)
+                    if not update or len(update) < length:
                         break
                     
-                    # Skip updates before from_version
-                    if from_version is None or current_version >= from_version:
-                        updates.append(update_data)
-                    
-                    current_version += 1
-            
-            return updates
+                    updates.append(update)
+        except Exception as e:
+            logger.error(f"Error reading updates from {file_path}: {e}")
+        
+        return updates
     
-    def _load_awareness_uncached(self, doc_id: str) -> Dict[str, Any]:
-        """Load awareness state from file (uncached version).
+    async def save_awareness(self, notebook_id: str, awareness: Dict[str, Any]) -> None:
+        """Save user awareness information.
         
         Args:
-            doc_id: Document identifier
+            notebook_id: The notebook ID
+            awareness: The awareness information as a dictionary
+        """
+        awareness_file = os.path.join(self._awareness_dir, f"{notebook_id}.json")
+        
+        # Use a thread for file I/O
+        await asyncio.get_event_loop().run_in_executor(
+            self._executor,
+            partial(self._write_json_file, awareness_file, awareness)
+        )
+    
+    async def load_awareness(self, notebook_id: str) -> Optional[Dict[str, Any]]:
+        """Load user awareness information.
+        
+        Args:
+            notebook_id: The notebook ID
             
         Returns:
-            Dictionary containing awareness state
+            Optional[Dict[str, Any]]: The awareness information, or None if not found
         """
-        awareness_path = self._get_awareness_path(doc_id)
+        awareness_file = os.path.join(self._awareness_dir, f"{notebook_id}.json")
         
-        if not awareness_path.exists():
-            return {}
+        # Use a thread for file I/O
+        return await asyncio.get_event_loop().run_in_executor(
+            self._executor,
+            partial(self._read_json_file, awareness_file)
+        )
+    
+    async def save_cell_locks(self, notebook_id: str, locks: Dict[str, str]) -> None:
+        """Save cell lock state.
         
+        Args:
+            notebook_id: The notebook ID
+            locks: Dictionary mapping cell IDs to user IDs
+        """
+        locks_file = os.path.join(self._locks_dir, f"{notebook_id}.json")
+        
+        # Use a thread for file I/O
+        await asyncio.get_event_loop().run_in_executor(
+            self._executor,
+            partial(self._write_json_file, locks_file, locks)
+        )
+    
+    async def load_cell_locks(self, notebook_id: str) -> Optional[Dict[str, str]]:
+        """Load cell lock state.
+        
+        Args:
+            notebook_id: The notebook ID
+            
+        Returns:
+            Optional[Dict[str, str]]: Dictionary mapping cell IDs to user IDs, or None if not found
+        """
+        locks_file = os.path.join(self._locks_dir, f"{notebook_id}.json")
+        
+        # Use a thread for file I/O
+        return await asyncio.get_event_loop().run_in_executor(
+            self._executor,
+            partial(self._read_json_file, locks_file)
+        )
+    
+    async def save_comment(self, notebook_id: str, comment: Dict[str, Any]) -> None:
+        """Save a comment.
+        
+        Args:
+            notebook_id: The notebook ID
+            comment: The comment data as a dictionary
+        """
+        # Ensure the comment has an ID
+        if 'id' not in comment:
+            comment['id'] = str(uuid.uuid4())
+        
+        # Add timestamp if not present
+        if 'timestamp' not in comment:
+            comment['timestamp'] = time.time()
+        
+        # Load existing comments
+        comments = await self.load_comments(notebook_id)
+        
+        # Add the new comment
+        comments.append(comment)
+        
+        # Save all comments
+        comments_file = os.path.join(self._comments_dir, f"{notebook_id}.json")
+        
+        # Use a thread for file I/O
+        await asyncio.get_event_loop().run_in_executor(
+            self._executor,
+            partial(self._write_json_file, comments_file, comments)
+        )
+    
+    async def update_comment(self, notebook_id: str, comment_id: str, comment: Dict[str, Any]) -> None:
+        """Update an existing comment.
+        
+        Args:
+            notebook_id: The notebook ID
+            comment_id: The comment ID
+            comment: The updated comment data
+        """
+        # Load existing comments
+        comments = await self.load_comments(notebook_id)
+        
+        # Find the comment by ID
+        for i, existing_comment in enumerate(comments):
+            if existing_comment.get('id') == comment_id:
+                # Update the comment
+                comment['id'] = comment_id  # Ensure ID is preserved
+                comment['updatedAt'] = time.time()  # Add update timestamp
+                comments[i] = comment
+                break
+        else:
+            # Comment not found
+            return
+        
+        # Save all comments
+        comments_file = os.path.join(self._comments_dir, f"{notebook_id}.json")
+        
+        # Use a thread for file I/O
+        await asyncio.get_event_loop().run_in_executor(
+            self._executor,
+            partial(self._write_json_file, comments_file, comments)
+        )
+    
+    async def delete_comment(self, notebook_id: str, comment_id: str) -> None:
+        """Delete a comment.
+        
+        Args:
+            notebook_id: The notebook ID
+            comment_id: The comment ID
+        """
+        # Load existing comments
+        comments = await self.load_comments(notebook_id)
+        
+        # Filter out the comment with the given ID
+        comments = [comment for comment in comments if comment.get('id') != comment_id]
+        
+        # Save all comments
+        comments_file = os.path.join(self._comments_dir, f"{notebook_id}.json")
+        
+        # Use a thread for file I/O
+        await asyncio.get_event_loop().run_in_executor(
+            self._executor,
+            partial(self._write_json_file, comments_file, comments)
+        )
+    
+    async def load_comments(self, notebook_id: str) -> List[Dict[str, Any]]:
+        """Load all comments for a notebook.
+        
+        Args:
+            notebook_id: The notebook ID
+            
+        Returns:
+            List[Dict[str, Any]]: List of comment dictionaries
+        """
+        comments_file = os.path.join(self._comments_dir, f"{notebook_id}.json")
+        
+        # Use a thread for file I/O
+        comments = await asyncio.get_event_loop().run_in_executor(
+            self._executor,
+            partial(self._read_json_file, comments_file)
+        )
+        
+        return comments or []
+    
+    async def save_document_snapshot(self, notebook_id: str, snapshot: bytes, metadata: Dict[str, Any]) -> str:
+        """Save a document snapshot for version history.
+        
+        Args:
+            notebook_id: The notebook ID
+            snapshot: The document snapshot as bytes
+            metadata: Snapshot metadata (timestamp, author, etc.)
+            
+        Returns:
+            str: The snapshot ID
+        """
+        # Generate a snapshot ID if not provided
+        snapshot_id = metadata.get('id', str(uuid.uuid4()))
+        metadata['id'] = snapshot_id
+        
+        # Add timestamp if not present
+        if 'timestamp' not in metadata:
+            metadata['timestamp'] = time.time()
+        
+        # Create the snapshots directory for this notebook
+        notebook_snapshots_dir = os.path.join(self._snapshots_dir, notebook_id)
+        os.makedirs(notebook_snapshots_dir, exist_ok=True)
+        
+        # Save the snapshot
+        snapshot_file = os.path.join(notebook_snapshots_dir, f"{snapshot_id}.bin")
+        metadata_file = os.path.join(notebook_snapshots_dir, f"{snapshot_id}.json")
+        
+        # Use threads for file I/O
+        await asyncio.gather(
+            asyncio.get_event_loop().run_in_executor(
+                self._executor,
+                partial(self._write_binary_file, snapshot_file, snapshot)
+            ),
+            asyncio.get_event_loop().run_in_executor(
+                self._executor,
+                partial(self._write_json_file, metadata_file, metadata)
+            )
+        )
+        
+        # Update the snapshot cache
+        if notebook_id not in self._snapshot_cache:
+            self._snapshot_cache[notebook_id] = {}
+        
+        # Limit the cache size
+        if len(self._snapshot_cache[notebook_id]) >= self.snapshot_cache_size:
+            # Remove the oldest snapshot from the cache
+            oldest_id = min(
+                self._snapshot_cache[notebook_id].keys(),
+                key=lambda sid: self._snapshot_cache[notebook_id][sid][1].get('timestamp', 0)
+            )
+            del self._snapshot_cache[notebook_id][oldest_id]
+        
+        # Add to cache
+        self._snapshot_cache[notebook_id][snapshot_id] = (snapshot, metadata)
+        
+        return snapshot_id
+    
+    async def load_document_snapshot(self, notebook_id: str, snapshot_id: str) -> Tuple[Optional[bytes], Optional[Dict[str, Any]]]:
+        """Load a document snapshot.
+        
+        Args:
+            notebook_id: The notebook ID
+            snapshot_id: The snapshot ID
+            
+        Returns:
+            Tuple[Optional[bytes], Optional[Dict[str, Any]]]: The snapshot and its metadata, or (None, None) if not found
+        """
+        # Check the cache first
+        if notebook_id in self._snapshot_cache and snapshot_id in self._snapshot_cache[notebook_id]:
+            return self._snapshot_cache[notebook_id][snapshot_id]
+        
+        # Load from disk
+        notebook_snapshots_dir = os.path.join(self._snapshots_dir, notebook_id)
+        snapshot_file = os.path.join(notebook_snapshots_dir, f"{snapshot_id}.bin")
+        metadata_file = os.path.join(notebook_snapshots_dir, f"{snapshot_id}.json")
+        
+        if not os.path.exists(snapshot_file) or not os.path.exists(metadata_file):
+            return None, None
+        
+        # Use threads for file I/O
+        snapshot, metadata = await asyncio.gather(
+            asyncio.get_event_loop().run_in_executor(
+                self._executor,
+                partial(self._read_binary_file, snapshot_file)
+            ),
+            asyncio.get_event_loop().run_in_executor(
+                self._executor,
+                partial(self._read_json_file, metadata_file)
+            )
+        )
+        
+        if snapshot is None or metadata is None:
+            return None, None
+        
+        # Update the cache
+        if notebook_id not in self._snapshot_cache:
+            self._snapshot_cache[notebook_id] = {}
+        
+        # Limit the cache size
+        if len(self._snapshot_cache[notebook_id]) >= self.snapshot_cache_size:
+            # Remove the oldest snapshot from the cache
+            oldest_id = min(
+                self._snapshot_cache[notebook_id].keys(),
+                key=lambda sid: self._snapshot_cache[notebook_id][sid][1].get('timestamp', 0)
+            )
+            del self._snapshot_cache[notebook_id][oldest_id]
+        
+        # Add to cache
+        self._snapshot_cache[notebook_id][snapshot_id] = (snapshot, metadata)
+        
+        return snapshot, metadata
+    
+    async def list_document_snapshots(self, notebook_id: str) -> List[Dict[str, Any]]:
+        """List all snapshots for a notebook.
+        
+        Args:
+            notebook_id: The notebook ID
+            
+        Returns:
+            List[Dict[str, Any]]: List of snapshot metadata
+        """
+        notebook_snapshots_dir = os.path.join(self._snapshots_dir, notebook_id)
+        if not os.path.exists(notebook_snapshots_dir):
+            return []
+        
+        # Use a thread for file I/O
+        snapshot_files = await asyncio.get_event_loop().run_in_executor(
+            self._executor,
+            partial(os.listdir, notebook_snapshots_dir)
+        )
+        
+        # Find all metadata files
+        metadata_files = [f for f in snapshot_files if f.endswith('.json')]
+        
+        # Load metadata for each snapshot
+        metadata_list = []
+        for metadata_file in metadata_files:
+            snapshot_id = metadata_file[:-5]  # Remove .json extension
+            metadata_path = os.path.join(notebook_snapshots_dir, metadata_file)
+            
+            # Use a thread for file I/O
+            metadata = await asyncio.get_event_loop().run_in_executor(
+                self._executor,
+                partial(self._read_json_file, metadata_path)
+            )
+            
+            if metadata:
+                metadata['id'] = snapshot_id
+                metadata_list.append(metadata)
+        
+        return metadata_list
+    
+    async def delete_document_snapshot(self, notebook_id: str, snapshot_id: str) -> None:
+        """Delete a document snapshot.
+        
+        Args:
+            notebook_id: The notebook ID
+            snapshot_id: The snapshot ID
+        """
+        # Remove from cache
+        if notebook_id in self._snapshot_cache and snapshot_id in self._snapshot_cache[notebook_id]:
+            del self._snapshot_cache[notebook_id][snapshot_id]
+        
+        # Remove from disk
+        notebook_snapshots_dir = os.path.join(self._snapshots_dir, notebook_id)
+        snapshot_file = os.path.join(notebook_snapshots_dir, f"{snapshot_id}.bin")
+        metadata_file = os.path.join(notebook_snapshots_dir, f"{snapshot_id}.json")
+        
+        # Use threads for file I/O
+        await asyncio.gather(
+            asyncio.get_event_loop().run_in_executor(
+                self._executor,
+                partial(self._delete_file_if_exists, snapshot_file)
+            ),
+            asyncio.get_event_loop().run_in_executor(
+                self._executor,
+                partial(self._delete_file_if_exists, metadata_file)
+            )
+        )
+    
+    async def save_permissions(self, notebook_id: str, permissions: Dict[str, Any]) -> None:
+        """Save permission settings for a notebook.
+        
+        Args:
+            notebook_id: The notebook ID
+            permissions: The permission settings
+        """
+        permissions_file = os.path.join(self._permissions_dir, f"{notebook_id}.json")
+        
+        # Use a thread for file I/O
+        await asyncio.get_event_loop().run_in_executor(
+            self._executor,
+            partial(self._write_json_file, permissions_file, permissions)
+        )
+    
+    async def load_permissions(self, notebook_id: str) -> Optional[Dict[str, Any]]:
+        """Load permission settings for a notebook.
+        
+        Args:
+            notebook_id: The notebook ID
+            
+        Returns:
+            Optional[Dict[str, Any]]: The permission settings, or None if not found
+        """
+        permissions_file = os.path.join(self._permissions_dir, f"{notebook_id}.json")
+        
+        # Use a thread for file I/O
+        return await asyncio.get_event_loop().run_in_executor(
+            self._executor,
+            partial(self._read_json_file, permissions_file)
+        )
+    
+    async def cleanup_notebook(self, notebook_id: str) -> None:
+        """Clean up all collaboration data for a notebook.
+        
+        Args:
+            notebook_id: The notebook ID
+        """
+        # Flush any pending updates
+        if notebook_id in self._update_buffers and self._update_buffers[notebook_id]:
+            await self._flush_buffer(notebook_id)
+        
+        # Remove from caches
+        self._update_buffers.pop(notebook_id, None)
+        self._buffer_sizes.pop(notebook_id, None)
+        self._update_counters.pop(notebook_id, None)
+        self._snapshot_cache.pop(notebook_id, None)
+        
+        # Remove files
+        files_to_delete = [
+            os.path.join(self._updates_dir, f"{notebook_id}.yjsupdates"),
+            os.path.join(self._awareness_dir, f"{notebook_id}.json"),
+            os.path.join(self._locks_dir, f"{notebook_id}.json"),
+            os.path.join(self._comments_dir, f"{notebook_id}.json"),
+            os.path.join(self._permissions_dir, f"{notebook_id}.json")
+        ]
+        
+        # Use threads for file I/O
+        await asyncio.gather(*[
+            asyncio.get_event_loop().run_in_executor(
+                self._executor,
+                partial(self._delete_file_if_exists, file_path)
+            )
+            for file_path in files_to_delete
+        ])
+        
+        # Remove snapshots directory
+        notebook_snapshots_dir = os.path.join(self._snapshots_dir, notebook_id)
+        if os.path.exists(notebook_snapshots_dir):
+            await asyncio.get_event_loop().run_in_executor(
+                self._executor,
+                partial(shutil.rmtree, notebook_snapshots_dir, ignore_errors=True)
+            )
+    
+    async def list_notebooks(self) -> List[str]:
+        """List all notebooks with collaboration data.
+        
+        Returns:
+            List[str]: List of notebook IDs
+        """
+        # Collect notebook IDs from all directories
+        notebook_ids = set()
+        
+        # Check updates directory
+        if os.path.exists(self._updates_dir):
+            update_files = await asyncio.get_event_loop().run_in_executor(
+                self._executor,
+                partial(os.listdir, self._updates_dir)
+            )
+            for file_name in update_files:
+                if file_name.endswith('.yjsupdates'):
+                    notebook_ids.add(file_name[:-11])  # Remove .yjsupdates extension
+        
+        # Check other directories
+        for directory, extension in [
+            (self._awareness_dir, '.json'),
+            (self._locks_dir, '.json'),
+            (self._comments_dir, '.json'),
+            (self._permissions_dir, '.json')
+        ]:
+            if os.path.exists(directory):
+                files = await asyncio.get_event_loop().run_in_executor(
+                    self._executor,
+                    partial(os.listdir, directory)
+                )
+                for file_name in files:
+                    if file_name.endswith(extension):
+                        notebook_ids.add(file_name[:-len(extension)])
+        
+        # Check snapshots directory
+        if os.path.exists(self._snapshots_dir):
+            snapshot_dirs = await asyncio.get_event_loop().run_in_executor(
+                self._executor,
+                partial(os.listdir, self._snapshots_dir)
+            )
+            notebook_ids.update(snapshot_dirs)
+        
+        return list(notebook_ids)
+    
+    def _write_json_file(self, file_path: str, data: Any) -> None:
+        """Write data to a JSON file.
+        
+        Args:
+            file_path: The file path
+            data: The data to write
+        """
+        # Create the directory if it doesn't exist
+        os.makedirs(os.path.dirname(file_path), exist_ok=True)
+        
+        # Write to a temporary file first
+        temp_file = f"{file_path}.tmp"
         try:
-            with open(awareness_path, "r") as f:
-                return json.load(f)
-        except (json.JSONDecodeError, IOError) as e:
-            logger.error(f"Error loading awareness state for {doc_id}: {e}")
-            return {}
-    
-    async def get_awareness(self, doc_id: str) -> Dict[str, Any]:
-        """Get awareness state for a document.
-        
-        Args:
-            doc_id: Document identifier
+            with open(temp_file, 'w') as f:
+                json.dump(data, f)
             
-        Returns:
-            Dictionary containing awareness state
-        """
-        if not await self.document_exists(doc_id):
-            raise ValueError(f"Document {doc_id} does not exist")
-        
-        return self._awareness_cache(doc_id)
-    
-    async def update_awareness(self, doc_id: str, awareness: Dict[str, Any]) -> None:
-        """Update awareness state for a document.
-        
-        Args:
-            doc_id: Document identifier
-            awareness: Dictionary containing awareness state
-        """
-        if not await self.document_exists(doc_id):
-            raise ValueError(f"Document {doc_id} does not exist")
-        
-        awareness_path = self._get_awareness_path(doc_id)
-        
-        # Acquire lock
-        async with await self._get_file_lock(str(awareness_path)):
-            # Write awareness file (using atomic write pattern)
-            temp_path = awareness_path.with_suffix(".tmp")
-            with open(temp_path, "w") as f:
-                json.dump(awareness, f)
-            os.replace(temp_path, awareness_path)
-        
-        # Update metadata
-        metadata_path = self._get_metadata_path(doc_id)
-        async with await self._get_file_lock(str(metadata_path)):
-            metadata = await self.get_document_metadata(doc_id)
-            metadata["updated_at"] = datetime.now().isoformat()
-            
-            # Write metadata file (using atomic write pattern)
-            temp_path = metadata_path.with_suffix(".tmp")
-            with open(temp_path, "w") as f:
-                json.dump(metadata, f)
-            os.replace(temp_path, metadata_path)
-        
-        # Clear cache
-        self._awareness_cache.cache_clear()
-    
-    def _load_locks_uncached(self, doc_id: str) -> Dict[str, Any]:
-        """Load lock state from file (uncached version).
-        
-        Args:
-            doc_id: Document identifier
-            
-        Returns:
-            Dictionary containing lock state
-        """
-        locks_path = self._get_locks_path(doc_id)
-        
-        if not locks_path.exists():
-            return {}
-        
-        try:
-            with open(locks_path, "r") as f:
-                return json.load(f)
-        except (json.JSONDecodeError, IOError) as e:
-            logger.error(f"Error loading lock state for {doc_id}: {e}")
-            return {}
-    
-    async def get_locks(self, doc_id: str) -> Dict[str, Any]:
-        """Get lock state for a document.
-        
-        Args:
-            doc_id: Document identifier
-            
-        Returns:
-            Dictionary containing lock state
-        """
-        if not await self.document_exists(doc_id):
-            raise ValueError(f"Document {doc_id} does not exist")
-        
-        return self._locks_cache(doc_id)
-    
-    async def update_locks(self, doc_id: str, locks: Dict[str, Any]) -> None:
-        """Update lock state for a document.
-        
-        Args:
-            doc_id: Document identifier
-            locks: Dictionary containing lock state
-        """
-        if not await self.document_exists(doc_id):
-            raise ValueError(f"Document {doc_id} does not exist")
-        
-        locks_path = self._get_locks_path(doc_id)
-        
-        # Acquire lock
-        async with await self._get_file_lock(str(locks_path)):
-            # Write locks file (using atomic write pattern)
-            temp_path = locks_path.with_suffix(".tmp")
-            with open(temp_path, "w") as f:
-                json.dump(locks, f)
-            os.replace(temp_path, locks_path)
-        
-        # Update metadata
-        metadata_path = self._get_metadata_path(doc_id)
-        async with await self._get_file_lock(str(metadata_path)):
-            metadata = await self.get_document_metadata(doc_id)
-            metadata["updated_at"] = datetime.now().isoformat()
-            
-            # Write metadata file (using atomic write pattern)
-            temp_path = metadata_path.with_suffix(".tmp")
-            with open(temp_path, "w") as f:
-                json.dump(metadata, f)
-            os.replace(temp_path, metadata_path)
-        
-        # Clear cache
-        self._locks_cache.cache_clear()
-    
-    def _load_comments_uncached(self, doc_id: str) -> Dict[str, Any]:
-        """Load comments from file (uncached version).
-        
-        Args:
-            doc_id: Document identifier
-            
-        Returns:
-            Dictionary containing comments
-        """
-        comments_path = self._get_comments_path(doc_id)
-        
-        if not comments_path.exists():
-            return {}
-        
-        try:
-            with open(comments_path, "r") as f:
-                return json.load(f)
-        except (json.JSONDecodeError, IOError) as e:
-            logger.error(f"Error loading comments for {doc_id}: {e}")
-            return {}
-    
-    async def get_comments(self, doc_id: str) -> Dict[str, Any]:
-        """Get comments for a document.
-        
-        Args:
-            doc_id: Document identifier
-            
-        Returns:
-            Dictionary containing comments
-        """
-        if not await self.document_exists(doc_id):
-            raise ValueError(f"Document {doc_id} does not exist")
-        
-        return self._comments_cache(doc_id)
-    
-    async def update_comments(self, doc_id: str, comments: Dict[str, Any]) -> None:
-        """Update comments for a document.
-        
-        Args:
-            doc_id: Document identifier
-            comments: Dictionary containing comments
-        """
-        if not await self.document_exists(doc_id):
-            raise ValueError(f"Document {doc_id} does not exist")
-        
-        comments_path = self._get_comments_path(doc_id)
-        
-        # Acquire lock
-        async with await self._get_file_lock(str(comments_path)):
-            # Write comments file (using atomic write pattern)
-            temp_path = comments_path.with_suffix(".tmp")
-            with open(temp_path, "w") as f:
-                json.dump(comments, f)
-            os.replace(temp_path, comments_path)
-        
-        # Update metadata
-        metadata_path = self._get_metadata_path(doc_id)
-        async with await self._get_file_lock(str(metadata_path)):
-            metadata = await self.get_document_metadata(doc_id)
-            metadata["updated_at"] = datetime.now().isoformat()
-            
-            # Write metadata file (using atomic write pattern)
-            temp_path = metadata_path.with_suffix(".tmp")
-            with open(temp_path, "w") as f:
-                json.dump(metadata, f)
-            os.replace(temp_path, metadata_path)
-        
-        # Clear cache
-        self._comments_cache.cache_clear()
-    
-    def _load_permissions_uncached(self, doc_id: str) -> Dict[str, Any]:
-        """Load permissions from file (uncached version).
-        
-        Args:
-            doc_id: Document identifier
-            
-        Returns:
-            Dictionary containing permissions
-        """
-        permissions_path = self._get_permissions_path(doc_id)
-        
-        if not permissions_path.exists():
-            return {}
-        
-        try:
-            with open(permissions_path, "r") as f:
-                return json.load(f)
-        except (json.JSONDecodeError, IOError) as e:
-            logger.error(f"Error loading permissions for {doc_id}: {e}")
-            return {}
-    
-    async def get_permissions(self, doc_id: str) -> Dict[str, Any]:
-        """Get permissions for a document.
-        
-        Args:
-            doc_id: Document identifier
-            
-        Returns:
-            Dictionary containing permissions
-        """
-        if not await self.document_exists(doc_id):
-            raise ValueError(f"Document {doc_id} does not exist")
-        
-        return self._permissions_cache(doc_id)
-    
-    async def update_permissions(self, doc_id: str, permissions: Dict[str, Any]) -> None:
-        """Update permissions for a document.
-        
-        Args:
-            doc_id: Document identifier
-            permissions: Dictionary containing permissions
-        """
-        if not await self.document_exists(doc_id):
-            raise ValueError(f"Document {doc_id} does not exist")
-        
-        permissions_path = self._get_permissions_path(doc_id)
-        
-        # Acquire lock
-        async with await self._get_file_lock(str(permissions_path)):
-            # Write permissions file (using atomic write pattern)
-            temp_path = permissions_path.with_suffix(".tmp")
-            with open(temp_path, "w") as f:
-                json.dump(permissions, f)
-            os.replace(temp_path, permissions_path)
-        
-        # Update metadata
-        metadata_path = self._get_metadata_path(doc_id)
-        async with await self._get_file_lock(str(metadata_path)):
-            metadata = await self.get_document_metadata(doc_id)
-            metadata["updated_at"] = datetime.now().isoformat()
-            
-            # Write metadata file (using atomic write pattern)
-            temp_path = metadata_path.with_suffix(".tmp")
-            with open(temp_path, "w") as f:
-                json.dump(metadata, f)
-            os.replace(temp_path, metadata_path)
-        
-        # Clear cache
-        self._permissions_cache.cache_clear()
-    
-    async def create_snapshot(self, doc_id: str, state: bytes) -> None:
-        """Create a snapshot of the document state.
-        
-        Args:
-            doc_id: Document identifier
-            state: Binary Yjs document state
-        """
-        if not await self.document_exists(doc_id):
-            raise ValueError(f"Document {doc_id} does not exist")
-        
-        # Get metadata to determine version
-        metadata_path = self._get_metadata_path(doc_id)
-        async with await self._get_file_lock(str(metadata_path)):
-            metadata = await self.get_document_metadata(doc_id)
-            version = metadata["version"]
-            
-            # Create history directory if it doesn't exist
-            history_dir = self._get_history_dir(doc_id)
-            os.makedirs(history_dir, exist_ok=True)
-            
-            # Write snapshot file
-            snapshot_path = self._get_snapshot_path(doc_id, version)
-            with open(snapshot_path, "wb") as f:
-                # Compress the state if it's large
-                if len(state) > 1024:  # Only compress if larger than 1KB
-                    compressed = zlib.compress(state, level=self.compression_level)
-                    # Write a flag indicating compression (1 byte) followed by the compressed data
-                    f.write(b"\x01")
-                    f.write(compressed)
-                else:
-                    # Write a flag indicating no compression (1 byte) followed by the raw data
-                    f.write(b"\x00")
-                    f.write(state)
-            
-            # Update metadata
-            metadata["snapshot_count"] += 1
-            metadata["last_snapshot_version"] = version
-            metadata["last_snapshot_time"] = datetime.now().isoformat()
-            
-            # Write metadata file (using atomic write pattern)
-            temp_path = metadata_path.with_suffix(".tmp")
-            with open(temp_path, "w") as f:
-                json.dump(metadata, f)
-            os.replace(temp_path, metadata_path)
-    
-    async def get_snapshot(self, doc_id: str, version: Optional[int] = None) -> Optional[bytes]:
-        """Get a snapshot of the document state.
-        
-        Args:
-            doc_id: Document identifier
-            version: Optional version to retrieve (None for latest)
-            
-        Returns:
-            Binary Yjs document state or None if not found
-        """
-        if not await self.document_exists(doc_id):
-            raise ValueError(f"Document {doc_id} does not exist")
-        
-        # Get metadata
-        metadata = await self.get_document_metadata(doc_id)
-        
-        if "last_snapshot_version" not in metadata or metadata["snapshot_count"] == 0:
-            return None
-        
-        # Determine which snapshot to retrieve
-        if version is None:
-            version = metadata["last_snapshot_version"]
-        
-        # Find the closest snapshot that is less than or equal to the requested version
-        history_dir = self._get_history_dir(doc_id)
-        if not history_dir.exists():
-            return None
-        
-        # List all snapshot files
-        snapshot_files = []
-        for item in os.listdir(history_dir):
-            if item.startswith("snapshot_") and item.endswith(".bin"):
+            # Rename to the target file (atomic operation)
+            os.replace(temp_file, file_path)
+        except Exception as e:
+            logger.error(f"Error writing JSON file {file_path}: {e}")
+            # Clean up the temporary file
+            if os.path.exists(temp_file):
                 try:
-                    snapshot_version = int(item[9:-4])  # Extract version from filename
-                    if snapshot_version <= version:
-                        snapshot_files.append((snapshot_version, item))
-                except ValueError:
-                    continue
-        
-        if not snapshot_files:
-            return None
-        
-        # Get the latest snapshot that is less than or equal to the requested version
-        snapshot_files.sort(reverse=True)
-        snapshot_path = history_dir / snapshot_files[0][1]
-        
-        # Read snapshot file
-        with open(snapshot_path, "rb") as f:
-            # Read compression flag
-            compression_flag = f.read(1)
-            if not compression_flag:
-                return None
-            
-            # Read data
-            data = f.read()
-            if not data:
-                return None
-            
-            # Decompress if necessary
-            if compression_flag == b"\x01":
-                return zlib.decompress(data)
-            else:
-                return data
+                    os.remove(temp_file)
+                except Exception:
+                    pass
     
-    async def get_document_metadata(self, doc_id: str) -> Dict[str, Any]:
-        """Get metadata for a document.
+    def _read_json_file(self, file_path: str) -> Optional[Any]:
+        """Read data from a JSON file.
         
         Args:
-            doc_id: Document identifier
+            file_path: The file path
             
         Returns:
-            Dictionary containing document metadata
+            Optional[Any]: The data, or None if the file doesn't exist or is invalid
         """
-        if not await self.document_exists(doc_id):
-            raise ValueError(f"Document {doc_id} does not exist")
+        if not os.path.exists(file_path):
+            return None
         
-        metadata_path = self._get_metadata_path(doc_id)
-        
-        # Acquire lock
-        async with await self._get_file_lock(str(metadata_path)):
-            try:
-                with open(metadata_path, "r") as f:
-                    return json.load(f)
-            except (json.JSONDecodeError, IOError) as e:
-                logger.error(f"Error loading metadata for {doc_id}: {e}")
-                return {
-                    "created_at": datetime.now().isoformat(),
-                    "updated_at": datetime.now().isoformat(),
-                    "version": 0,
-                    "snapshot_count": 0,
-                }
-
-
-class CollaborationStoreFactory:
-    """Factory for creating collaboration stores.
+        try:
+            with open(file_path, 'r') as f:
+                return json.load(f)
+        except Exception as e:
+            logger.error(f"Error reading JSON file {file_path}: {e}")
+            return None
     
-    This class provides methods for creating and configuring collaboration stores
-    based on the specified backend type and configuration options.
+    def _write_binary_file(self, file_path: str, data: bytes) -> None:
+        """Write binary data to a file.
+        
+        Args:
+            file_path: The file path
+            data: The data to write
+        """
+        # Create the directory if it doesn't exist
+        os.makedirs(os.path.dirname(file_path), exist_ok=True)
+        
+        # Write to a temporary file first
+        temp_file = f"{file_path}.tmp"
+        try:
+            with open(temp_file, 'wb') as f:
+                f.write(data)
+            
+            # Rename to the target file (atomic operation)
+            os.replace(temp_file, file_path)
+        except Exception as e:
+            logger.error(f"Error writing binary file {file_path}: {e}")
+            # Clean up the temporary file
+            if os.path.exists(temp_file):
+                try:
+                    os.remove(temp_file)
+                except Exception:
+                    pass
+    
+    def _read_binary_file(self, file_path: str) -> Optional[bytes]:
+        """Read binary data from a file.
+        
+        Args:
+            file_path: The file path
+            
+        Returns:
+            Optional[bytes]: The data, or None if the file doesn't exist
+        """
+        if not os.path.exists(file_path):
+            return None
+        
+        try:
+            with open(file_path, 'rb') as f:
+                return f.read()
+        except Exception as e:
+            logger.error(f"Error reading binary file {file_path}: {e}")
+            return None
+    
+    def _delete_file_if_exists(self, file_path: str) -> None:
+        """Delete a file if it exists.
+        
+        Args:
+            file_path: The file path
+        """
+        if os.path.exists(file_path):
+            try:
+                os.remove(file_path)
+            except Exception as e:
+                logger.error(f"Error deleting file {file_path}: {e}")
+
+
+class CollaborationStoreMaintenance:
+    """Maintenance tasks for collaboration stores.
+    
+    This class provides methods for performing maintenance tasks on
+    collaboration stores, such as cleaning up old data and checking
+    for consistency.
     """
     
     @staticmethod
-    async def create_store(backend: StorageBackend = StorageBackend.FILE, config: Dict[str, Any] = None) -> CollaborationStore:
-        """Create a new collaboration store.
+    async def cleanup_old_data(store: CollaborationStore, days: int = 90) -> Dict[str, int]:
+        """Clean up old collaboration data.
+        
+        This method removes data that is older than the specified number of days.
         
         Args:
-            backend: Storage backend type
-            config: Configuration options for the store
+            store: The collaboration store
+            days: The number of days to retain data
             
         Returns:
-            Configured collaboration store instance
+            Dict[str, int]: Statistics about the cleanup operation
         """
-        if backend == StorageBackend.MEMORY:
-            store = MemoryCollaborationStore(config)
-        elif backend == StorageBackend.FILE:
-            store = FileCollaborationStore(config)
-        else:
-            raise ValueError(f"Unsupported backend: {backend}")
+        if not isinstance(store, FileCollaborationStore):
+            # Only file-based stores need cleanup
+            return {'notebooks': 0, 'snapshots': 0}
         
-        # Initialize the store
-        await store.initialize()
+        # Calculate the cutoff timestamp
+        cutoff_time = time.time() - (days * 86400)  # 86400 seconds per day
         
-        return store
-
-
-class CollaborationContentManager:
-    """Content manager for collaborative documents.
-    
-    This class extends the standard Jupyter content manager with collaboration-specific
-    functionality, providing an interface for the WebSocket handlers to persist
-    collaboration state and retrieve it when clients reconnect.
-    """
-    
-    def __init__(self, contents_manager, config: Dict[str, Any] = None):
-        """Initialize the collaboration content manager.
+        # Get all notebooks
+        notebooks = await store.list_notebooks()
         
-        Args:
-            contents_manager: Jupyter contents manager
-            config: Configuration options
-        """
-        self.contents_manager = contents_manager
-        self.config = config or {}
-        
-        # Default to file-based storage in production, memory in development
-        self.storage_backend = StorageBackend(self.config.get("storage_backend", StorageBackend.FILE.value))
-        
-        # Store instance will be initialized in initialize()
-        self.store = None
-        
-        # Map of notebook paths to document IDs
-        self._path_to_doc_id: Dict[str, str] = {}
-        self._doc_id_to_path: Dict[str, str] = {}
-    
-    async def initialize(self) -> None:
-        """Initialize the collaboration content manager."""
-        # Create store
-        self.store = await CollaborationStoreFactory.create_store(
-            backend=self.storage_backend,
-            config=self.config
-        )
-    
-    async def shutdown(self) -> None:
-        """Perform cleanup operations before shutdown."""
-        if self.store:
-            await self.store.shutdown()
-    
-    def _get_doc_id_from_path(self, path: str) -> str:
-        """Get document ID from notebook path.
-        
-        Args:
-            path: Notebook path
-            
-        Returns:
-            Document ID
-        """
-        # Use a deterministic mapping from path to document ID
-        # This ensures that the same notebook always gets the same document ID
-        import hashlib
-        return hashlib.sha256(path.encode()).hexdigest()
-    
-    async def get_collab_document(self, path: str) -> Dict[str, Any]:
-        """Get collaboration document for a notebook.
-        
-        Args:
-            path: Notebook path
-            
-        Returns:
-            Dictionary containing collaboration document data
-        """
-        doc_id = self._get_doc_id_from_path(path)
-        
-        # Check if document exists
-        if not await self.store.document_exists(doc_id):
-            # Create document if it doesn't exist
-            await self.create_collab_document(path)
-        
-        # Update mapping
-        self._path_to_doc_id[path] = doc_id
-        self._doc_id_to_path[doc_id] = path
-        
-        # Get document data
-        metadata = await self.store.get_document_metadata(doc_id)
-        awareness = await self.store.get_awareness(doc_id)
-        locks = await self.store.get_locks(doc_id)
-        comments = await self.store.get_comments(doc_id)
-        permissions = await self.store.get_permissions(doc_id)
-        
-        # Return document data
-        return {
-            "doc_id": doc_id,
-            "path": path,
-            "metadata": metadata,
-            "awareness": awareness,
-            "locks": locks,
-            "comments": comments,
-            "permissions": permissions,
+        # Statistics
+        stats = {
+            'notebooks': 0,
+            'snapshots': 0
         }
+        
+        # Process each notebook
+        for notebook_id in notebooks:
+            # Get snapshots for this notebook
+            snapshots = await store.list_document_snapshots(notebook_id)
+            
+            # Find old snapshots
+            old_snapshots = [
+                snapshot for snapshot in snapshots
+                if snapshot.get('timestamp', 0) < cutoff_time
+            ]
+            
+            # Delete old snapshots, keeping at least one
+            if len(old_snapshots) < len(snapshots):
+                for snapshot in old_snapshots:
+                    await store.delete_document_snapshot(notebook_id, snapshot['id'])
+                    stats['snapshots'] += 1
+        
+        return stats
     
-    async def create_collab_document(self, path: str, initial_data: Optional[Dict[str, Any]] = None) -> str:
-        """Create a new collaboration document for a notebook.
+    @staticmethod
+    async def check_consistency(store: CollaborationStore) -> Dict[str, Any]:
+        """Check the consistency of collaboration data.
+        
+        This method checks for inconsistencies in the collaboration data,
+        such as missing files or corrupted data.
         
         Args:
-            path: Notebook path
-            initial_data: Initial document data (optional)
+            store: The collaboration store
             
         Returns:
-            Document ID
+            Dict[str, Any]: Consistency check results
         """
-        doc_id = self._get_doc_id_from_path(path)
+        if not isinstance(store, FileCollaborationStore):
+            # Only file-based stores need consistency checks
+            return {'status': 'ok', 'issues': []}
         
-        # Create document
-        await self.store.create_document(doc_id, initial_data)
+        # Get all notebooks
+        notebooks = await store.list_notebooks()
         
-        # Update mapping
-        self._path_to_doc_id[path] = doc_id
-        self._doc_id_to_path[doc_id] = path
+        # Results
+        results = {
+            'status': 'ok',
+            'issues': []
+        }
         
-        return doc_id
-    
-    async def delete_collab_document(self, path: str) -> None:
-        """Delete a collaboration document for a notebook.
-        
-        Args:
-            path: Notebook path
-        """
-        doc_id = self._get_doc_id_from_path(path)
-        
-        # Delete document
-        await self.store.delete_document(doc_id)
-        
-        # Update mapping
-        if path in self._path_to_doc_id:
-            del self._path_to_doc_id[path]
-        if doc_id in self._doc_id_to_path:
-            del self._doc_id_to_path[doc_id]
-    
-    async def list_collab_documents(self) -> List[Dict[str, Any]]:
-        """List all collaboration documents.
-        
-        Returns:
-            List of dictionaries containing document information
-        """
-        doc_ids = await self.store.list_documents()
-        
-        # Get document information
-        documents = []
-        for doc_id in doc_ids:
+        # Process each notebook
+        for notebook_id in notebooks:
+            # Check if the document state can be loaded
             try:
-                metadata = await self.store.get_document_metadata(doc_id)
-                path = self._doc_id_to_path.get(doc_id, "Unknown")
-                
-                documents.append({
-                    "doc_id": doc_id,
-                    "path": path,
-                    "metadata": metadata,
-                })
+                state = await store.load_document(notebook_id)
+                if state is None:
+                    results['issues'].append({
+                        'notebook_id': notebook_id,
+                        'issue': 'missing_document_state'
+                    })
+                    results['status'] = 'issues_found'
             except Exception as e:
-                logger.error(f"Error getting document information for {doc_id}: {e}")
-        
-        return documents
-    
-    async def append_crdt_updates(self, path: str, updates: bytes) -> None:
-        """Append CRDT updates to a document.
-        
-        Args:
-            path: Notebook path
-            updates: Binary Yjs update data
-        """
-        doc_id = self._get_doc_id_from_path(path)
-        
-        # Check if document exists
-        if not await self.store.document_exists(doc_id):
-            # Create document if it doesn't exist
-            await self.create_collab_document(path)
-        
-        # Append updates
-        await self.store.append_updates(doc_id, updates)
-    
-    async def get_crdt_updates(self, path: str, from_version: Optional[int] = None) -> List[bytes]:
-        """Get CRDT updates for a document.
-        
-        Args:
-            path: Notebook path
-            from_version: Optional version to start from (None for all updates)
+                results['issues'].append({
+                    'notebook_id': notebook_id,
+                    'issue': 'document_state_error',
+                    'error': str(e)
+                })
+                results['status'] = 'issues_found'
             
-        Returns:
-            List of binary Yjs update data
-        """
-        doc_id = self._get_doc_id_from_path(path)
+            # Check if snapshots can be loaded
+            try:
+                snapshots = await store.list_document_snapshots(notebook_id)
+                for snapshot in snapshots:
+                    try:
+                        snapshot_data, metadata = await store.load_document_snapshot(
+                            notebook_id, snapshot['id']
+                        )
+                        if snapshot_data is None or metadata is None:
+                            results['issues'].append({
+                                'notebook_id': notebook_id,
+                                'snapshot_id': snapshot['id'],
+                                'issue': 'missing_snapshot_data'
+                            })
+                            results['status'] = 'issues_found'
+                    except Exception as e:
+                        results['issues'].append({
+                            'notebook_id': notebook_id,
+                            'snapshot_id': snapshot['id'],
+                            'issue': 'snapshot_error',
+                            'error': str(e)
+                        })
+                        results['status'] = 'issues_found'
+            except Exception as e:
+                results['issues'].append({
+                    'notebook_id': notebook_id,
+                    'issue': 'snapshot_list_error',
+                    'error': str(e)
+                })
+                results['status'] = 'issues_found'
         
-        # Check if document exists
-        if not await self.store.document_exists(doc_id):
-            return []
-        
-        # Get updates
-        return await self.store.get_updates(doc_id, from_version)
+        return results
+
+
+def create_collaboration_store(store_type: str = 'file', **kwargs) -> CollaborationStore:
+    """Create a collaboration store of the specified type.
     
-    async def create_snapshot(self, path: str, state: bytes) -> None:
-        """Create a snapshot of the document state.
+    Args:
+        store_type: The type of store to create ('memory' or 'file')
+        **kwargs: Additional arguments to pass to the store constructor
         
-        Args:
-            path: Notebook path
-            state: Binary Yjs document state
-        """
-        doc_id = self._get_doc_id_from_path(path)
+    Returns:
+        CollaborationStore: The created store
         
-        # Check if document exists
-        if not await self.store.document_exists(doc_id):
-            # Create document if it doesn't exist
-            await self.create_collab_document(path)
-        
-        # Create snapshot
-        await self.store.create_snapshot(doc_id, state)
+    Raises:
+        ValueError: If the store type is invalid
+    """
+    if store_type.lower() == 'memory':
+        return MemoryCollaborationStore(**kwargs)
+    elif store_type.lower() == 'file':
+        return FileCollaborationStore(**kwargs)
+    else:
+        raise ValueError(f"Invalid collaboration store type: {store_type}")
+
+
+# Usage example:
+"""
+# Create a file-based collaboration store
+store = create_collaboration_store('file')
+
+# Initialize the store
+await store.initialize()
+
+try:
+    # Save a document update
+    await store.save_document('notebook-123', update_bytes)
     
-    async def get_snapshot(self, path: str, version: Optional[int] = None) -> Optional[bytes]:
-        """Get a snapshot of the document state.
-        
-        Args:
-            path: Notebook path
-            version: Optional version to retrieve (None for latest)
-            
-        Returns:
-            Binary Yjs document state or None if not found
-        """
-        doc_id = self._get_doc_id_from_path(path)
-        
-        # Check if document exists
-        if not await self.store.document_exists(doc_id):
-            return None
-        
-        # Get snapshot
-        return await self.store.get_snapshot(doc_id, version)
+    # Load the document state
+    state = await store.load_document('notebook-123')
     
-    async def get_awareness(self, path: str) -> Dict[str, Any]:
-        """Get awareness state for a document.
-        
-        Args:
-            path: Notebook path
-            
-        Returns:
-            Dictionary containing awareness state
-        """
-        doc_id = self._get_doc_id_from_path(path)
-        
-        # Check if document exists
-        if not await self.store.document_exists(doc_id):
-            return {}
-        
-        # Get awareness
-        return await self.store.get_awareness(doc_id)
+    # Save user awareness information
+    await store.save_awareness('notebook-123', {
+        'user1': {'cursor': {'line': 5, 'ch': 10}, 'selection': {...}},
+        'user2': {'cursor': {'line': 10, 'ch': 0}, 'selection': {...}}
+    })
     
-    async def update_awareness(self, path: str, awareness: Dict[str, Any]) -> None:
-        """Update awareness state for a document.
-        
-        Args:
-            path: Notebook path
-            awareness: Dictionary containing awareness state
-        """
-        doc_id = self._get_doc_id_from_path(path)
-        
-        # Check if document exists
-        if not await self.store.document_exists(doc_id):
-            # Create document if it doesn't exist
-            await self.create_collab_document(path)
-        
-        # Update awareness
-        await self.store.update_awareness(doc_id, awareness)
+    # Save cell locks
+    await store.save_cell_locks('notebook-123', {
+        'cell-1': 'user1',
+        'cell-2': 'user2'
+    })
     
-    async def get_locks(self, path: str) -> Dict[str, Any]:
-        """Get lock state for a document.
-        
-        Args:
-            path: Notebook path
-            
-        Returns:
-            Dictionary containing lock state
-        """
-        doc_id = self._get_doc_id_from_path(path)
-        
-        # Check if document exists
-        if not await self.store.document_exists(doc_id):
-            return {}
-        
-        # Get locks
-        return await self.store.get_locks(doc_id)
+    # Save a comment
+    await store.save_comment('notebook-123', {
+        'cellId': 'cell-1',
+        'userId': 'user1',
+        'content': 'This code needs optimization',
+        'timestamp': time.time()
+    })
     
-    async def update_locks(self, path: str, locks: Dict[str, Any]) -> None:
-        """Update lock state for a document.
-        
-        Args:
-            path: Notebook path
-            locks: Dictionary containing lock state
-        """
-        doc_id = self._get_doc_id_from_path(path)
-        
-        # Check if document exists
-        if not await self.store.document_exists(doc_id):
-            # Create document if it doesn't exist
-            await self.create_collab_document(path)
-        
-        # Update locks
-        await self.store.update_locks(doc_id, locks)
+    # Create a document snapshot
+    snapshot_id = await store.save_document_snapshot('notebook-123', snapshot_bytes, {
+        'author': 'user1',
+        'message': 'Checkpoint before refactoring',
+        'timestamp': time.time()
+    })
     
-    async def get_comments(self, path: str) -> Dict[str, Any]:
-        """Get comments for a document.
-        
-        Args:
-            path: Notebook path
-            
-        Returns:
-            Dictionary containing comments
-        """
-        doc_id = self._get_doc_id_from_path(path)
-        
-        # Check if document exists
-        if not await self.store.document_exists(doc_id):
-            return {}
-        
-        # Get comments
-        return await self.store.get_comments(doc_id)
+    # Clean up old data
+    stats = await CollaborationStoreMaintenance.cleanup_old_data(store, days=30)
     
-    async def update_comments(self, path: str, comments: Dict[str, Any]) -> None:
-        """Update comments for a document.
-        
-        Args:
-            path: Notebook path
-            comments: Dictionary containing comments
-        """
-        doc_id = self._get_doc_id_from_path(path)
-        
-        # Check if document exists
-        if not await self.store.document_exists(doc_id):
-            # Create document if it doesn't exist
-            await self.create_collab_document(path)
-        
-        # Update comments
-        await self.store.update_comments(doc_id, comments)
-    
-    async def get_permissions(self, path: str) -> Dict[str, Any]:
-        """Get permissions for a document.
-        
-        Args:
-            path: Notebook path
-            
-        Returns:
-            Dictionary containing permissions
-        """
-        doc_id = self._get_doc_id_from_path(path)
-        
-        # Check if document exists
-        if not await self.store.document_exists(doc_id):
-            return {}
-        
-        # Get permissions
-        return await self.store.get_permissions(doc_id)
-    
-    async def update_permissions(self, path: str, permissions: Dict[str, Any]) -> None:
-        """Update permissions for a document.
-        
-        Args:
-            path: Notebook path
-            permissions: Dictionary containing permissions
-        """
-        doc_id = self._get_doc_id_from_path(path)
-        
-        # Check if document exists
-        if not await self.store.document_exists(doc_id):
-            # Create document if it doesn't exist
-            await self.create_collab_document(path)
-        
-        # Update permissions
-        await self.store.update_permissions(doc_id, permissions)
+    # Check consistency
+    consistency = await CollaborationStoreMaintenance.check_consistency(store)
+    if consistency['status'] != 'ok':
+        print(f"Consistency issues found: {consistency['issues']}")
+
+finally:
+    # Always shut down the store properly when done
+    await store.shutdown()
+"""
