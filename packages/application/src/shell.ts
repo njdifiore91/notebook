@@ -39,7 +39,7 @@ export namespace INotebookShell {
   /**
    * The areas of the application shell where widgets can reside.
    */
-  export type Area = 'main' | 'top' | 'menu' | 'left' | 'right' | 'down';
+  export type Area = 'main' | 'top' | 'menu' | 'left' | 'right' | 'down' | 'collaborationStatus' | 'presenceBar';
 
   /**
    * Widget position
@@ -88,12 +88,26 @@ export class NotebookShell extends Widget implements JupyterFrontEnd.IShell {
     const topWrapper = (this._topWrapper = new Panel());
     const menuWrapper = (this._menuWrapper = new Panel());
 
+    // Create collaboration UI wrappers and handlers
+    const collaborationStatusWrapper = (this._collaborationStatusWrapper = new Panel());
+    const presenceBarWrapper = (this._presenceBarWrapper = new Panel());
+    this._collaborationStatusHandler = new PanelHandler();
+    this._presenceBarHandler = new PanelHandler();
+
     this._topHandler.panel.id = 'top-panel';
     this._topHandler.panel.node.setAttribute('role', 'banner');
     this._menuHandler.panel.id = 'menu-panel';
     this._menuHandler.panel.node.setAttribute('role', 'navigation');
     this._main.id = 'main-panel';
     this._main.node.setAttribute('role', 'main');
+
+    // Set IDs and attributes for collaboration UI elements
+    this._collaborationStatusHandler.panel.id = 'collaboration-status-panel';
+    this._collaborationStatusHandler.panel.node.setAttribute('role', 'status');
+    this._collaborationStatusHandler.panel.node.setAttribute('aria-label', 'Collaboration Status');
+    this._presenceBarHandler.panel.id = 'presence-bar-panel';
+    this._presenceBarHandler.panel.node.setAttribute('role', 'complementary');
+    this._presenceBarHandler.panel.node.setAttribute('aria-label', 'User Presence');
 
     this._spacer_top = new Widget();
     this._spacer_top.id = 'spacer-widget-top';
@@ -106,6 +120,15 @@ export class NotebookShell extends Widget implements JupyterFrontEnd.IShell {
 
     menuWrapper.id = 'menu-panel-wrapper';
     menuWrapper.addWidget(this._menuHandler.panel);
+
+    // create wrappers around the collaboration UI elements
+    collaborationStatusWrapper.id = 'collaboration-status-wrapper';
+    collaborationStatusWrapper.addWidget(this._collaborationStatusHandler.panel);
+    collaborationStatusWrapper.addClass('jp-CollaborationStatusBar');
+
+    presenceBarWrapper.id = 'presence-bar-wrapper';
+    presenceBarWrapper.addWidget(this._presenceBarHandler.panel);
+    presenceBarWrapper.addClass('jp-PresenceBar');
 
     const rootLayout = new BoxLayout();
     const leftHandler = this._leftHandler;
@@ -120,20 +143,28 @@ export class NotebookShell extends Widget implements JupyterFrontEnd.IShell {
     leftHandler.hide();
     rightHandler.hide();
 
+    // Hide collaboration UI elements by default
+    this._collaborationStatusWrapper.hide();
+    this._presenceBarWrapper.hide();
+
     const middleLayout = new BoxLayout({
       spacing: 0,
       direction: 'top-to-bottom',
     });
     BoxLayout.setStretch(this._topWrapper, 0);
     BoxLayout.setStretch(this._menuWrapper, 0);
+    BoxLayout.setStretch(this._presenceBarWrapper, 0); // Add presence bar with no stretch
     BoxLayout.setStretch(this._main, 1);
+    BoxLayout.setStretch(this._collaborationStatusWrapper, 0); // Add collaboration status with no stretch
 
     const middlePanel = new Panel({ layout: middleLayout });
     middlePanel.addWidget(this._topWrapper);
     middlePanel.addWidget(this._menuWrapper);
+    middlePanel.addWidget(this._presenceBarWrapper); // Add presence bar below menu
     middlePanel.addWidget(this._spacer_top);
     middlePanel.addWidget(this._main);
     middlePanel.addWidget(this._spacer_bottom);
+    middlePanel.addWidget(this._collaborationStatusWrapper); // Add collaboration status at bottom
     middlePanel.layout = middleLayout;
 
     const vsplitPanel = new SplitPanel();
@@ -225,6 +256,20 @@ export class NotebookShell extends Widget implements JupyterFrontEnd.IShell {
   }
 
   /**
+   * Get the collaboration status area wrapper panel
+   */
+  get collaborationStatus(): Widget {
+    return this._collaborationStatusWrapper;
+  }
+
+  /**
+   * Get the presence bar area wrapper panel
+   */
+  get presenceBar(): Widget {
+    return this._presenceBarWrapper;
+  }
+
+  /**
    * Get the left area handler
    */
   get leftHandler(): SidePanelHandler {
@@ -252,6 +297,20 @@ export class NotebookShell extends Widget implements JupyterFrontEnd.IShell {
     return !(
       this._rightHandler.isVisible && this._rightHandler.panel.isVisible
     );
+  }
+
+  /**
+   * Is the collaboration status bar visible?
+   */
+  get collaborationStatusCollapsed(): boolean {
+    return !this._collaborationStatusWrapper.isVisible;
+  }
+
+  /**
+   * Is the presence bar visible?
+   */
+  get presenceBarCollapsed(): boolean {
+    return !this._presenceBarWrapper.isVisible;
   }
 
   /**
@@ -294,7 +353,7 @@ export class NotebookShell extends Widget implements JupyterFrontEnd.IShell {
    */
   activateById(id: string): void {
     // Search all areas that can have widgets for this widget, starting with main.
-    for (const area of ['main', 'top', 'left', 'right', 'menu', 'down']) {
+    for (const area of ['main', 'top', 'left', 'right', 'menu', 'down', 'collaborationStatus', 'presenceBar']) {
       const widget = find(
         this.widgets(area as INotebookShell.Area),
         (w) => w.id === id
@@ -306,6 +365,12 @@ export class NotebookShell extends Widget implements JupyterFrontEnd.IShell {
           this.expandRight(id);
         } else if (area === 'down') {
           this._downPanel.show();
+          widget.activate();
+        } else if (area === 'collaborationStatus') {
+          this.showCollaborationStatus();
+          widget.activate();
+        } else if (area === 'presenceBar') {
+          this.showPresenceBar();
           widget.activate();
         } else {
           widget.activate();
@@ -352,6 +417,14 @@ export class NotebookShell extends Widget implements JupyterFrontEnd.IShell {
         return this._topHandler.addWidget(widget, rank);
       case 'menu':
         return this._menuHandler.addWidget(widget, rank);
+      case 'collaborationStatus':
+        this._collaborationStatusHandler.addWidget(widget, rank);
+        this.showCollaborationStatus();
+        return;
+      case 'presenceBar':
+        this._presenceBarHandler.addWidget(widget, rank);
+        this.showPresenceBar();
+        return;
       case 'main':
       case undefined: {
         if (this._main.widgets.length > 0) {
@@ -396,6 +469,34 @@ export class NotebookShell extends Widget implements JupyterFrontEnd.IShell {
   }
 
   /**
+   * Show the collaboration status bar.
+   */
+  showCollaborationStatus(): void {
+    this._collaborationStatusWrapper.show();
+  }
+
+  /**
+   * Hide the collaboration status bar.
+   */
+  hideCollaborationStatus(): void {
+    this._collaborationStatusWrapper.hide();
+  }
+
+  /**
+   * Show the presence bar.
+   */
+  showPresenceBar(): void {
+    this._presenceBarWrapper.show();
+  }
+
+  /**
+   * Hide the presence bar.
+   */
+  hidePresenceBar(): void {
+    this._presenceBarWrapper.hide();
+  }
+
+  /**
    * Return the list of widgets for the given area.
    *
    * @param area The area
@@ -407,6 +508,12 @@ export class NotebookShell extends Widget implements JupyterFrontEnd.IShell {
         return;
       case 'menu':
         yield* this._menuHandler.panel.widgets;
+        return;
+      case 'collaborationStatus':
+        yield* this._collaborationStatusHandler.panel.widgets;
+        return;
+      case 'presenceBar':
+        yield* this._presenceBarHandler.panel.widgets;
         return;
       case 'main':
         yield* this._main.widgets;
@@ -487,6 +594,10 @@ export class NotebookShell extends Widget implements JupyterFrontEnd.IShell {
   private _skipLinkWidgetHandler: Private.SkipLinkWidgetHandler;
   private _main: Panel;
   private _downPanel: TabPanel;
+  private _collaborationStatusWrapper: Panel;
+  private _collaborationStatusHandler: PanelHandler;
+  private _presenceBarWrapper: Panel;
+  private _presenceBarHandler: PanelHandler;
   private _translator: ITranslator = nullTranslator;
   private _currentChanged = new Signal<this, FocusTracker.IChangedArgs<Widget>>(
     this

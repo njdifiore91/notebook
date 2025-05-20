@@ -1,0 +1,48 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema",
+  "title": "Comments",
+  "description": "Comment system settings for collaborative notebooks.",
+  "jupyter.lab.setting-icon": "notebook-ui-components:jupyter",
+  "jupyter.lab.setting-icon-label": "Comments",
+  "properties": {
+    "enabled": {
+      "type": "boolean",
+      "title": "Enable Comments",
+      "description": "Enable or disable the comment system for collaborative notebooks",
+      "default": true
+    },
+    "threading": {
+      "type": "boolean",
+      "title": "Enable Threaded Replies",
+      "description": "Allow threaded replies to comments",
+      "default": true
+    },
+    "notifications": {
+      "type": "string",
+      "title": "Notification Level",
+      "description": "When to show notifications for comments",
+      "enum": ["all", "mentions", "none"],
+      "default": "mentions"
+    },
+    "mentionHighlighting": {
+      "type": "boolean",
+      "title": "Highlight Mentions",
+      "description": "Highlight text when mentioned in a comment",
+      "default": true
+    },
+    "allowAnonymous": {
+      "type": "boolean",
+      "title": "Allow Anonymous Comments",
+      "description": "Allow users to post comments anonymously",
+      "default": false
+    },
+    "richText": {
+      "type": "boolean",
+      "title": "Rich Text Comments",
+      "description": "Enable rich text formatting in comments",
+      "default": true
+    }
+  },
+  "additionalProperties": false,
+  "type": "object"
+}

@@ -6,6 +6,7 @@ import os
 import re
 import typing as t
 from pathlib import Path
+import logging
 
 from jupyter_client.utils import ensure_async  # type:ignore[attr-defined]
 from jupyter_core.application import base_aliases
@@ -32,8 +33,21 @@ from jupyterlab_server.config import (  # type:ignore[attr-defined]
 from jupyterlab_server.handlers import _camelCase, is_url
 from notebook_shim.shim import NotebookConfigShimMixin  # type:ignore[import-untyped]
 from tornado import web
-from traitlets import Bool, Unicode, default
+from traitlets import Bool, Unicode, Int, Enum, Dict, default
 from traitlets.config.loader import Config
+
+# Import collaboration components
+try:
+    from notebook.collab.handlers import setup_handlers as setup_collab_handlers
+    from notebook.collab.store import (
+        CollaborationStore,
+        MemoryCollaborationStore,
+        FileCollaborationStore,
+    )
+    from notebook.collab.auth import CollaborationAuthorizer
+    HAS_COLLABORATION = True
+except ImportError:
+    HAS_COLLABORATION = False
 
 from ._version import __version__
 
@@ -43,6 +57,9 @@ Flags = dict[t.Union[str, tuple[str, ...]], tuple[t.Union[dict[str, t.Any], Conf
 
 app_dir = Path(get_app_dir())
 version = __version__
+
+# Set up logging
+logger = logging.getLogger('notebook.app')
 
 # mypy: disable-error-code="no-untyped-call"
 
@@ -121,6 +138,12 @@ class NotebookBaseHandler(ExtensionHandlerJinjaMixin, ExtensionHandlerMixin, Jup
                 logger=self.log,
             ),
         )
+
+        # Add collaboration configuration if enabled
+        if getattr(app, 'collaboration_enabled', False) and HAS_COLLABORATION:
+            page_config['collaborationEnabled'] = True
+            page_config['collaborationMode'] = app.collaboration_mode
+            page_config['collaborationApiUrl'] = ujoin(base_url, 'api/collaboration')
 
         # modify page config with custom hook
         page_config_hook = self.settings.get("page_config_hook", None)
@@ -241,6 +264,11 @@ class CustomCssHandler(NotebookBaseHandler):
 
 aliases = dict(base_aliases)
 
+# Add collaboration-specific aliases
+aliases.update({
+    'collaboration-store-path': 'JupyterNotebookApp.collaboration_store_path',
+})
+
 
 class JupyterNotebookApp(NotebookConfigShimMixin, LabServerApp):  # type:ignore[misc]
     """The notebook server extension app."""
@@ -270,6 +298,66 @@ class JupyterNotebookApp(NotebookConfigShimMixin, LabServerApp):  # type:ignore[
         Defaults to True and custom CSS is loaded.
         """,
     )
+    
+    # Collaboration-specific configuration options
+    collaboration_enabled = Bool(
+        False,
+        config=True,
+        help="""Enable real-time collaborative editing features.
+        Requires the collaboration dependencies to be installed.
+        """,
+    )
+    
+    collaboration_mode = Enum(
+        ['full', 'presence-only', 'locked-cells'],
+        default_value='full',
+        config=True,
+        help="""Collaboration mode to use:
+        - 'full': Enable all collaboration features
+        - 'presence-only': Only show user presence without document synchronization
+        - 'locked-cells': Enable document synchronization with cell locking
+        """,
+    )
+    
+    collaboration_store_type = Enum(
+        ['memory', 'file'],
+        default_value='memory',
+        config=True,
+        help="""Type of storage to use for collaboration data:
+        - 'memory': In-memory storage (lost on server restart)
+        - 'file': File-based storage
+        """,
+    )
+    
+    collaboration_store_path = Unicode(
+        '',
+        config=True,
+        help="""Path to store collaboration data when using file-based storage.
+        If empty, a default path will be used in the server's data directory.
+        """,
+    )
+    
+    collaboration_max_clients = Int(
+        20,
+        config=True,
+        help="Maximum number of clients allowed in a single collaborative session.",
+    )
+    
+    collaboration_auth_check = Bool(
+        True,
+        config=True,
+        help="""Whether to enforce authentication for collaborative sessions.
+        If True, only authenticated users can join collaborative sessions.
+        """,
+    )
+    
+    collaboration_default_permissions = Dict(
+        {},
+        config=True,
+        help="""Default permissions for collaborative notebooks.
+        Example: {'user1': 'admin', 'user2': 'edit', '*': 'view'}
+        """,
+    )
 
     flags: Flags = flags  # type:ignore[assignment]
     flags["expose-app-in-browser"] = (
@@ -280,6 +368,27 @@ class JupyterNotebookApp(NotebookConfigShimMixin, LabServerApp):  # type:ignore[
     flags["custom-css"] = (
         {"JupyterNotebookApp": {"custom_css": True}},
         "Load custom CSS in template html files. Default is True",
+    )
+    
+    # Add collaboration-specific flags
+    flags["enable-collaboration"] = (
+        {"JupyterNotebookApp": {"collaboration_enabled": True}},
+        "Enable real-time collaborative editing features.",
+    )
+    
+    flags["collaboration-memory-store"] = (
+        {"JupyterNotebookApp": {"collaboration_store_type": "memory"}},
+        "Use in-memory storage for collaboration data (default).",
+    )
+    
+    flags["collaboration-file-store"] = (
+        {"JupyterNotebookApp": {"collaboration_store_type": "file"}},
+        "Use file-based storage for collaboration data.",
+    )
+    
+    flags["disable-collaboration-auth"] = (
+        {"JupyterNotebookApp": {"collaboration_auth_check": False}},
+        "Disable authentication checks for collaborative sessions (not recommended).",
     )
 
     @default("static_dir")
@@ -309,6 +418,13 @@ class JupyterNotebookApp(NotebookConfigShimMixin, LabServerApp):  # type:ignore[
     @default("workspaces_dir")
     def _default_workspaces_dir(self) -> str:
         return t.cast(str, get_workspaces_dir())
+    
+    @default("collaboration_store_path")
+    def _default_collaboration_store_path(self) -> str:
+        """Default path for collaboration data storage."""
+        if not self.serverapp:
+            return ""
+        return str(Path(self.serverapp.data_dir) / "collaboration")
 
     def _prepare_templates(self) -> None:
         super(LabServerApp, self)._prepare_templates()
@@ -325,6 +441,50 @@ class JupyterNotebookApp(NotebookConfigShimMixin, LabServerApp):  # type:ignore[
         except (AttributeError, KeyError, TypeError):
             extension_enabled = False
         return extension_enabled
+    
+    def _initialize_collaboration_services(self) -> None:
+        """Initialize collaboration services if enabled."""
+        if not self.collaboration_enabled:
+            return
+        
+        if not HAS_COLLABORATION:
+            self.log.warning(
+                "Collaboration features are disabled because required dependencies "
+                "are not available. Please install the collaboration dependencies."
+            )
+            return
+        
+        self.log.info(f"Initializing collaboration services in {self.collaboration_mode} mode")
+        
+        # Initialize the collaboration store
+        if self.collaboration_store_type == 'memory':
+            store = MemoryCollaborationStore()
+            self.log.info("Using in-memory collaboration store")
+        elif self.collaboration_store_type == 'file':
+            store_path = self.collaboration_store_path
+            if not store_path:
+                store_path = self._default_collaboration_store_path()
+            
+            # Ensure the directory exists
+            Path(store_path).mkdir(parents=True, exist_ok=True)
+            
+            store = FileCollaborationStore(store_path)
+            self.log.info(f"Using file-based collaboration store at {store_path}")
+        else:
+            self.log.error(f"Unknown collaboration store type: {self.collaboration_store_type}")
+            return
+        
+        # Initialize the collaboration authorizer
+        authorizer = CollaborationAuthorizer(
+            auth_check=self.collaboration_auth_check,
+            default_permissions=self.collaboration_default_permissions,
+            max_clients=self.collaboration_max_clients
+        )
+        
+        # Add the store and authorizer to the server settings
+        assert self.serverapp is not None  # noqa: S101
+        self.serverapp.web_app.settings['collaboration_store'] = store
+        self.serverapp.web_app.settings['collaboration_authorizer'] = authorizer
 
     def initialize_handlers(self) -> None:
         """Initialize handlers."""
@@ -349,6 +509,19 @@ class JupyterNotebookApp(NotebookConfigShimMixin, LabServerApp):  # type:ignore[
             # but at least make sure we don't use the token
             # if the serverapp set one
             page_config["token"] = ""
+            
+            # Add collaboration-specific JupyterHub integration
+            if self.collaboration_enabled and HAS_COLLABORATION:
+                page_config["hubCollaborationEnabled"] = True
+                # Add user information for collaboration awareness
+                if "user" in tornado_settings:
+                    user_info = {}
+                    user = tornado_settings["user"]
+                    if hasattr(user, "name"):
+                        user_info["name"] = user.name
+                    if hasattr(user, "admin") and user.admin:
+                        user_info["admin"] = True
+                    page_config["hubUserInfo"] = user_info
 
         self.handlers.append(("/tree(.*)", TreeHandler))
         self.handlers.append(("/notebooks(.*)", NotebookHandler))
@@ -356,6 +529,13 @@ class JupyterNotebookApp(NotebookConfigShimMixin, LabServerApp):  # type:ignore[
         self.handlers.append(("/consoles/(.*)", ConsoleHandler))
         self.handlers.append(("/terminals/(.*)", TerminalHandler))
         self.handlers.append(("/custom/custom.css", CustomCssHandler))
+        
+        # Initialize collaboration services and register handlers if enabled
+        if self.collaboration_enabled and HAS_COLLABORATION:
+            self._initialize_collaboration_services()
+            setup_collab_handlers(self.serverapp.web_app, self.serverapp.base_url)
+            self.log.info("Collaboration WebSocket handlers registered")
+        
         super().initialize_handlers()
 
     def initialize(self, argv: list[str] | None = None) -> None:  # noqa: ARG002

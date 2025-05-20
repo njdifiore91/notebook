@@ -1,0 +1,185 @@
+{
+  "title": "Jupyter Notebook Permissions Dialog",
+  "description": "Configuration for the collaborative notebook permissions and access control system",
+  "jupyter.lab.menus": {
+    "main": [
+      {
+        "id": "jp-mainmenu-collaboration",
+        "items": [
+          {
+            "command": "notebook:manage-permissions",
+            "rank": 10
+          }
+        ]
+      }
+    ]
+  },
+  "jupyter.lab.toolbars": {
+    "Notebook": [
+      {
+        "name": "permissions",
+        "command": "notebook:manage-permissions",
+        "rank": 50
+      }
+    ]
+  },
+  "properties": {
+    "roleDefinitions": {
+      "type": "object",
+      "title": "Role Definitions",
+      "description": "Defines the available roles and their capabilities",
+      "default": {
+        "viewer": {
+          "label": "Viewer",
+          "description": "Can view notebook content but cannot edit or comment",
+          "capabilities": ["view"]
+        },
+        "commenter": {
+          "label": "Commenter",
+          "description": "Can view and comment but cannot edit content",
+          "capabilities": ["view", "comment"]
+        },
+        "editor": {
+          "label": "Editor",
+          "description": "Can view, comment, and edit notebook content",
+          "capabilities": ["view", "comment", "edit"]
+        },
+        "admin": {
+          "label": "Admin",
+          "description": "Can view, comment, edit, and manage permissions",
+          "capabilities": ["view", "comment", "edit", "manage"]
+        },
+        "owner": {
+          "label": "Owner",
+          "description": "Has full control including deletion and ownership transfer",
+          "capabilities": ["view", "comment", "edit", "manage", "delete", "transfer"]
+        }
+      }
+    },
+    "roleHierarchy": {
+      "type": "array",
+      "title": "Role Hierarchy",
+      "description": "Defines the hierarchy of roles from lowest to highest privilege",
+      "default": ["viewer", "commenter", "editor", "admin", "owner"]
+    },
+    "defaultRole": {
+      "type": "string",
+      "title": "Default Role",
+      "description": "The default role assigned to new collaborators",
+      "enum": ["viewer", "commenter", "editor", "admin", "owner"],
+      "default": "viewer"
+    },
+    "jupyterhubIntegration": {
+      "type": "object",
+      "title": "JupyterHub Integration",
+      "description": "Settings for JupyterHub integration with permissions system",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "title": "Enable JupyterHub Integration",
+          "description": "Whether to use JupyterHub for user authentication in collaborative sessions",
+          "default": true
+        },
+        "groupMapping": {
+          "type": "object",
+          "title": "Group to Role Mapping",
+          "description": "Maps JupyterHub groups to default roles",
+          "default": {}
+        },
+        "adminGroups": {
+          "type": "array",
+          "title": "Admin Groups",
+          "description": "JupyterHub groups whose members automatically receive admin privileges",
+          "items": {
+            "type": "string"
+          },
+          "default": ["admins"]
+        }
+      }
+    },
+    "permissionScopes": {
+      "type": "object",
+      "title": "Permission Scopes",
+      "description": "Defines the available permission scopes and their mapping to capabilities",
+      "default": {
+        "notebooks:read": {
+          "label": "View Notebooks",
+          "description": "Permission to view notebook content",
+          "capabilities": ["view"]
+        },
+        "notebooks:comment": {
+          "label": "Comment on Notebooks",
+          "description": "Permission to add comments to notebooks",
+          "capabilities": ["comment"]
+        },
+        "notebooks:write": {
+          "label": "Edit Notebooks",
+          "description": "Permission to edit notebook content",
+          "capabilities": ["edit"]
+        },
+        "notebooks:admin": {
+          "label": "Administer Notebooks",
+          "description": "Permission to manage notebook permissions",
+          "capabilities": ["manage"]
+        },
+        "notebooks:own": {
+          "label": "Own Notebooks",
+          "description": "Permission to delete or transfer ownership",
+          "capabilities": ["delete", "transfer"]
+        }
+      }
+    },
+    "cellLevelPermissions": {
+      "type": "object",
+      "title": "Cell-level Permissions",
+      "description": "Configuration for cell-level permission controls",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "title": "Enable Cell-level Permissions",
+          "description": "Whether to enable granular permissions at the cell level",
+          "default": true
+        },
+        "lockTimeout": {
+          "type": "number",
+          "title": "Lock Timeout",
+          "description": "Time in minutes before cell locks automatically expire",
+          "default": 5
+        },
+        "allowLockOverride": {
+          "type": "boolean",
+          "title": "Allow Lock Override",
+          "description": "Whether admins can override locks held by other users",
+          "default": true
+        }
+      }
+    },
+    "uiComponents": {
+      "type": "object",
+      "title": "UI Components",
+      "description": "Configuration for permissions-related UI components",
+      "properties": {
+        "showRoleLabels": {
+          "type": "boolean",
+          "title": "Show Role Labels",
+          "description": "Whether to show role labels in the user presence bar",
+          "default": true
+        },
+        "showPermissionsButton": {
+          "type": "boolean",
+          "title": "Show Permissions Button",
+          "description": "Whether to show the permissions button in the notebook toolbar",
+          "default": true
+        },
+        "confirmationRequired": {
+          "type": "boolean",
+          "title": "Require Confirmation",
+          "description": "Whether to require confirmation for permission changes",
+          "default": true
+        }
+      }
+    }
+  },
+  "additionalProperties": false,
+  "type": "object"
+}

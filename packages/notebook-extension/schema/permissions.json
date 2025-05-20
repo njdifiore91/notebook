@@ -1,0 +1,91 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema",
+  "title": "Permissions",
+  "description": "User role and access control settings for collaboration.",
+  "jupyter.lab.setting-icon": "notebook-ui-components:jupyter",
+  "jupyter.lab.setting-icon-label": "Collaboration Permissions",
+  "properties": {
+    "enabled": {
+      "type": "boolean",
+      "title": "Enable Permissions System",
+      "description": "Enable or disable the permissions system for collaborative notebooks",
+      "default": true
+    },
+    "roles": {
+      "type": "object",
+      "title": "Role Definitions",
+      "description": "Defines capabilities for each role in the collaboration system",
+      "properties": {
+        "viewer": {
+          "type": "object",
+          "properties": {
+            "canComment": {
+              "type": "boolean",
+              "default": true
+            },
+            "canEdit": {
+              "type": "boolean",
+              "default": false
+            },
+            "canExecute": {
+              "type": "boolean",
+              "default": false
+            }
+          }
+        },
+        "editor": {
+          "type": "object",
+          "properties": {
+            "canComment": {
+              "type": "boolean",
+              "default": true
+            },
+            "canEdit": {
+              "type": "boolean",
+              "default": true
+            },
+            "canExecute": {
+              "type": "boolean",
+              "default": true
+            },
+            "canModifyStructure": {
+              "type": "boolean",
+              "default": true
+            }
+          }
+        },
+        "admin": {
+          "type": "object",
+          "properties": {
+            "canManageUsers": {
+              "type": "boolean",
+              "default": true
+            },
+            "canModifyPermissions": {
+              "type": "boolean",
+              "default": true
+            }
+          }
+        }
+      }
+    },
+    "roleHierarchy": {
+      "type": "array",
+      "title": "Role Hierarchy",
+      "description": "Defines the hierarchy of roles (higher index has more permissions)",
+      "items": {
+        "type": "string"
+      },
+      "default": ["viewer", "editor", "admin"]
+    },
+    "defaultPermissions": {
+      "type": "string",
+      "title": "Default Permissions",
+      "description": "Default role assigned to new users joining a collaborative session",
+      "enum": ["viewer", "editor", "admin"],
+      "default": "viewer"
+    }
+  },
+  "additionalProperties": false,
+  "type": "object"
+}

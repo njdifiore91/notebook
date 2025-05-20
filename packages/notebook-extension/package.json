@@ -33,6 +33,7 @@
   "scripts": {
     "build": "tsc -b",
     "build:prod": "tsc -b",
+    "build:collab": "tsc -b src/collab",
     "clean": "rimraf lib && rimraf tsconfig.tsbuildinfo",
     "docs": "typedoc src",
     "watch": "tsc -b --watch"
@@ -49,7 +50,10 @@
     "@lumino/polling": "^2.1.4",
     "@lumino/widgets": "^2.7.1",
     "react": "^18.2.0",
-    "react-dom": "^18.2.0"
+    "react-dom": "^18.2.0",
+    "yjs": "^13.5.0",
+    "y-websocket": "^1.5.0",
+    "y-protocols": "^1.0.5"
   },
   "devDependencies": {
     "rimraf": "^3.0.2",
@@ -60,7 +64,9 @@
   },
   "jupyterlab": {
     "extension": true,
-    "schemaDir": "schema"
+    "schemaDir": "schema",
+    "outputDir": "lib",
+    "collaboration": true
   },
   "styleModule": "style/index.js"
 }

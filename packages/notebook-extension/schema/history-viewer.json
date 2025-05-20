@@ -1,0 +1,102 @@
+{
+  "title": "Jupyter Notebook History Viewer",
+  "description": "Configuration for the version history and change tracking system in collaborative notebooks",
+  "jupyter.lab.menus": {
+    "main": [
+      {
+        "id": "jp-mainmenu-view",
+        "items": [
+          {
+            "command": "notebook:show-history-viewer",
+            "rank": 5
+          }
+        ]
+      },
+      {
+        "id": "jp-mainmenu-collaboration",
+        "items": [
+          {
+            "command": "notebook:show-history-viewer",
+            "rank": 2
+          }
+        ]
+      }
+    ]
+  },
+  "properties": {
+    "maxVersions": {
+      "type": "integer",
+      "title": "Maximum Versions",
+      "description": "Maximum number of versions to retain in history",
+      "default": 50,
+      "minimum": 1
+    },
+    "retentionDays": {
+      "type": "integer",
+      "title": "Retention Period (Days)",
+      "description": "Number of days to retain version history",
+      "default": 30,
+      "minimum": 1
+    },
+    "diffVisualization": {
+      "type": "string",
+      "title": "Diff Visualization Mode",
+      "description": "How to visualize differences between versions",
+      "enum": ["inline", "side-by-side", "unified"],
+      "default": "inline"
+    },
+    "autoSaveInterval": {
+      "type": "integer",
+      "title": "Auto-save Interval (seconds)",
+      "description": "Interval in seconds for auto-saving versions (0 to disable)",
+      "default": 120,
+      "minimum": 0
+    },
+    "trackOutputs": {
+      "type": "boolean",
+      "title": "Track Cell Outputs",
+      "description": "Whether to track cell outputs in history",
+      "default": true
+    },
+    "historyViewer": {
+      "type": "object",
+      "title": "History Viewer Settings",
+      "properties": {
+        "showInSidebar": {
+          "type": "boolean",
+          "title": "Show in Sidebar",
+          "description": "Whether to show the history viewer in the sidebar",
+          "default": true
+        },
+        "sidebarPosition": {
+          "type": "string",
+          "title": "Sidebar Position",
+          "description": "Position of the history viewer in the sidebar",
+          "enum": ["left", "right"],
+          "default": "right"
+        },
+        "defaultView": {
+          "type": "string",
+          "title": "Default View",
+          "description": "Default view mode for the history viewer",
+          "enum": ["timeline", "list", "compact"],
+          "default": "timeline"
+        },
+        "showUserInfo": {
+          "type": "boolean",
+          "title": "Show User Information",
+          "description": "Whether to show user information for each change",
+          "default": true
+        },
+        "showTimestamps": {
+          "type": "boolean",
+          "title": "Show Timestamps",
+          "description": "Whether to show timestamps for each change",
+          "default": true
+        }
+      }
+    }
+  },
+  "additionalProperties": false,
+  "type": "object"
+}

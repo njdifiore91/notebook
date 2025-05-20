@@ -1,6 +1,61 @@
 :root {
+  /* Notebook layout variables */
   --jp-notebook-toolbar-margin-bottom: 20px;
   --jp-notebook-padding-offset: 20px;
 
   --jp-kernel-status-padding: 5px;
+
+  /* Collaboration: User presence variables */
+  --jp-collab-presence-avatar-size: 32px;
+
+  /* Collaboration: Cell lock overlay variables */
+  --jp-collab-lock-overlay-opacity: 0.15;
+  --jp-collab-lock-overlay-free: rgba(46, 204, 113, var(--jp-collab-lock-overlay-opacity));
+  --jp-collab-lock-overlay-locked: rgba(231, 76, 60, var(--jp-collab-lock-overlay-opacity));
+
+  /* Collaboration: Comment system variables */
+  --jp-collab-comment-badge-color: #3498db;
+  --jp-collab-comment-unresolved: #3498db;
+  --jp-collab-comment-resolved: #2ecc71;
+
+  /* Collaboration: User color palette variables */
+  --jp-collab-user-color-1: #3498db; /* Blue */
+  --jp-collab-user-color-2: #e74c3c; /* Red */
+  --jp-collab-user-color-3: #2ecc71; /* Green */
+  --jp-collab-user-color-4: #f39c12; /* Orange */
+  --jp-collab-user-color-5: #9b59b6; /* Purple */
+  --jp-collab-user-color-6: #1abc9c; /* Teal */
+  --jp-collab-user-color-7: #d35400; /* Dark Orange */
+  --jp-collab-user-color-8: #8e44ad; /* Violet */
+  --jp-collab-user-color-9: #27ae60; /* Dark Green */
+  --jp-collab-user-color-10: #2980b9; /* Dark Blue */
+  
+  /* Collaboration: User text color palette variables (high contrast for accessibility) */
+  --jp-collab-user-text-color-1: #ffffff;
+  --jp-collab-user-text-color-2: #ffffff;
+  --jp-collab-user-text-color-3: #ffffff;
+  --jp-collab-user-text-color-4: #ffffff;
+  --jp-collab-user-text-color-5: #ffffff;
+  --jp-collab-user-text-color-6: #ffffff;
+  --jp-collab-user-text-color-7: #ffffff;
+  --jp-collab-user-text-color-8: #ffffff;
+  --jp-collab-user-text-color-9: #ffffff;
+  --jp-collab-user-text-color-10: #ffffff;
+
+  /* Collaboration: Spacing tokens for components */
+  --jp-collab-spacing-xs: 4px;
+  --jp-collab-spacing-sm: 8px;
+  --jp-collab-spacing-md: 16px;
+  --jp-collab-spacing-lg: 24px;
+
+  /* Collaboration: Typography variables */
+  --jp-collab-font-size-xs: 11px;
+  --jp-collab-font-size-sm: 12px;
+  --jp-collab-font-size-md: 13px;
+  --jp-collab-font-size-lg: 14px;
+  --jp-collab-font-weight-normal: 400;
+  --jp-collab-font-weight-semibold: 600;
+  --jp-collab-line-height-tight: 16px;
+  --jp-collab-line-height-normal: 18px;
+  --jp-collab-line-height-relaxed: 20px;
 }

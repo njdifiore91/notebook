@@ -1,0 +1,243 @@
+{
+  "jupyter.lab.setting-icon": "notebook-ui-components:jupyter",
+  "jupyter.lab.setting-icon-label": "Jupyter Notebook Collaboration",
+  "title": "Jupyter Notebook Collaboration",
+  "description": "Jupyter Notebook real-time collaborative editing settings",
+  "properties": {
+    "collaborationEnabled": {
+      "type": "boolean",
+      "title": "Enable Collaboration",
+      "description": "Master toggle for all real-time collaborative editing features",
+      "default": true
+    },
+    "autoConnect": {
+      "type": "boolean",
+      "title": "Auto Connect",
+      "description": "Automatically connect to collaboration server when opening notebooks",
+      "default": true
+    },
+    "defaultRole": {
+      "type": "string",
+      "title": "Default Role",
+      "description": "Default role assigned to users joining collaborative sessions",
+      "enum": ["view-only", "commenter", "editor", "admin", "owner"],
+      "default": "editor"
+    },
+    "presence": {
+      "type": "object",
+      "title": "User Presence",
+      "description": "Settings for user presence awareness features",
+      "properties": {
+        "showCursors": {
+          "type": "boolean",
+          "title": "Show Remote Cursors",
+          "description": "Show other users' cursor positions in the notebook",
+          "default": true
+        },
+        "showSelections": {
+          "type": "boolean",
+          "title": "Show Remote Selections",
+          "description": "Show other users' text selections in the notebook",
+          "default": true
+        },
+        "showAvatars": {
+          "type": "boolean",
+          "title": "Show User Avatars",
+          "description": "Show user avatars in the collaboration bar",
+          "default": true
+        },
+        "showNames": {
+          "type": "boolean",
+          "title": "Show User Names",
+          "description": "Show user names in the collaboration bar",
+          "default": true
+        },
+        "cursorBlinkRate": {
+          "type": "integer",
+          "title": "Cursor Blink Rate",
+          "description": "Blink rate for remote cursors in milliseconds (0 to disable blinking)",
+          "default": 530,
+          "minimum": 0
+        },
+        "inactivityTimeout": {
+          "type": "integer",
+          "title": "Inactivity Timeout",
+          "description": "Time in seconds after which a user is considered inactive (0 to disable)",
+          "default": 300,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "cellLocking": {
+      "type": "object",
+      "title": "Cell Locking",
+      "description": "Settings for cell-level locking mechanism",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "title": "Enable Cell Locking",
+          "description": "Enable cell-level locking to prevent simultaneous editing",
+          "default": true
+        },
+        "autoLock": {
+          "type": "boolean",
+          "title": "Auto-Lock on Edit",
+          "description": "Automatically lock cells when editing begins",
+          "default": true
+        },
+        "lockTimeout": {
+          "type": "integer",
+          "title": "Lock Timeout",
+          "description": "Time in seconds after which an inactive lock is automatically released (0 to disable)",
+          "default": 300,
+          "minimum": 0
+        },
+        "showLockIndicators": {
+          "type": "boolean",
+          "title": "Show Lock Indicators",
+          "description": "Show visual indicators for locked cells",
+          "default": true
+        },
+        "allowAdminOverride": {
+          "type": "boolean",
+          "title": "Allow Admin Override",
+          "description": "Allow administrators to forcibly release locks",
+          "default": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "comments": {
+      "type": "object",
+      "title": "Comments",
+      "description": "Settings for cell comments and review system",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "title": "Enable Comments",
+          "description": "Enable comment and review system for notebook cells",
+          "default": true
+        },
+        "showIndicators": {
+          "type": "boolean",
+          "title": "Show Comment Indicators",
+          "description": "Show visual indicators for cells with comments",
+          "default": true
+        },
+        "allowMentions": {
+          "type": "boolean",
+          "title": "Allow @Mentions",
+          "description": "Allow @mentions of users in comments",
+          "default": true
+        },
+        "maxLength": {
+          "type": "integer",
+          "title": "Maximum Comment Length",
+          "description": "Maximum length of comments in characters",
+          "default": 1000,
+          "minimum": 100,
+          "maximum": 10000
+        }
+      },
+      "additionalProperties": false
+    },
+    "history": {
+      "type": "object",
+      "title": "Version History",
+      "description": "Settings for change history and versioning",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "title": "Enable Version History",
+          "description": "Enable change history tracking and versioning",
+          "default": true
+        },
+        "autoSaveInterval": {
+          "type": "integer",
+          "title": "Auto-Save Interval",
+          "description": "Time in seconds between automatic version snapshots (0 to disable)",
+          "default": 120,
+          "minimum": 0
+        },
+        "maxVersions": {
+          "type": "integer",
+          "title": "Maximum Versions",
+          "description": "Maximum number of versions to keep in history (0 for unlimited)",
+          "default": 50,
+          "minimum": 0
+        },
+        "showHistoryButton": {
+          "type": "boolean",
+          "title": "Show History Button",
+          "description": "Show version history button in the toolbar",
+          "default": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "statusBar": {
+      "type": "object",
+      "title": "Status Bar",
+      "description": "Settings for collaboration status indicators in the status bar",
+      "properties": {
+        "showCollaborationStatus": {
+          "type": "boolean",
+          "title": "Show Collaboration Status",
+          "description": "Show collaboration connection status in the status bar",
+          "default": true
+        },
+        "showActiveUsers": {
+          "type": "boolean",
+          "title": "Show Active Users",
+          "description": "Show number of active users in the status bar",
+          "default": true
+        },
+        "showUserList": {
+          "type": "boolean",
+          "title": "Show User List",
+          "description": "Show list of active users in the status bar",
+          "default": true
+        },
+        "condensedView": {
+          "type": "boolean",
+          "title": "Condensed View",
+          "description": "Use condensed view for collaboration status in the status bar",
+          "default": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "security": {
+      "type": "object",
+      "title": "Security",
+      "description": "Security settings for collaboration features",
+      "properties": {
+        "requireSecureWebSocket": {
+          "type": "boolean",
+          "title": "Require Secure WebSocket",
+          "description": "Require WSS (WebSocket Secure) for all collaboration connections",
+          "default": true
+        },
+        "sessionTimeout": {
+          "type": "integer",
+          "title": "Session Timeout",
+          "description": "Time in minutes after which inactive collaboration sessions are terminated (0 to disable)",
+          "default": 60,
+          "minimum": 0
+        },
+        "heartbeatInterval": {
+          "type": "integer",
+          "title": "Heartbeat Interval",
+          "description": "Time in seconds between WebSocket heartbeat messages",
+          "default": 30,
+          "minimum": 5,
+          "maximum": 300
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false,
+  "type": "object"
+}
