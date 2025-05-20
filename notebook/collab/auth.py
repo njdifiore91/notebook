@@ -1,908 +1,872 @@
 """Authentication and authorization for collaborative editing in Jupyter Notebook.
 
-This module provides classes and functions for authenticating users in collaborative
-sessions and enforcing permissions for collaborative actions. It integrates with
-JupyterHub for user identity and implements a permission model with different
-access levels (view, edit, comment, admin).
-
-Classes:
-    CollaborationRole: Enum defining possible roles for collaborative editing
-    CollaborationPermission: Represents a permission for a user or group on a notebook
-    CollaborationAction: Enum defining possible actions for collaborative operations
-    CollaborationAuthorizer: Authorizer that handles collaboration-specific permissions
-    CollaborationAuthConfig: Configuration for collaboration authentication and authorization
-
-Functions:
-    authorized_for_collaboration: Decorator for checking collaboration authorization
+This module implements authentication and authorization for collaborative editing
+in Jupyter Notebook. It provides integration with JupyterHub authentication,
+a permission model with different access levels (view, edit, comment, admin),
+and permission checking for collaborative operations.
 """
 
-from __future__ import annotations
-
-import enum
+import base64
 import hashlib
 import hmac
 import json
 import logging
 import os
 import time
-import typing as t
-from dataclasses import dataclass
+import uuid
 from datetime import datetime, timedelta
-from functools import wraps
-from urllib.parse import parse_qs, urlparse
+from enum import Enum
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 from jupyter_server.auth import Authorizer
 from jupyter_server.base.handlers import JupyterHandler
-from tornado import web
-from tornado.websocket import WebSocketHandler
-from traitlets import Bool, Dict, Enum, Float, Instance, Integer, Unicode, default
+from tornado.web import HTTPError
+from traitlets import Bool, Dict as TDict, Enum as TEnum, Integer, Unicode
 from traitlets.config import Configurable
 
 # Set up logging
 logger = logging.getLogger('notebook.collab.auth')
 
 
-class CollaborationRole(enum.Enum):
-    """Defines the possible roles for collaborative editing.
-    
-    Roles are hierarchical, with each role having all the permissions of the roles below it:
-    VIEWER < COMMENTER < EDITOR < ADMIN < OWNER
-    """
-    VIEWER = 'viewer'  # Can only view the notebook
-    COMMENTER = 'commenter'  # Can view and add comments
-    EDITOR = 'editor'  # Can edit cells and add comments
-    ADMIN = 'admin'  # Can edit and manage permissions
-    OWNER = 'owner'  # Full control including deletion
+class CollaborationPermission(str, Enum):
+    """Permissions for collaborative editing."""
+    VIEW = "view"  # Can view the notebook but not edit
+    COMMENT = "comment"  # Can add comments but not edit cells
+    EDIT = "edit"  # Can edit cells
+    LOCK = "lock"  # Can lock/unlock cells
+    ADMIN = "admin"  # Can manage permissions
+    FORCE_UNLOCK = "force-unlock"  # Can force unlock cells locked by others
+    VIEW_HISTORY = "view-history"  # Can view document history
+    REVERT_HISTORY = "revert-history"  # Can revert to previous versions
 
 
-@dataclass
-class CollaborationPermission:
-    """Represents a permission for a user or group on a notebook."""
-    notebook_id: str
-    user_id: str = ''  # Empty for group permissions
-    group_id: str = ''  # Empty for user permissions
-    role: CollaborationRole = CollaborationRole.VIEWER
-    created_at: datetime = None
-    updated_at: datetime = None
-
-    def __post_init__(self):
-        """Initialize timestamps if not provided."""
-        if self.created_at is None:
-            self.created_at = datetime.utcnow()
-        if self.updated_at is None:
-            self.updated_at = self.created_at
-
-    def to_dict(self) -> dict:
-        """Convert to dictionary for serialization."""
-        return {
-            'notebook_id': self.notebook_id,
-            'user_id': self.user_id,
-            'group_id': self.group_id,
-            'role': self.role.value,
-            'created_at': self.created_at.isoformat(),
-            'updated_at': self.updated_at.isoformat(),
-        }
-
-    @classmethod
-    def from_dict(cls, data: dict) -> CollaborationPermission:
-        """Create from dictionary after deserialization."""
-        role = CollaborationRole(data['role'])
-        created_at = datetime.fromisoformat(data['created_at'])
-        updated_at = datetime.fromisoformat(data['updated_at'])
-        return cls(
-            notebook_id=data['notebook_id'],
-            user_id=data['user_id'],
-            group_id=data['group_id'],
-            role=role,
-            created_at=created_at,
-            updated_at=updated_at,
-        )
+class CollaborationRole(str, Enum):
+    """Roles for collaborative editing."""
+    VIEWER = "viewer"  # Read-only access
+    COMMENTER = "commenter"  # Can comment but not edit
+    EDITOR = "editor"  # Can edit cells
+    ADMIN = "admin"  # Full control
+    OWNER = "owner"  # Owner of the notebook
 
 
-class CollaborationAction(enum.Enum):
-    """Defines the possible actions for collaborative operations.
+# Define permissions for each role
+ROLE_PERMISSIONS = {
+    CollaborationRole.VIEWER: {
+        CollaborationPermission.VIEW,
+        CollaborationPermission.VIEW_HISTORY,
+    },
+    CollaborationRole.COMMENTER: {
+        CollaborationPermission.VIEW,
+        CollaborationPermission.COMMENT,
+        CollaborationPermission.VIEW_HISTORY,
+    },
+    CollaborationRole.EDITOR: {
+        CollaborationPermission.VIEW,
+        CollaborationPermission.COMMENT,
+        CollaborationPermission.EDIT,
+        CollaborationPermission.LOCK,
+        CollaborationPermission.VIEW_HISTORY,
+    },
+    CollaborationRole.ADMIN: {
+        CollaborationPermission.VIEW,
+        CollaborationPermission.COMMENT,
+        CollaborationPermission.EDIT,
+        CollaborationPermission.LOCK,
+        CollaborationPermission.ADMIN,
+        CollaborationPermission.FORCE_UNLOCK,
+        CollaborationPermission.VIEW_HISTORY,
+        CollaborationPermission.REVERT_HISTORY,
+    },
+    CollaborationRole.OWNER: {
+        CollaborationPermission.VIEW,
+        CollaborationPermission.COMMENT,
+        CollaborationPermission.EDIT,
+        CollaborationPermission.LOCK,
+        CollaborationPermission.ADMIN,
+        CollaborationPermission.FORCE_UNLOCK,
+        CollaborationPermission.VIEW_HISTORY,
+        CollaborationPermission.REVERT_HISTORY,
+    },
+}
+
+
+class CollaborationAuthConfig(Configurable):
+    """Configuration for collaboration authentication and authorization."""
     
-    These actions are used for permission checking in the collaboration system.
-    Each action corresponds to a specific operation that can be performed in
-    a collaborative session.
+    # Default role for users without explicit permissions
+    default_role = TEnum(
+        default_value=CollaborationRole.VIEWER,
+        values=[role.value for role in CollaborationRole],
+        help="Default role for users without explicit permissions"
+    ).tag(config=True)
     
-    The actions are grouped by category:
-    - Session actions: Basic session operations
-    - Comment actions: Operations related to the comment system
-    - Lock actions: Operations related to cell locking
-    - History actions: Operations related to version history
-    - Permission actions: Operations related to permission management
-    """
-    # Session actions
-    JOIN = 'join'  # Join a collaborative session
-    LEAVE = 'leave'  # Leave a collaborative session
-    VIEW = 'view'  # View notebook content
-    EDIT = 'edit'  # Edit notebook content
+    # Whether to allow anonymous access
+    allow_anonymous = Bool(
+        default_value=False,
+        help="Whether to allow anonymous access to collaborative sessions"
+    ).tag(config=True)
     
-    # Comment actions
-    COMMENT_CREATE = 'comment:create'  # Create a new comment
-    COMMENT_EDIT = 'comment:edit'  # Edit an existing comment
-    COMMENT_DELETE = 'comment:delete'  # Delete a comment
-    COMMENT_RESOLVE = 'comment:resolve'  # Resolve a comment thread
+    # Role for anonymous users
+    anonymous_role = TEnum(
+        default_value=CollaborationRole.VIEWER,
+        values=[role.value for role in CollaborationRole],
+        help="Role for anonymous users if anonymous access is allowed"
+    ).tag(config=True)
     
-    # Lock actions
-    LOCK_ACQUIRE = 'lock:acquire'  # Acquire a cell lock
-    LOCK_RELEASE = 'lock:release'  # Release a cell lock
-    LOCK_FORCE_RELEASE = 'lock:force_release'  # Force release another user's lock
+    # Token expiration time in seconds (default: 24 hours)
+    token_expiration = Integer(
+        default_value=86400,
+        help="Collaboration token expiration time in seconds"
+    ).tag(config=True)
     
-    # History actions
-    HISTORY_VIEW = 'history:view'  # View version history
-    HISTORY_COMPARE = 'history:compare'  # Compare versions
-    HISTORY_REVERT = 'history:revert'  # Revert to a previous version
-    HISTORY_PRUNE = 'history:prune'  # Clean up history
+    # Secret for signing collaboration tokens
+    token_secret = Unicode(
+        help="Secret for signing collaboration tokens"
+    ).tag(config=True)
     
-    # Permission actions
-    PERMISSION_VIEW = 'permission:view'  # View permissions
-    PERMISSION_EDIT = 'permission:edit'  # Edit permissions
+    # Whether to require secure WebSocket connections (WSS)
+    require_wss = Bool(
+        default_value=True,
+        help="Whether to require secure WebSocket connections (WSS)"
+    ).tag(config=True)
+    
+    # JupyterHub scopes mapping to collaboration roles
+    jupyterhub_scope_mapping = TDict(
+        default_value={
+            "notebooks:read:{notebook_id}": CollaborationRole.VIEWER,
+            "notebooks:comment:{notebook_id}": CollaborationRole.COMMENTER,
+            "notebooks:write:{notebook_id}": CollaborationRole.EDITOR,
+            "notebooks:admin:{notebook_id}": CollaborationRole.ADMIN,
+            "notebooks:own:{notebook_id}": CollaborationRole.OWNER,
+        },
+        help="Mapping of JupyterHub scopes to collaboration roles"
+    ).tag(config=True)
+    
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        
+        # Generate a random token secret if not provided
+        if not self.token_secret:
+            self.token_secret = os.urandom(32).hex()
 
 
 class CollaborationAuthorizer(Authorizer):
-    """Authorizer that handles collaboration-specific permissions."""
+    """Authorizer for collaborative editing operations.
     
-    # Configuration for anonymous access
-    allow_anonymous = Bool(False, config=True,
-        help="Whether to allow anonymous access to collaborative sessions")
+    This class extends the Jupyter Server Authorizer to add support for
+    collaboration-specific permissions.
+    """
     
-    anonymous_role = Enum(
-        values=[role.value for role in CollaborationRole],
-        default_value=CollaborationRole.VIEWER.value,
-        config=True,
-        help="Default role for anonymous users if anonymous access is allowed"
-    )
-    
-    # Token configuration
-    token_secret = Unicode(config=True,
-        help="Secret key for signing collaboration tokens. If not set, a random one will be generated.")
-    
-    token_expiration = Float(86400.0, config=True,
-        help="Expiration time for collaboration tokens in seconds (default: 24 hours)")
-    
-    # Lock timeouts
-    lock_timeout = Integer(300, config=True,
-        help="Timeout for cell locks in seconds (default: 5 minutes)")
-    
-    # Permission cache timeout
-    permission_cache_timeout = Integer(60, config=True,
-        help="Timeout for permission cache in seconds (default: 1 minute)")
-    
-    # Permission store
-    permission_store = Instance('notebook.collab.store.CollaborationStore', allow_none=True)
-    
-    # In-memory cache for permissions
-    _permission_cache = Dict()
-    _permission_cache_timestamps = Dict()
-    
-    @default('token_secret')
-    def _default_token_secret(self):
-        """Generate a random token secret if none is provided."""
-        return os.urandom(32).hex()
-    
-    def is_authorized(self, handler: JupyterHandler, action: str, resource: str) -> bool:
-        """Check if the user is authorized for a standard Jupyter action.
+    def __init__(self, config=None):
+        super().__init__(config=config)
         
-        This extends the base Authorizer.is_authorized method to handle
-        collaboration-specific permissions.
+        # Configuration
+        self.config = CollaborationAuthConfig(config=config)
         
-        Args:
-            handler: The handler processing the request
-            action: The action being performed (e.g., 'read', 'write')
-            resource: The resource being accessed
-            
-        Returns:
-            bool: True if authorized, False otherwise
-        """
-        # First check standard authorization
-        if not super().is_authorized(handler, action, resource):
-            return False
-            
-        # If this is a collaboration action, check collaboration permissions
-        if action.startswith('notebook:collab:'):
-            collab_action = action.split(':', 2)[2]  # Extract the collaboration action
-            try:
-                return self.is_authorized_for_collaboration(
-                    handler, CollaborationAction(collab_action), resource
-                )
-            except ValueError:
-                # Invalid collaboration action
-                logger.warning(f"Invalid collaboration action: {collab_action}")
-                return False
-                
-        # Not a collaboration action, so standard authorization is sufficient
-        return True
+        # Permission cache
+        # Maps notebook_id -> {user_id: role}
+        self._permission_cache = {}
+        
+        # Token cache
+        # Maps token -> {user_id, notebook_id, expiration, role}
+        self._token_cache = {}
     
-    def is_authorized_for_collaboration(
-        self, handler: JupyterHandler, action: CollaborationAction, notebook_id: str
-    ) -> bool:
+    def is_authorized_for_collaboration(self, handler, action, notebook_id):
         """Check if the user is authorized for a collaboration action.
         
-        This is the main authorization method for collaboration actions.
-        It extracts the user ID from the handler, determines the user's role
-        for the specified notebook, and checks if that role allows the
-        requested action.
-        
-        This method is used by the authorized_for_collaboration decorator
-        to enforce permissions on handler methods.
-        
         Args:
-            handler: The handler processing the request
-            action: The collaboration action being performed
-            notebook_id: The ID of the notebook being accessed
+            handler: The request handler
+            action: The collaboration action
+            notebook_id: The notebook ID
             
         Returns:
             bool: True if authorized, False otherwise
         """
-        # Get user information
+        # Get the user ID
         user_id = self._get_user_id(handler)
-        if not user_id and not self.allow_anonymous:
-            logger.warning(f"Anonymous access denied for {action.value} on {notebook_id}")
+        
+        # Convert action to CollaborationPermission if it's a string
+        try:
+            permission = CollaborationPermission(action)
+        except ValueError:
+            logger.warning(f"Unknown collaboration permission: {action}")
             return False
-            
-        # Get user's role for this notebook
+        
+        # Get the user's role for this notebook
         role = self._get_user_role(user_id, notebook_id)
-        if role is None:
-            logger.warning(f"No role found for user {user_id} on notebook {notebook_id}")
-            return False
-            
-        # Check if the role allows the action
-        return self._is_action_allowed(role, action)
+        
+        # Check if the role has the required permission
+        return permission in ROLE_PERMISSIONS.get(role, set())
     
-    def validate_crdt_update(self, user_id: str, notebook_id: str, update: dict) -> bool:
+    def validate_crdt_update(self, user_id, notebook_id, update):
         """Validate if a CRDT update is allowed for the user.
         
-        This method checks if the user has permission to make the specific CRDT update.
-        The actual parsing of the Yjs update structure depends on the specific format
-        used by the Yjs implementation.
-        
         Args:
-            user_id: The ID of the user making the update
-            notebook_id: The ID of the notebook being updated
-            update: The CRDT update data
+            user_id: The user ID
+            notebook_id: The notebook ID
+            update: The CRDT update
             
         Returns:
             bool: True if the update is allowed, False otherwise
         """
-        # Get user's role for this notebook
+        # Get the user's role for this notebook
         role = self._get_user_role(user_id, notebook_id)
-        if role is None:
-            logger.warning(f"No role found for user {user_id} on notebook {notebook_id}")
-            return False
-            
-        # Viewers can't make any updates
-        if role == CollaborationRole.VIEWER:
-            return False
-            
-        # Commenters can only update comment-related data
-        if role == CollaborationRole.COMMENTER:
-            # Check if update only affects comments (implementation depends on CRDT structure)
-            # This is a simplified check - real implementation would need to parse the Yjs update
-            if 'comments' not in str(update):
-                return False
-                
-        # Editors, admins, and owners can make any updates
-        return True
+        
+        # Check if the user has edit permission
+        return CollaborationPermission.EDIT in ROLE_PERMISSIONS.get(role, set())
     
-    def check_lock_permission(
-        self, user_id: str, notebook_id: str, cell_id: str, action: CollaborationAction
-    ) -> bool:
-        """Check if user can acquire/release locks on cells.
+    def check_lock_permission(self, user_id, notebook_id, cell_id, action):
+        """Check if the user can perform a lock action on a cell.
         
         Args:
-            user_id: The ID of the user performing the lock action
-            notebook_id: The ID of the notebook containing the cell
-            cell_id: The ID of the cell being locked/unlocked
-            action: The lock action (LOCK_ACQUIRE, LOCK_RELEASE, LOCK_FORCE_RELEASE)
+            user_id: The user ID
+            notebook_id: The notebook ID
+            cell_id: The cell ID
+            action: The lock action ('lock', 'unlock', 'force-unlock')
             
         Returns:
-            bool: True if the lock action is allowed, False otherwise
+            bool: True if allowed, False otherwise
         """
-        # Get user's role for this notebook
+        # Get the user's role for this notebook
         role = self._get_user_role(user_id, notebook_id)
-        if role is None:
-            logger.warning(f"No role found for user {user_id} on notebook {notebook_id}")
+        
+        # Map action to permission
+        if action == 'lock' or action == 'unlock':
+            permission = CollaborationPermission.LOCK
+        elif action == 'force-unlock':
+            permission = CollaborationPermission.FORCE_UNLOCK
+        else:
+            logger.warning(f"Unknown lock action: {action}")
             return False
-            
-        # Check lock acquisition
-        if action == CollaborationAction.LOCK_ACQUIRE:
-            # Only editors, admins, and owners can acquire locks
-            return role in (
-                CollaborationRole.EDITOR,
-                CollaborationRole.ADMIN,
-                CollaborationRole.OWNER
-            )
-            
-        # Check lock release
-        elif action == CollaborationAction.LOCK_RELEASE:
-            # Anyone can release their own locks, which will be checked at the handler level
-            return True
-            
-        # Check force release (admin override)
-        elif action == CollaborationAction.LOCK_FORCE_RELEASE:
-            # Only admins and owners can force release locks
-            return role in (CollaborationRole.ADMIN, CollaborationRole.OWNER)
-            
-        # Unknown lock action
-        logger.warning(f"Unknown lock action: {action}")
-        return False
+        
+        # Check if the role has the required permission
+        return permission in ROLE_PERMISSIONS.get(role, set())
     
-    def create_collaboration_token(self, user_id: str, notebook_id: str) -> str:
-        """Create a signed token for WebSocket authentication.
-        
-        This method creates a secure token that can be used to authenticate
-        WebSocket connections for collaborative editing. The token includes
-        the user ID, notebook ID, and expiration time, and is signed with
-        the token_secret to prevent tampering.
-        
-        The token is base64-encoded and can be included in WebSocket requests
-        as described in extract_token_from_request().
+    def set_user_role(self, notebook_id, user_id, role):
+        """Set a user's role for a notebook.
         
         Args:
-            user_id: The ID of the user
-            notebook_id: The ID of the notebook
-            
-        Returns:
-            str: A signed token for WebSocket authentication
+            notebook_id: The notebook ID
+            user_id: The user ID
+            role: The role to set
         """
-        # Create token payload
-        now = int(time.time())
-        expiration = now + int(self.token_expiration)
-        payload = {
-            'user_id': user_id,
-            'notebook_id': notebook_id,
-            'iat': now,
-            'exp': expiration
-        }
+        # Convert role to CollaborationRole if it's a string
+        if isinstance(role, str):
+            try:
+                role = CollaborationRole(role)
+            except ValueError:
+                logger.warning(f"Invalid role: {role}")
+                return
         
-        # Convert payload to JSON string
-        payload_str = json.dumps(payload, sort_keys=True)
+        # Initialize notebook permissions if needed
+        if notebook_id not in self._permission_cache:
+            self._permission_cache[notebook_id] = {}
         
-        # Create signature
-        signature = hmac.new(
-            self.token_secret.encode(),
-            payload_str.encode(),
-            hashlib.sha256
-        ).hexdigest()
-        
-        # Combine payload and signature
-        token_data = {
-            'payload': payload,
-            'signature': signature
-        }
-        
-        # Return base64-encoded token
-        import base64
-        return base64.urlsafe_b64encode(json.dumps(token_data).encode()).decode()
+        # Set the user's role
+        self._permission_cache[notebook_id][user_id] = role
     
-    def validate_collaboration_token(self, token: str) -> t.Optional[dict]:
-        """Validate a collaboration token and return the payload if valid.
-        
-        This method validates a token created by create_collaboration_token().
-        It checks the signature to ensure the token hasn't been tampered with,
-        and verifies that the token hasn't expired.
-        
-        If the token is valid, the payload is returned, which includes:
-        - user_id: The ID of the user
-        - notebook_id: The ID of the notebook
-        - iat: The timestamp when the token was issued
-        - exp: The timestamp when the token expires
+    def get_user_role(self, notebook_id, user_id):
+        """Get a user's role for a notebook.
         
         Args:
-            token: The token to validate
+            notebook_id: The notebook ID
+            user_id: The user ID
             
         Returns:
-            Optional[dict]: The token payload if valid, None otherwise
+            Optional[CollaborationRole]: The user's role
         """
-        try:
-            # Decode token
-            import base64
-            token_data = json.loads(base64.urlsafe_b64decode(token).decode())
-            
-            # Extract payload and signature
-            payload = token_data['payload']
-            signature = token_data['signature']
-            
-            # Verify signature
-            payload_str = json.dumps(payload, sort_keys=True)
-            expected_signature = hmac.new(
-                self.token_secret.encode(),
-                payload_str.encode(),
-                hashlib.sha256
-            ).hexdigest()
-            
-            if not hmac.compare_digest(signature, expected_signature):
-                logger.warning("Invalid token signature")
-                return None
-                
-            # Check expiration
-            now = int(time.time())
-            if payload['exp'] < now:
-                logger.warning("Token expired")
-                return None
-                
-            # Token is valid
-            return payload
-        except Exception as e:
-            logger.warning(f"Error validating token: {e}")
-            return None
+        return self._get_user_role(user_id, notebook_id)
     
-    def extract_token_from_request(self, handler: WebSocketHandler) -> t.Optional[str]:
-        """Extract collaboration token from a WebSocket request.
-        
-        This method is used during WebSocket handshake to authenticate the connection.
-        The token can be provided in several ways:
-        1. In the Authorization header: 'Authorization: token <token>'
-        2. In a custom header: 'Jupyter-Collab-Token: <token>'
-        3. As a URL parameter: '?collab_token=<token>'
-        
-        The extracted token is then validated using validate_collaboration_token().
-        
-        Args:
-            handler: The WebSocket handler processing the request
-            
-        Returns:
-            Optional[str]: The token if found, None otherwise
-        """
-        # Check Authorization header
-        auth_header = handler.request.headers.get('Authorization', '')
-        if auth_header.startswith('token '):
-            return auth_header[6:]
-            
-        # Check custom header
-        custom_header = handler.request.headers.get('Jupyter-Collab-Token', '')
-        if custom_header:
-            return custom_header
-            
-        # Check URL parameters
-        query = urlparse(handler.request.uri).query
-        params = parse_qs(query)
-        if 'collab_token' in params and params['collab_token']:
-            return params['collab_token'][0]
-            
-        # No token found
-        return None
-    
-    def get_user_identity(self, handler: JupyterHandler) -> dict:
-        """Extract user identity information from the handler.
-        
-        This method extracts user information from the Jupyter handler,
-        including JupyterHub-specific information if available. The returned
-        information is used for user presence awareness in collaborative sessions.
-        
-        The returned dictionary includes:
-        - user_id: Unique identifier for the user
-        - username: Username for display
-        - display_name: Full name for display
-        - initials: Initials for avatar
-        - color: Consistent color for user highlighting
-        - is_anonymous: Whether the user is anonymous
-        - groups: List of group memberships (if available from JupyterHub)
-        - admin: Whether the user is an admin (if available from JupyterHub)
-        
-        Args:
-            handler: The handler processing the request
-            
-        Returns:
-            dict: User identity information
-        """
-        user_id = self._get_user_id(handler)
-        if not user_id:
-            # Anonymous user
-            return {
-                'user_id': '',
-                'username': 'anonymous',
-                'display_name': 'Anonymous User',
-                'initials': 'AU',
-                'color': '#808080',  # Gray for anonymous users
-                'is_anonymous': True
-            }
-            
-        # Get JupyterHub user info if available
-        hub_user = {}
-        if hasattr(handler, 'hub_auth') and handler.hub_auth.get_user(handler):
-            hub_user = handler.hub_auth.get_user(handler)
-            
-        # Extract username and display name
-        username = hub_user.get('name', user_id)
-        display_name = hub_user.get('display_name', username)
-        
-        # Generate initials from display name
-        initials = ''.join([name[0].upper() for name in display_name.split() if name])
-        if not initials and display_name:
-            initials = display_name[0].upper()
-        if not initials:
-            initials = username[0].upper() if username else 'U'
-            
-        # Generate a consistent color based on the user ID
-        color_hash = int(hashlib.md5(user_id.encode()).hexdigest(), 16)
-        # Use a predefined set of colors for better visibility and contrast
-        colors = [
-            '#F44336', '#E91E63', '#9C27B0', '#673AB7', '#3F51B5',
-            '#2196F3', '#03A9F4', '#00BCD4', '#009688', '#4CAF50',
-            '#8BC34A', '#CDDC39', '#FFEB3B', '#FFC107', '#FF9800',
-            '#FF5722', '#795548', '#9E9E9E', '#607D8B'
-        ]
-        color = colors[color_hash % len(colors)]
-        
-        return {
-            'user_id': user_id,
-            'username': username,
-            'display_name': display_name,
-            'initials': initials,
-            'color': color,
-            'is_anonymous': False,
-            # Include additional JupyterHub info if available
-            'groups': hub_user.get('groups', []),
-            'admin': hub_user.get('admin', False)
-        }
-    
-    def set_notebook_permission(
-        self, notebook_id: str, user_id: str, role: CollaborationRole, group_id: str = ''
-    ) -> bool:
-        """Set permission for a user or group on a notebook.
-        
-        This method creates or updates a permission for a user or group on a notebook.
-        It stores the permission in the permission_store and clears the cache for
-        the affected notebook.
-        
-        Either user_id or group_id must be provided, but not both. If both are provided,
-        user_id takes precedence.
-        
-        Args:
-            notebook_id: The ID of the notebook
-            user_id: The ID of the user (empty for group permissions)
-            role: The role to assign
-            group_id: The ID of the group (empty for user permissions)
-            
-        Returns:
-            bool: True if successful, False otherwise
-        """
-        if not self.permission_store:
-            logger.error("Permission store not available")
-            return False
-            
-        # Create or update permission
-        permission = CollaborationPermission(
-            notebook_id=notebook_id,
-            user_id=user_id,
-            group_id=group_id,
-            role=role,
-            updated_at=datetime.utcnow()
-        )
-        
-        # Store the permission
-        success = self.permission_store.set_permission(permission)
-        
-        # Clear cache for this notebook
-        self._clear_permission_cache(notebook_id)
-        
-        return success
-    
-    def get_notebook_permissions(self, notebook_id: str) -> list[CollaborationPermission]:
+    def get_notebook_permissions(self, notebook_id):
         """Get all permissions for a notebook.
         
         Args:
-            notebook_id: The ID of the notebook
+            notebook_id: The notebook ID
             
         Returns:
-            list[CollaborationPermission]: List of permissions
+            Dict[str, CollaborationRole]: Map of user IDs to roles
         """
-        if not self.permission_store:
-            logger.error("Permission store not available")
-            return []
-            
-        return self.permission_store.get_notebook_permissions(notebook_id)
+        return self._permission_cache.get(notebook_id, {}).copy()
     
-    def get_user_notebooks(self, user_id: str) -> list[str]:
-        """Get all notebooks a user has access to.
+    def remove_user_role(self, notebook_id, user_id):
+        """Remove a user's role for a notebook.
         
         Args:
-            user_id: The ID of the user
-            
-        Returns:
-            list[str]: List of notebook IDs
+            notebook_id: The notebook ID
+            user_id: The user ID
         """
-        if not self.permission_store:
-            logger.error("Permission store not available")
-            return []
-            
-        return self.permission_store.get_user_notebooks(user_id)
+        # Check if the notebook has any permissions set
+        if notebook_id not in self._permission_cache:
+            return
+        
+        # Remove the user's role
+        self._permission_cache[notebook_id].pop(user_id, None)
     
-    def delete_notebook_permission(
-        self, notebook_id: str, user_id: str = '', group_id: str = ''
-    ) -> bool:
-        """Delete a permission for a user or group on a notebook.
+    def clear_notebook_permissions(self, notebook_id):
+        """Clear all permissions for a notebook.
         
         Args:
-            notebook_id: The ID of the notebook
-            user_id: The ID of the user (empty for group permissions)
-            group_id: The ID of the group (empty for user permissions)
-            
-        Returns:
-            bool: True if successful, False otherwise
+            notebook_id: The notebook ID
         """
-        if not self.permission_store:
-            logger.error("Permission store not available")
-            return False
-            
-        # Delete the permission
-        success = self.permission_store.delete_permission(notebook_id, user_id, group_id)
-        
-        # Clear cache for this notebook
-        self._clear_permission_cache(notebook_id)
-        
-        return success
+        self._permission_cache.pop(notebook_id, None)
     
-    def _get_user_id(self, handler: JupyterHandler) -> str:
-        """Extract user ID from the handler.
+    def generate_collaboration_token(self, user_id, notebook_id, role=None, expiration=None):
+        """Generate a token for collaboration authentication.
         
         Args:
-            handler: The handler processing the request
+            user_id: The user ID
+            notebook_id: The notebook ID
+            role: Optional role override for this token
+            expiration: Optional expiration time in seconds
             
         Returns:
-            str: The user ID, or empty string for anonymous users
+            str: The generated token
         """
-        # Check if JupyterHub integration is available
-        if hasattr(handler, 'hub_auth') and handler.hub_auth.get_user(handler):
-            return handler.hub_auth.get_user(handler).get('name', '')
-            
-        # Fall back to the username from the handler
-        return getattr(handler, 'current_user', None) or ''
-    
-    def _get_user_role(self, user_id: str, notebook_id: str) -> t.Optional[CollaborationRole]:
-        """Get the role of a user for a notebook.
+        # Use default expiration if not provided
+        if expiration is None:
+            expiration = self.config.token_expiration
         
-        This method checks the cache first, then falls back to the permission store.
+        # Calculate expiration timestamp
+        expiration_time = time.time() + expiration
         
-        Args:
-            user_id: The ID of the user
-            notebook_id: The ID of the notebook
-            
-        Returns:
-            Optional[CollaborationRole]: The user's role, or None if not found
-        """
-        # Anonymous user handling
-        if not user_id:
-            return CollaborationRole(self.anonymous_role) if self.allow_anonymous else None
-            
-        # Check cache first
-        cache_key = f"{user_id}:{notebook_id}"
-        if cache_key in self._permission_cache:
-            # Check if cache is still valid
-            timestamp = self._permission_cache_timestamps.get(cache_key, 0)
-            if time.time() - timestamp < self.permission_cache_timeout:
-                return self._permission_cache[cache_key]
-            
-        # Cache miss or expired, check permission store
-        if not self.permission_store:
-            logger.error("Permission store not available")
-            return None
-            
-        # Get user's direct permissions
-        user_permission = self.permission_store.get_user_permission(user_id, notebook_id)
-        if user_permission:
-            # Cache the result
-            self._permission_cache[cache_key] = user_permission.role
-            self._permission_cache_timestamps[cache_key] = time.time()
-            return user_permission.role
-            
-        # Check group permissions if no direct permission
-        # This requires JupyterHub integration to get user groups
-        # For now, we'll return None if no direct permission is found
-        # TODO: Implement group permission checking
+        # Use the user's current role if not provided
+        if role is None:
+            role = self._get_user_role(user_id, notebook_id)
         
-        # No permission found
-        return None
-    
-    def _is_action_allowed(self, role: CollaborationRole, action: CollaborationAction) -> bool:
-        """Check if an action is allowed for a role.
-        
-        This method implements the permission matrix that defines which actions
-        are allowed for each role. The permissions are hierarchical, with each
-        role having all the permissions of the roles below it.
-        
-        The permission matrix is defined as follows:
-        - VIEWER: Can view the notebook and history, but cannot edit or comment
-        - COMMENTER: Can view and add/edit/resolve comments, but cannot edit cells
-        - EDITOR: Can view, comment, and edit cells, but cannot manage permissions
-        - ADMIN: Can do everything except delete the notebook
-        - OWNER: Has full control, including deletion
-        
-        Args:
-            role: The user's role
-            action: The action being performed
-            
-        Returns:
-            bool: True if the action is allowed, False otherwise
-        """
-        # Define permissions for each role
-        permissions = {
-            CollaborationRole.VIEWER: {
-                CollaborationAction.JOIN,
-                CollaborationAction.LEAVE,
-                CollaborationAction.VIEW,
-                CollaborationAction.HISTORY_VIEW,
-                CollaborationAction.HISTORY_COMPARE,
-            },
-            CollaborationRole.COMMENTER: {
-                CollaborationAction.JOIN,
-                CollaborationAction.LEAVE,
-                CollaborationAction.VIEW,
-                CollaborationAction.COMMENT_CREATE,
-                CollaborationAction.COMMENT_EDIT,  # Can edit own comments
-                CollaborationAction.COMMENT_DELETE,  # Can delete own comments
-                CollaborationAction.COMMENT_RESOLVE,  # Can resolve comments
-                CollaborationAction.HISTORY_VIEW,
-                CollaborationAction.HISTORY_COMPARE,
-            },
-            CollaborationRole.EDITOR: {
-                CollaborationAction.JOIN,
-                CollaborationAction.LEAVE,
-                CollaborationAction.VIEW,
-                CollaborationAction.EDIT,
-                CollaborationAction.COMMENT_CREATE,
-                CollaborationAction.COMMENT_EDIT,
-                CollaborationAction.COMMENT_DELETE,
-                CollaborationAction.COMMENT_RESOLVE,
-                CollaborationAction.LOCK_ACQUIRE,
-                CollaborationAction.LOCK_RELEASE,
-                CollaborationAction.HISTORY_VIEW,
-                CollaborationAction.HISTORY_COMPARE,
-                CollaborationAction.HISTORY_REVERT,
-            },
-            CollaborationRole.ADMIN: {
-                CollaborationAction.JOIN,
-                CollaborationAction.LEAVE,
-                CollaborationAction.VIEW,
-                CollaborationAction.EDIT,
-                CollaborationAction.COMMENT_CREATE,
-                CollaborationAction.COMMENT_EDIT,
-                CollaborationAction.COMMENT_DELETE,
-                CollaborationAction.COMMENT_RESOLVE,
-                CollaborationAction.LOCK_ACQUIRE,
-                CollaborationAction.LOCK_RELEASE,
-                CollaborationAction.LOCK_FORCE_RELEASE,
-                CollaborationAction.HISTORY_VIEW,
-                CollaborationAction.HISTORY_COMPARE,
-                CollaborationAction.HISTORY_REVERT,
-                CollaborationAction.HISTORY_PRUNE,
-                CollaborationAction.PERMISSION_VIEW,
-                CollaborationAction.PERMISSION_EDIT,
-            },
-            CollaborationRole.OWNER: {
-                # Owners can do everything
-                action for action in CollaborationAction
-            }
+        # Create token data
+        token_data = {
+            "user_id": user_id,
+            "notebook_id": notebook_id,
+            "role": role.value if isinstance(role, CollaborationRole) else role,
+            "expiration": expiration_time,
+            "created": time.time(),
+            "id": uuid.uuid4().hex
         }
         
-        # Check if the action is allowed for the role
-        return action in permissions.get(role, set())
+        # Generate token
+        token = self._create_signed_token(token_data)
+        
+        # Store in cache
+        self._token_cache[token] = token_data
+        
+        return token
     
-    def _clear_permission_cache(self, notebook_id: str = None):
-        """Clear the permission cache for a notebook or all notebooks.
+    def validate_collaboration_token(self, token, notebook_id=None):
+        """Validate a collaboration token.
         
         Args:
-            notebook_id: The ID of the notebook, or None to clear all
-        """
-        if notebook_id is None:
-            # Clear all cache
-            self._permission_cache = {}
-            self._permission_cache_timestamps = {}
-            return
+            token: The token to validate
+            notebook_id: Optional notebook ID to validate against
             
-        # Clear cache for specific notebook
-        keys_to_remove = []
-        for key in self._permission_cache:
-            if key.endswith(f":{notebook_id}"):
-                keys_to_remove.append(key)
+        Returns:
+            Optional[Dict[str, Any]]: Token data if valid, None otherwise
+        """
+        try:
+            # Check if token is in cache
+            if token in self._token_cache:
+                cached_token = self._token_cache[token]
                 
-        for key in keys_to_remove:
-            self._permission_cache.pop(key, None)
-            self._permission_cache_timestamps.pop(key, None)
+                # Check if the token has expired
+                if cached_token['expiration'] < time.time():
+                    # Remove expired token from cache
+                    self._token_cache.pop(token, None)
+                    return None
+                
+                # Check if notebook_id matches if provided
+                if notebook_id and cached_token['notebook_id'] != notebook_id:
+                    return None
+                
+                return cached_token
+            
+            # Decode and verify token
+            token_data = self._verify_signed_token(token)
+            if not token_data:
+                return None
+            
+            # Check if the token has expired
+            if token_data['expiration'] < time.time():
+                return None
+            
+            # Check if notebook_id matches if provided
+            if notebook_id and token_data['notebook_id'] != notebook_id:
+                return None
+            
+            # Store in cache for future validation
+            self._token_cache[token] = token_data
+            
+            return token_data
+            
+        except Exception as e:
+            logger.error(f"Error validating collaboration token: {e}")
+            return None
+    
+    def revoke_collaboration_token(self, token):
+        """Revoke a collaboration token.
+        
+        Args:
+            token: The token to revoke
+        """
+        self._token_cache.pop(token, None)
+    
+    def revoke_user_tokens(self, user_id):
+        """Revoke all tokens for a user.
+        
+        Args:
+            user_id: The user ID
+        """
+        tokens_to_revoke = [
+            token for token, data in self._token_cache.items()
+            if data['user_id'] == user_id
+        ]
+        
+        for token in tokens_to_revoke:
+            self._token_cache.pop(token, None)
+    
+    def revoke_notebook_tokens(self, notebook_id):
+        """Revoke all tokens for a notebook.
+        
+        Args:
+            notebook_id: The notebook ID
+        """
+        tokens_to_revoke = [
+            token for token, data in self._token_cache.items()
+            if data['notebook_id'] == notebook_id
+        ]
+        
+        for token in tokens_to_revoke:
+            self._token_cache.pop(token, None)
+    
+    def _get_user_role(self, user_id, notebook_id):
+        """Get a user's role for a notebook.
+        
+        Args:
+            user_id: The user ID
+            notebook_id: The notebook ID
+            
+        Returns:
+            CollaborationRole: The user's role
+        """
+        # Check if the user is anonymous
+        if user_id.startswith('anonymous-'):
+            if not self.config.allow_anonymous:
+                return CollaborationRole.VIEWER  # Default to viewer for anonymous users
+            return self.config.anonymous_role
+        
+        # Check if the user has an explicit role for this notebook
+        if notebook_id in self._permission_cache and user_id in self._permission_cache[notebook_id]:
+            return self._permission_cache[notebook_id][user_id]
+        
+        # Check if the user has a role from JupyterHub
+        jupyterhub_role = self._get_jupyterhub_role(user_id, notebook_id)
+        if jupyterhub_role:
+            return jupyterhub_role
+        
+        # Fall back to the default role
+        return self.config.default_role
+    
+    def _get_jupyterhub_role(self, user_id, notebook_id):
+        """Get a user's role from JupyterHub scopes.
+        
+        Args:
+            user_id: The user ID
+            notebook_id: The notebook ID
+            
+        Returns:
+            Optional[CollaborationRole]: The user's role from JupyterHub
+        """
+        # This method would integrate with JupyterHub to check user scopes
+        # For now, we'll just return None and rely on explicit permissions
+        # or the default role
+        
+        # In a real implementation, this would check JupyterHub scopes against
+        # the mapping in self.config.jupyterhub_scope_mapping
+        
+        # Example implementation:
+        # if hasattr(self.handler, 'hub_auth') and self.handler.hub_auth:
+        #     # Get user scopes from JupyterHub
+        #     scopes = self.handler.hub_auth.get_user_scopes(user_id)
+        #     
+        #     # Check scopes against mapping
+        #     for scope_template, mapped_role in self.config.jupyterhub_scope_mapping.items():
+        #         # Replace {notebook_id} with the actual notebook ID
+        #         scope = scope_template.replace('{notebook_id}', notebook_id)
+        #         
+        #         if scope in scopes:
+        #             try:
+        #                 return CollaborationRole(mapped_role)
+        #             except ValueError:
+        #                 pass
+        
+        return None
+    
+    def _get_user_id(self, handler):
+        """Get the user ID from a handler.
+        
+        Args:
+            handler: The request handler
+            
+        Returns:
+            str: The user ID
+        """
+        # Check if the handler has a current_user attribute
+        if hasattr(handler, 'current_user') and handler.current_user:
+            if hasattr(handler.current_user, 'name'):
+                return handler.current_user.name
+            return str(handler.current_user)
+        
+        # Generate an anonymous ID if no user is authenticated
+        return f"anonymous-{uuid.uuid4().hex[:8]}"
+    
+    def _create_signed_token(self, token_data):
+        """Create a signed token from token data.
+        
+        Args:
+            token_data: The token data to encode
+            
+        Returns:
+            str: The signed token
+        """
+        # Convert token data to JSON
+        token_json = json.dumps(token_data)
+        
+        # Encode token data
+        token_bytes = token_json.encode('utf-8')
+        token_b64 = base64.urlsafe_b64encode(token_bytes).decode('utf-8')
+        
+        # Create signature
+        signature = hmac.new(
+            self.config.token_secret.encode('utf-8'),
+            token_b64.encode('utf-8'),
+            hashlib.sha256
+        ).hexdigest()
+        
+        # Combine token and signature
+        return f"{token_b64}.{signature}"
+    
+    def _verify_signed_token(self, token):
+        """Verify a signed token and extract the token data.
+        
+        Args:
+            token: The signed token
+            
+        Returns:
+            Optional[Dict[str, Any]]: The token data if valid, None otherwise
+        """
+        try:
+            # Split token and signature
+            token_parts = token.split('.')
+            if len(token_parts) != 2:
+                return None
+            
+            token_b64, signature = token_parts
+            
+            # Verify signature
+            expected_signature = hmac.new(
+                self.config.token_secret.encode('utf-8'),
+                token_b64.encode('utf-8'),
+                hashlib.sha256
+            ).hexdigest()
+            
+            if signature != expected_signature:
+                return None
+            
+            # Decode token data
+            token_bytes = base64.urlsafe_b64decode(token_b64)
+            token_json = token_bytes.decode('utf-8')
+            token_data = json.loads(token_json)
+            
+            return token_data
+            
+        except Exception:
+            return None
 
 
-def authorized_for_collaboration(action: CollaborationAction):
-    """Decorator for checking collaboration authorization.
+class WebSocketAuthenticator:
+    """Authenticator for WebSocket connections.
     
-    This decorator can be used on handler methods to check if the user
-    is authorized for a specific collaboration action. It should be applied
-    to methods of handlers that process collaboration requests.
+    This class handles authentication for WebSocket connections used in
+    collaborative editing.
+    """
     
-    Example:
-        ```python
-        class CollaborationHandler(JupyterHandler):
-            @authorized_for_collaboration(CollaborationAction.EDIT)
-            async def post(self, notebook_id):
-                # Handle edit request
-                pass
-        ```
+    def __init__(self, handler, authorizer):
+        """Initialize the authenticator.
+        
+        Args:
+            handler: The WebSocket handler
+            authorizer: The collaboration authorizer
+        """
+        self.handler = handler
+        self.authorizer = authorizer
+    
+    def authenticate(self, notebook_id=None):
+        """Authenticate a WebSocket connection.
+        
+        Args:
+            notebook_id: Optional notebook ID to validate against
+            
+        Returns:
+            Tuple[bool, str, Dict[str, Any]]: 
+                - Whether authentication was successful
+                - Error message if authentication failed
+                - User information if authentication succeeded
+        """
+        # Check if the connection is secure (WSS)
+        if not self._is_secure_connection():
+            return False, "WebSocket connections must use WSS (secure WebSockets)", None
+        
+        # Try different authentication methods
+        
+        # 1. Cookie-based authentication
+        auth_result = self._authenticate_with_cookie(notebook_id)
+        if auth_result[0]:
+            return auth_result
+        
+        # 2. Header-based authentication
+        auth_result = self._authenticate_with_header(notebook_id)
+        if auth_result[0]:
+            return auth_result
+        
+        # 3. URL parameter authentication
+        auth_result = self._authenticate_with_url_param(notebook_id)
+        if auth_result[0]:
+            return auth_result
+        
+        # Authentication failed
+        return False, "Authentication required", None
+    
+    def _is_secure_connection(self):
+        """Check if the WebSocket connection is secure (WSS).
+        
+        Returns:
+            bool: True if secure, False otherwise
+        """
+        # Skip check if not required
+        if not self.authorizer.config.require_wss:
+            return True
+        
+        # Check if the connection is secure
+        return self.handler.request.protocol == 'https' or \
+               self.handler.request.headers.get('X-Forwarded-Proto') == 'https'
+    
+    def _authenticate_with_cookie(self, notebook_id):
+        """Authenticate using the session cookie.
+        
+        Args:
+            notebook_id: Optional notebook ID to validate against
+            
+        Returns:
+            Tuple[bool, str, Dict[str, Any]]: Authentication result
+        """
+        # Check if the handler has a current_user attribute
+        if hasattr(self.handler, 'current_user') and self.handler.current_user:
+            user_id = self.authorizer._get_user_id(self.handler)
+            
+            # Create user info
+            user_info = {
+                'id': user_id,
+                'name': user_id
+            }
+            
+            # Add additional user information if available
+            if hasattr(self.handler.current_user, 'name'):
+                user_info['name'] = self.handler.current_user.name
+            if hasattr(self.handler.current_user, 'email'):
+                user_info['email'] = self.handler.current_user.email
+            if hasattr(self.handler.current_user, 'avatar_url'):
+                user_info['avatar_url'] = self.handler.current_user.avatar_url
+            
+            # Check if the user is authorized for this notebook
+            if notebook_id:
+                user_id = user_info['id']
+                role = self.authorizer._get_user_role(user_id, notebook_id)
+                user_info['role'] = role.value
+            
+            return True, "", user_info
+        
+        return False, "No valid session cookie found", None
+    
+    def _authenticate_with_header(self, notebook_id):
+        """Authenticate using the Authorization header.
+        
+        Args:
+            notebook_id: Optional notebook ID to validate against
+            
+        Returns:
+            Tuple[bool, str, Dict[str, Any]]: Authentication result
+        """
+        # Check for Authorization header
+        auth_header = self.handler.request.headers.get('Authorization')
+        if auth_header and auth_header.startswith('token '):
+            token = auth_header[6:]
+            return self._validate_token(token, notebook_id)
+        
+        # Check for Jupyter-Collab-Token header
+        collab_token_header = self.handler.request.headers.get('Jupyter-Collab-Token')
+        if collab_token_header:
+            return self._validate_token(collab_token_header, notebook_id)
+        
+        return False, "No valid authorization header found", None
+    
+    def _authenticate_with_url_param(self, notebook_id):
+        """Authenticate using URL parameters.
+        
+        Args:
+            notebook_id: Optional notebook ID to validate against
+            
+        Returns:
+            Tuple[bool, str, Dict[str, Any]]: Authentication result
+        """
+        # Check for token parameter
+        token = self.handler.get_argument('token', None)
+        if token:
+            return self._validate_token(token, notebook_id)
+        
+        return False, "No token parameter found", None
+    
+    def _validate_token(self, token, notebook_id):
+        """Validate a token and extract user information.
+        
+        Args:
+            token: The token to validate
+            notebook_id: Optional notebook ID to validate against
+            
+        Returns:
+            Tuple[bool, str, Dict[str, Any]]: Authentication result
+        """
+        # Validate the token
+        token_data = self.authorizer.validate_collaboration_token(token, notebook_id)
+        if not token_data:
+            # Try validating as a Jupyter server token
+            # This would integrate with the Jupyter server's token authentication
+            # For now, we'll just return failure
+            return False, "Invalid token", None
+        
+        # Check if the token is for the requested notebook
+        request_notebook_id = self._get_notebook_id_from_request()
+        if request_notebook_id and request_notebook_id != notebook_id:
+            return False, "Token is not valid for this notebook", None
+        
+        # Create user info from token data
+        user_id = token_data['user_id']
+        user_info = {
+            'id': user_id,
+            'name': user_id,
+            'role': token_data.get('role', CollaborationRole.VIEWER.value)
+        }
+        
+        return True, "", user_info
+    
+    def _get_notebook_id_from_request(self):
+        """Extract the notebook ID from the request path.
+        
+        Returns:
+            Optional[str]: The notebook ID or None
+        """
+        # The path format is expected to be /api/collaboration/{notebook_id}
+        path_parts = self.handler.request.path.strip('/').split('/')
+        if len(path_parts) >= 3 and path_parts[1] == 'collaboration':
+            return path_parts[2]
+        return None
+
+
+class JupyterHubAuthIntegration:
+    """Integration with JupyterHub authentication.
+    
+    This class provides methods for integrating with JupyterHub authentication
+    and retrieving user information and scopes.
+    """
+    
+    @staticmethod
+    def get_hub_user(handler):
+        """Get JupyterHub user information from a handler.
+        
+        Args:
+            handler: The request handler
+            
+        Returns:
+            Optional[Dict[str, Any]]: User information or None
+        """
+        # Check if running under JupyterHub
+        if not hasattr(handler, 'hub_auth') or not handler.hub_auth:
+            return None
+        
+        # Get user information from JupyterHub
+        user_model = handler.hub_auth.get_user(handler)
+        if not user_model:
+            return None
+        
+        # Extract relevant user information
+        user_info = {
+            'id': user_model.get('name'),
+            'name': user_model.get('name'),
+        }
+        
+        # Add additional user information if available
+        if 'admin' in user_model:
+            user_info['admin'] = user_model['admin']
+        if 'groups' in user_model:
+            user_info['groups'] = user_model['groups']
+        
+        return user_info
+    
+    @staticmethod
+    def get_hub_scopes(handler, user_id):
+        """Get JupyterHub scopes for a user.
+        
+        Args:
+            handler: The request handler
+            user_id: The user ID
+            
+        Returns:
+            List[str]: List of scopes or empty list
+        """
+        # Check if running under JupyterHub
+        if not hasattr(handler, 'hub_auth') or not handler.hub_auth:
+            return []
+        
+        # This is a placeholder for actual JupyterHub scope retrieval
+        # In a real implementation, this would use the JupyterHub API to get scopes
+        # For now, we'll just return an empty list
+        
+        # Example implementation:
+        # try:
+        #     # Get scopes from JupyterHub API
+        #     response = await handler.hub_auth.api_request(
+        #         f'/users/{user_id}/scopes',
+        #         method='GET'
+        #     )
+        #     return response.get('scopes', [])
+        # except Exception as e:
+        #     logger.error(f"Error getting JupyterHub scopes: {e}")
+        #     return []
+        
+        return []
+    
+    @staticmethod
+    def is_running_under_jupyterhub(handler):
+        """Check if the application is running under JupyterHub.
+        
+        Args:
+            handler: The request handler
+            
+        Returns:
+            bool: True if running under JupyterHub, False otherwise
+        """
+        return hasattr(handler, 'hub_auth') and handler.hub_auth is not None
+
+
+def authenticate_websocket(handler, authorizer=None):
+    """Authenticate a WebSocket connection.
     
     Args:
-        action: The collaboration action to check
+        handler: The WebSocket handler
+        authorizer: Optional collaboration authorizer
         
     Returns:
-        callable: Decorator function
+        Tuple[bool, str, Dict[str, Any]]: 
+            - Whether authentication was successful
+            - Error message if authentication failed
+            - User information if authentication succeeded
     """
-    def decorator(method):
-        @wraps(method)
-        async def wrapper(self, notebook_id, *args, **kwargs):
-            # Get the authorizer
-            authorizer = self.settings.get('authorizer')
-            if not isinstance(authorizer, CollaborationAuthorizer):
-                raise web.HTTPError(500, "Collaboration authorizer not configured")
-                
-            # Check authorization
-            if not authorizer.is_authorized_for_collaboration(self, action, notebook_id):
-                raise web.HTTPError(403, f"Not authorized for {action.value} on {notebook_id}")
-                
-            # Call the original method
-            return await method(self, notebook_id, *args, **kwargs)
-        return wrapper
-    return decorator
-
-
-class CollaborationAuthConfig(Configurable):
-    """Configuration for collaboration authentication and authorization.
-    
-    This class provides configuration options for the collaboration authentication
-    and authorization system. It can be configured through the Jupyter configuration
-    system, either in jupyter_notebook_config.py or via command-line arguments.
-    
-    Example:
-        ```python
-        # In jupyter_notebook_config.py
-        c.CollaborationAuthConfig.allow_anonymous = True
-        c.CollaborationAuthConfig.anonymous_role = 'viewer'
-        c.CollaborationAuthConfig.token_expiration = 43200  # 12 hours
-        ```
-    """
-    
-    # JupyterHub integration
-    jupyterhub_integration = Bool(True, config=True,
-        help="Whether to integrate with JupyterHub for authentication")
-    
-    # Anonymous access
-    allow_anonymous = Bool(False, config=True,
-        help="Whether to allow anonymous access to collaborative sessions")
-    
-    anonymous_role = Enum(
-        values=[role.value for role in CollaborationRole],
-        default_value=CollaborationRole.VIEWER.value,
-        config=True,
-        help="Default role for anonymous users if anonymous access is allowed"
-    )
-    
-    # Default owner role assignment
-    default_owner_assignment = Bool(True, config=True,
-        help="Whether to automatically assign owner role to the creator of a notebook")
-    
-    # Token configuration
-    token_secret = Unicode(config=True,
-        help="Secret key for signing collaboration tokens. If not set, a random one will be generated.")
-    
-    token_expiration = Float(86400.0, config=True,
-        help="Expiration time for collaboration tokens in seconds (default: 24 hours)")
-    
-    # WebSocket security
-    require_wss = Bool(True, config=True,
-        help="Whether to require WSS (WebSocket Secure) for collaboration connections")
-    
-    # Session timeouts
-    session_timeout = Integer(3600, config=True,
-        help="Timeout for inactive collaboration sessions in seconds (default: 1 hour)")
-    
-    # Lock timeouts
-    lock_timeout = Integer(300, config=True,
-        help="Timeout for cell locks in seconds (default: 5 minutes)")
-    
-    # Permission cache timeout
-    permission_cache_timeout = Integer(60, config=True,
-        help="Timeout for permission cache in seconds (default: 1 minute)")
-    
-    @default('token_secret')
-    def _default_token_secret(self):
-        """Generate a random token secret if none is provided."""
-        return os.urandom(32).hex()
+    authenticator = WebSocketAuthenticator(handler, authorizer or CollaborationAuthorizer())
+    return authenticator.authenticate()
